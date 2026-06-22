@@ -35,7 +35,12 @@ if (-not $qemu) { throw "QEMU nao encontrado. Rode .\setup.ps1" }
 # Modulos a carregar. Default = os exemplos compilados em build\.
 if (-not $Modules -or $Modules.Count -eq 0) {
     $Modules = @()
-    foreach ($d in 'test.exe', 'mydriver.sys') {
+    # Ordem: DLLs (sob demanda), depois DRIVERS (criam dispositivos), depois APPS.
+    foreach ($d in 'ntdll.dll', 'kernel32.dll', 'user32.dll', 'gdi32.dll', 'advapi32.dll',
+                    'ioctldriver.sys', 'mydriver.sys', 'calller.sys',
+                    'test.exe', 'ioctlapp.exe',
+                    'conhello.exe', 'test32.exe', 'sysinfo.exe', 'pipeserver.exe', 'pipeclient.exe',
+                    'cmd.exe', 'guiapp.exe', 'desktop.exe') {
         $p = Join-Path $build $d
         if (Test-Path $p) { $Modules += $p }
     }
@@ -56,7 +61,8 @@ foreach ($m in $Modules) {
 $initrd = $names -join ','
 
 # Rodamos com cwd = build\, entao usamos nomes relativos (sem espacos).
-$qargs = @('-kernel', 'kernel.bin', '-m', '256', '-no-reboot', '-serial', 'stdio')
+$qargs = @('-kernel', 'kernel.bin', '-m', '256', '-no-reboot', '-serial', 'stdio',
+           '-cpu', 'qemu64,-hypervisor,vendor=GenuineIntel')
 if ($initrd)   { $qargs += @('-initrd', $initrd) }
 if ($Headless) { $qargs += @('-display', 'none') }
 

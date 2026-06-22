@@ -106,6 +106,9 @@ ISR_NOERR 31
 %assign irqn irqn+1
 %endrep
 
+; ---- Syscall: vetor 0x80 (128), invocavel do ring 3 (gate DPL=3) ----
+ISR_NOERR 128
+
 ; ---- Tabela com os 48 enderecos (usada pela idt.c) ----
 section .rodata
 global isr_stub_table

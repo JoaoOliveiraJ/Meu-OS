@@ -10,7 +10,19 @@ __declspec(dllimport) int  MessageBoxA(void* hWnd, const char* text,
                                        const char* caption, unsigned int type);
 __declspec(dllimport) void ExitProcess(unsigned int code);
 
+// Process Manager (Win32). Demonstra NtCreateProcess/NtCreateThread/Wait via
+// CreateProcessA + WaitForSingleObject, partindo de ring 3.
+__declspec(dllimport) int  CreateProcessA(const char* app, char* cmdline, void* pa, void* ta,
+        int inherit, unsigned flags, void* env, const char* cwd, void* si, void* pi);
+__declspec(dllimport) unsigned WaitForSingleObject(void* handle, unsigned timeout_ms);
+
 void _start(void) {
+    // Cria um processo "filho" (objeto EPROCESS) e espera por ele. Mostra o
+    // caminho ring3 -> kernel32 -> ntdll -> int 0x80 -> Process Manager.
+    void* pi[4] = { 0, 0, 0, 0 };   // [0]=hProcess [1]=hThread
+    if (CreateProcessA("worker.exe", 0, 0, 0, 0, 0, 0, 0, 0, pi))
+        WaitForSingleObject(pi[0], 0xFFFFFFFFu);
+
     MessageBoxA(0,
         "Sou um .EXE do Windows rodando no MeuOS, chamando a Win32 nativa!",
         "MeuOS  -  Pinball (teste do loader PE)", 0);

@@ -1,9 +1,5 @@
 #pragma once
-#include <stdint.h>
 
-// Resolve um import (por nome) de um .exe Windows para a nossa implementacao.
-void* win32_resolve(const char* dll, const char* fn);
-void* win32_resolve_ordinal(const char* dll, uint16_t ordinal);
-
-// Buffer de retorno usado por ExitProcess para voltar ao kernel (setjmp).
-extern void* g_pe_exit[5];
+// Servicos Win32 do lado KERNEL (ring 0), chamados pelo despacho de syscalls.
+// No NT seria a parte de kernel do subsistema Win32 (win32k.sys).
+void win32k_messagebox(const char* text, const char* caption);

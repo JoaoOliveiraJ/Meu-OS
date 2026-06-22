@@ -54,6 +54,9 @@ enum {
     SYS_QUERYDIRECTORYFILE = 44,
     // --- FASE 5: info de volume (rotulo/serial/tamanho/fs name). Numero novo >=45. ---
     SYS_QUERYVOLUMEINFORMATION = 45,
+    // --- FASE 11: cursor do mouse (le/ajusta posicao). ---
+    SYS_USERGETCURSORPOS = 46,
+    SYS_USERSETCURSORPOS = 47,
 };
 
 // "Console device": handles padrao do Win32 (GetStdHandle). Sao pseudo-handles
@@ -907,6 +910,27 @@ static void sys_gdi_textoutex(struct regs* r) {
                                         (int)r->r8, (uint32_t)r->r9, /*bg*/0xFF);
 }
 
+// ============================================================================
+//  FASE 11 — Cursor do mouse.
+// ============================================================================
+// Layout do POINT no win32 (compativel com o que apps usam pra GetCursorPos).
+typedef struct _MEUOS_POINT { int32_t x, y; } MEUOS_POINT;
+
+// NtUserGetCursorPos(POINT* out) -> 1 se preencheu, 0 senao. RAX = NTSTATUS-like.
+static void sys_user_getcursorpos(struct regs* r) {
+    MEUOS_POINT* out = (MEUOS_POINT*)(uintptr_t)r->rdi;
+    if (!out) { r->rax = 0; return; }
+    out->x = win32k_cursor_x();
+    out->y = win32k_cursor_y();
+    r->rax = 1;
+}
+
+// NtUserSetCursorPos(int x, int y) -> 1.
+static void sys_user_setcursorpos(struct regs* r) {
+    win32k_set_cursor((int32_t)(int)r->rdi, (int32_t)(int)r->rsi);
+    r->rax = 1;
+}
+
 // ---- SSDT: tabela central de serviços ----
 typedef void (*syscall_fn)(struct regs*);
 static syscall_fn s_ssdt[] = {
@@ -956,6 +980,8 @@ static syscall_fn s_ssdt[] = {
     sys_gdi_textoutex,          // 43
     sys_querydirectoryfile,     // 44
     sys_queryvolumeinformation, // 45
+    sys_user_getcursorpos,      // 46 (FASE 11)
+    sys_user_setcursorpos,      // 47 (FASE 11)
 };
 #define SSDT_COUNT (sizeof(s_ssdt) / sizeof(s_ssdt[0]))
 

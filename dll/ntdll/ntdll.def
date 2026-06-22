@@ -45,6 +45,8 @@ NtUserGetDC
 NtUserInvalidate
 NtUserSetFocus
 NtUserPostKey
+NtUserGetCursorPos
+NtUserSetCursorPos
 NtGdiGetStockObject
 NtGdiCreateSolidBrush
 NtGdiTextOut

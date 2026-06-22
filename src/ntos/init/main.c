@@ -6,6 +6,7 @@
 #include "display/VirtioGpu/VirtioGpu.h"
 #include "serial/serial.h"
 #include "input/keyboard.h"
+#include "input/mouse/mouse.h"   // FASE 11: driver PS/2 do mouse (IRQ12)
 #include "ke/amd64/gdt.h"
 #include "ke/amd64/idt.h"
 #include "ke/amd64/pic.h"
@@ -28,6 +29,16 @@
 #include "win32/win32k.h"
 #include "dx/dxgkrnl/dxgkrnl.h"   // dxgkrnl: dispatcher DirectX em kernel
 #include "dx/dxgmms/dxgmms.h"     // dxgmms : memory manager de video (residency)
+#include "audio/HDAudio/HDAudio.h" // FASE 11: HD Audio stub (so deteccao PCI)
+#include "network/ndis/ndis.h"     // FASE 12: NDIS framework (kernel)
+#include "network/tcpip/tcpip.h"   // FASE 12: TCP/IP stack (kernel)
+#include "network/e1000/e1000.h"   // FASE 12: Intel 8254x NIC stub
+#include "usb/usbport/usbport.h"   // FASE 13: USB Port framework
+#include "usb/usbhub/usbhub.h"     // FASE 13: USB Hub class driver
+#include "usb/xhci/xhci.h"         // FASE 13: xHCI/EHCI/OHCI/UHCI host controller stub
+#include "acpi/acpi.h"             // FASE 13: ACPI stub (RSDP scan)
+#include "fltmgr/fltmgr.h"         // FASE 13: Filter Manager
+#include "io/pnp.h"                // FASE 13: PnP Manager (IRP_MJ_PNP)
 
 // FS layer (ntfs_fs.c): device de volume registrado no I/O Manager.
 PDEVICE_OBJECT ntfs_fs_volume_device(void);
@@ -699,6 +710,45 @@ void kmain(uint32_t mb_info) {
     DxgMmsInitialize();
     kputs("[ok] DX: dxgkrnl + dxgmms inicializados (adapter primario pronto)\n");
 
+    // --- FASE 11 (audio stack) — HD Audio stub: enumera PCI procurando o
+    // controlador de audio (class=0x04 subclass=0x03/0x01). Sem PCM real
+    // (sem DMA / CORB/RIRB nesta fase), apenas LOGA o achado. As DLLs ring 3
+    // do stack (mmdevapi/Audioses/dsound/winmm) coexistem com este stub: o
+    // caminho UMD nao chama o KMD, entao apps WASAPI/DirectSound/PlaySound
+    // funcionam ABI-wise mesmo sem hardware acelerado.
+    hda_init();
+    kputs("[ok] FASE 11: HD Audio detection (stack ring 3 mmdevapi/audioses/dsound/winmm tambem disponivel)\n");
+
+    // --- FASE 12 (network stack) — NDIS + TCPIP + E1000 stub ----------------
+    // Espelha o stack de rede Windows 10/11:
+    //   ndis.sys    — framework (registro de miniport/protocol drivers)
+    //   tcpip.sys   — protocolo IP/TCP/UDP (cria \Device\{Tcp,Udp,Ip,RawIp})
+    //   e1000.sys   — driver Intel 8254x (detection PCI; sem MMIO)
+    // Sem socket real (rede vazia): apps que importam ws2_32.dll abrem
+    // sockets fake; recv() devolve 0 bytes. send() simula sucesso "no vazio".
+    ndis_init();
+    tcpip_init();
+    e1000_init();
+    kputs("[ok] FASE 12: NDIS + TCPIP + E1000 (stack ring 3 ws2_32.dll tambem disponivel)\n");
+
+    // --- FASE 13 (4 subsistemas adicionais) — USB / ACPI / PnP / FltMgr ------
+    // Espelha em miniatura 4 pilares do kernel Windows 10/11:
+    //   usbport.sys + usbhub.sys + xhci.sys : USB host controller stack
+    //   acpi.sys                            : ACPI tables (apenas RSDP scan)
+    //   pnp manager                         : IRP_MJ_PNP dispatcher canonico
+    //   fltmgr.sys                          : Filter Manager (minifilter framework)
+    // Todos sao stubs (sem URBs reais, sem AML, sem QUERY_RELATIONS produzindo
+    // arvores, sem interceptacao real de IRPs). O objetivo desta fase e expor
+    // o ABI completo para que drivers que dependem desses simbolos carreguem
+    // sem missing import, e logar o init de cada subsistema na serial.
+    usbport_init();
+    xhci_init();
+    usbhub_init();
+    acpi_init();
+    pnp_init();
+    fltmgr_init();
+    kputs("[ok] FASE 13: USB (usbport+usbhub+xhci) + ACPI + PnP + FltMgr\n");
+
     // --- FASE 2 (HAL disco): IDE ATA PIO + teste de leitura do MBR/NTFS ---
     // Identifica o disco (se anexado via -Disk), le o setor 0 (MBR) e o boot
     // sector da particao NTFS, confirmando a assinatura "NTFS    " (regra 4).
@@ -734,6 +784,26 @@ void kmain(uint32_t mb_info) {
 
     win32k_init();          // fb_init e feito sob demanda (lazy) no 1o desenho
     kputs("[ok] win32k: window manager + filas de mensagens + GDI\n");
+
+    // FASE 11 — driver PS/2 do mouse (IRQ12). DEPOIS de win32k_init (usa
+    // win32k_screen_width para posicionar o cursor) e DEPOIS da remap do PIC
+    // (pic_remap ja rodou). mouse_init desmascara IRQ12 + cascade IRQ2 e
+    // habilita o stream mode no dispositivo aux do i8042.
+    mouse_init();
+    kputs("[ok] FASE 11: mouse PS/2 (IRQ12) + cursor sprite + WM_MOUSE* routing\n");
+
+    // FASE 11 — smoke test sintetico do roteamento de eventos de mouse. Em
+    // headless o QEMU nao injeta IRQ12 sem display interativo, entao para
+    // comprovar que win32k_on_mouse_event + sprite + hit-test + WM_* funcionam
+    // ponta a ponta, simulamos AQUI 3 eventos: 2 movimentos + 1 clique. Isto
+    // tambem cobre NtUserGet/SetCursorPos indiretamente (via os getters).
+    kputs("\n--- FASE 11: smoke test sintetico do roteamento do mouse ---\n");
+    win32k_on_mouse_event(50, 40, 0);   // move +50,+40
+    win32k_on_mouse_event(-20, -10, 0); // move -20,-10
+    win32k_on_mouse_event(0, 0, 1);     // click L button down
+    win32k_on_mouse_event(0, 0, 0);     // click L button up
+    kputs("[mouse] smoke test: cursor final em ("); kput_dec((uint64_t)win32k_cursor_x());
+    kputc(','); kput_dec((uint64_t)win32k_cursor_y()); kputs(")\n");
 
     // --- Carrega os binarios Windows passados pelo boot (modulos Multiboot) ---
     // Nada e hardcoded: roda QUALQUER PE passado. Detecta pelo Subsystem:

@@ -1,0 +1,36 @@
+; secur32.def — SSPI + LSA Logon API do MeuOS (RODADA FINAL).
+LIBRARY secur32.dll
+EXPORTS
+; --- SSPI: enumeracao de pacotes ---
+EnumerateSecurityPackagesA
+QuerySecurityPackageInfoA
+FreeContextBuffer
+; --- SSPI: credenciais ---
+AcquireCredentialsHandleA
+AcquireCredentialsHandleW
+FreeCredentialsHandle
+; --- SSPI: contexto / handshake ---
+InitializeSecurityContextA
+InitializeSecurityContextW
+AcceptSecurityContext
+DeleteSecurityContext
+CompleteAuthToken
+ApplyControlToken
+ImpersonateSecurityContext
+RevertSecurityContext
+; --- SSPI: atributos ---
+QueryContextAttributesA
+QueryContextAttributesW
+; --- SSPI: mensagens (wrap/unwrap/sign/verify) ---
+EncryptMessage
+DecryptMessage
+MakeSignature
+VerifySignature
+; --- LSA Logon API ---
+LsaConnectUntrusted
+LsaRegisterLogonProcess
+LsaLookupAuthenticationPackage
+LsaCallAuthenticationPackage
+LsaDeregisterLogonProcess
+LsaFreeReturnBuffer
+LsaLogonUser

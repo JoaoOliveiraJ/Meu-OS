@@ -44,6 +44,14 @@
 #define TBBTN_INACTIVE   FB_DARK_GRAY
 
 // ============================================================================
+//  FASE 12 — Forward declarations da SHELL Windows 10. As DEFINICOES vivem em
+//  win32kshell.c (incluido por win32k.c apos win32kbase.c e win32kfull.c).
+//  Como tudo termina no mesmo translation unit, basta declarar aqui.
+// ============================================================================
+void win32k_shell_compose(void);
+int  win32k_shell_on_mouse(int x, int y, uint32_t buttons, uint32_t prev_buttons);
+
+// ============================================================================
 //  FASE 9.2 — Backend de pixels do win32k (GPU 32 bpp OU VGA mode13h 8 bpp).
 //
 //  O Window Manager mantem a mesma logica (HWND, z-order, fila de mensagens):
@@ -65,6 +73,11 @@ static int w32k_use_gpu(void) { return gpu_active(); }
 
 static int scr_width(void)  { return w32k_use_gpu() ? (int)gpu_width()  : FB_WIDTH;  }
 static int scr_height(void) { return w32k_use_gpu() ? (int)gpu_height() : FB_HEIGHT; }
+
+// FASE 11 — Resolucao publica do backend ativo (usada pelo driver de mouse
+// para inicializar o cursor no centro da tela).
+int win32k_screen_width(void)  { return scr_width(); }
+int win32k_screen_height(void) { return scr_height(); }
 
 static void w32k_clear(uint8_t color8) {
     if (w32k_use_gpu()) gpu_clear(palette_8_to_32(color8));
@@ -152,6 +165,13 @@ static int      s_next_z  = 1;
 static uint32_t s_focus_id;        // janela com foco (recebe o teclado)
 static int      s_was_active;      // 1 se a GUI ja compos a tela alguma vez
                                    //   (mantem o framebuffer no estado da GUI)
+
+// FASE 11 — Cursor do mouse. Atualizado por win32k_on_mouse_event (chamado
+// pela IRQ12 do PS/2). NtUserGetCursorPos/SetCursorPos leem/escrevem aqui.
+static int32_t  s_cursor_x = 160;
+static int32_t  s_cursor_y = 100;
+static uint32_t s_cursor_buttons = 0;  // estado anterior dos botoes (p/ detectar mudancas)
+static int      s_cursor_initialized = 0;
 
 // Classes registradas (so o nome; o wndproc real fica no user32 em ring 3).
 typedef struct _WNDCLASS_K { int used; char name[32]; void* wndProc; } WNDCLASS_K;
@@ -340,6 +360,57 @@ static void draw_taskbar(void) {
     kputc('\n');
 }
 
+// ============================================================================
+//  FASE 11 — Sprite do cursor (12x16 px, seta classica do NT).
+//
+//  Bitmap 12x16: 'X' = preto (corpo da seta), '.' = branco (borda), ' ' = nao
+//  desenhar (transparente). A seta aponta para cima/esquerda (canto sup-esq),
+//  como nos cursores classicos do Windows. O hotspot e (0,0).
+// ============================================================================
+static const char* s_cursor_bitmap[16] = {
+    "X           ",
+    "XX          ",
+    "X.X         ",
+    "X..X        ",
+    "X...X       ",
+    "X....X      ",
+    "X.....X     ",
+    "X......X    ",
+    "X.......X   ",
+    "X........X  ",
+    "X.....XXXXX ",
+    "X..X..X     ",
+    "X.X X..X    ",
+    "XX  X..X    ",
+    "X    X..X   ",
+    "      XX    "
+};
+
+static void draw_cursor_sprite(void) {
+    int cx = (int)s_cursor_x;
+    int cy = (int)s_cursor_y;
+    if (cx < 0 || cy < 0) return;
+    int SW = scr_width();
+    int SH = scr_height();
+    if (cx >= SW || cy >= SH) return;
+
+    // Cores: preto p/ corpo, branco p/ borda. Funciona nos dois backends (a
+    // funcao w32k_fill_rect com 1x1 px equivale a um pixel via paleta -> 32bpp).
+    for (int row = 0; row < 16; row++) {
+        const char* line = s_cursor_bitmap[row];
+        for (int col = 0; col < 12; col++) {
+            char c = line[col];
+            if (c == ' ') continue;
+            int px = cx + col;
+            int py = cy + row;
+            if (px < 0 || py < 0 || px >= SW || py >= SH) continue;
+            uint8_t color = (c == 'X') ? FB_BLACK : FB_WHITE;
+            // Pixel unico via w32k_fill_rect 1x1 (uniforme nos dois backends).
+            w32k_fill_rect(px, py, 1, 1, color);
+        }
+    }
+}
+
 void win32k_compose(void) {
     ensure_fb();
     // Backend GPU OU mode13h precisa estar ativo.
@@ -372,6 +443,16 @@ void win32k_compose(void) {
 
     // Barra de tarefas SEMPRE por cima de tudo (se ha alguma janela "normal").
     if (count_taskbar_windows() > 0) draw_taskbar();
+
+    // FASE 12 — SHELL Windows 10: repinta wallpaper Win10, chrome com
+    // [_][[]][X], taskbar 40px, start button, clock, popup do start menu.
+    // Vem APOS draw_taskbar (sobrescreve o cinza do BASE) e ANTES do cursor.
+    win32k_shell_compose();
+
+    // FASE 11 — Sprite do cursor por cima de tudo (apos taskbar+shell).
+    // Desenhado apenas se ja houve algum evento de mouse (cursor inicializado),
+    // para nao poluir as composicoes anteriores ao init do PS/2.
+    if (s_cursor_initialized) draw_cursor_sprite();
 
     // FASE 10.4 — Apos cada compose, "apresenta" o frame ao display. Em
     // virtio-gpu isso envia TRANSFER_TO_HOST_2D + RESOURCE_FLUSH para o host
@@ -610,6 +691,144 @@ void win32k_on_key(char ascii, uint8_t scancode) {
     kputs(": WM_KEYDOWN(sc="); kput_hex(scancode); kputs(")");
     if (ascii) { kputs(" + WM_CHAR('"); kputc(ascii); kputs("')"); }
     kputc('\n');
+}
+
+// ============================================================================
+//  FASE 11 — Entrada: mouse (IRQ12) -> janela debaixo do cursor.
+//
+//  Hit-test: percorre as janelas do topo do z-order pra baixo e devolve a
+//  primeira que contem o ponto. Janelas WNDF_DESKTOP entram no hit-test
+//  (papel de parede recebe WM_MOUSEMOVE quando o cursor passa por cima dele).
+// ============================================================================
+static WND* hit_test(int x, int y) {
+    WND* best = 0;
+    int best_z = -1;
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        WND* w = &s_wins[i];
+        if (!w->used || !w->visible) continue;
+        if (x < w->x || x >= w->x + w->w) continue;
+        if (y < w->y || y >= w->y + w->h) continue;
+        if (w->z > best_z) { best = w; best_z = w->z; }
+    }
+    return best;
+}
+
+// Empacota POINT em lParam (low=x, high=y, 16 bits cada) — convencao Win32.
+static uint64_t pack_lparam_point(int x, int y) {
+    uint32_t lo = (uint32_t)(uint16_t)(int16_t)x;
+    uint32_t hi = (uint32_t)(uint16_t)(int16_t)y;
+    return (uint64_t)((hi << 16) | lo);
+}
+
+void win32k_on_mouse_event(int32_t dx, int32_t dy, uint32_t buttons) {
+    // Marca o cursor como inicializado: agora o compose desenha o sprite.
+    if (!s_cursor_initialized) {
+        // Centro da tela na 1a chamada (a IRQ12 nao ve a tela ate o init).
+        s_cursor_x = scr_width()  / 2;
+        s_cursor_y = scr_height() / 2;
+        s_cursor_initialized = 1;
+    }
+
+    // Aplica delta com clamp aos limites da tela.
+    int32_t nx = s_cursor_x + dx;
+    int32_t ny = s_cursor_y + dy;
+    int SW = scr_width(), SH = scr_height();
+    if (nx < 0) nx = 0;
+    if (ny < 0) ny = 0;
+    if (nx >= SW) nx = SW - 1;
+    if (ny >= SH) ny = SH - 1;
+    s_cursor_x = nx;
+    s_cursor_y = ny;
+
+    // FASE 12 — A SHELL Windows 10 ve o evento PRIMEIRO. Se ela consumir
+    // (clique no Start button, no botao de uma janela na taskbar, em
+    // [_][[]][X] da chrome, ou drag em andamento), o BASE NAO posta os
+    // WM_MOUSE* — caso contrario o app receberia ambos os efeitos.
+    {
+        uint32_t prev = s_cursor_buttons;
+        if (win32k_shell_on_mouse((int)s_cursor_x, (int)s_cursor_y, buttons, prev)) {
+            s_cursor_buttons = buttons;       // atualiza antes do return
+            kputs("[win32k] cursor (shell-consumed) em (");
+            kput_dec((uint64_t)s_cursor_x); kputc(',');
+            kput_dec((uint64_t)s_cursor_y); kputs(")\n");
+            return;
+        }
+    }
+
+    // Hit-test: que janela esta debaixo do cursor agora?
+    WND* w = hit_test((int)s_cursor_x, (int)s_cursor_y);
+    void* hwnd = w ? (void*)(uintptr_t)w->id : 0;
+
+    // WM_MOUSEMOVE: posta para a janela do hit (se houver). wParam = botoes
+    // (estilo Win32: MK_LBUTTON=0x0001 MK_RBUTTON=0x0002 MK_MBUTTON=0x0010);
+    // lParam = POINT empacotado em coords da JANELA (cliente).
+    if (hwnd) {
+        int cx = (int)s_cursor_x - w->x;
+        int cy = (int)s_cursor_y - w->y;
+        uint64_t mk = 0;
+        if (buttons & 0x01) mk |= 0x0001;   // MK_LBUTTON
+        if (buttons & 0x02) mk |= 0x0002;   // MK_RBUTTON
+        if (buttons & 0x04) mk |= 0x0010;   // MK_MBUTTON
+        queue_post(hwnd, WM_MOUSEMOVE, mk, pack_lparam_point(cx, cy));
+    }
+
+    // Mudanca de botoes -> postar DOWN/UP. Comparamos com o estado anterior.
+    uint32_t changed = buttons ^ s_cursor_buttons;
+    if (changed & 0x01) {                          // botao esquerdo mudou
+        uint32_t msg = (buttons & 0x01) ? WM_LBUTTONDOWN : WM_LBUTTONUP;
+        if (hwnd) {
+            int cx = (int)s_cursor_x - w->x;
+            int cy = (int)s_cursor_y - w->y;
+            queue_post(hwnd, msg, 0, pack_lparam_point(cx, cy));
+            // Clique no botao esquerdo tambem da o foco a janela (NT-style).
+            if (msg == WM_LBUTTONDOWN && !(w->flags & WNDF_DESKTOP)) {
+                s_focus_id = w->id;
+            }
+        }
+    }
+    if (changed & 0x02) {                          // botao direito
+        uint32_t msg = (buttons & 0x02) ? WM_RBUTTONDOWN : WM_RBUTTONUP;
+        if (hwnd) {
+            int cx = (int)s_cursor_x - w->x;
+            int cy = (int)s_cursor_y - w->y;
+            queue_post(hwnd, msg, 0, pack_lparam_point(cx, cy));
+        }
+    }
+    if (changed & 0x04) {                          // botao meio
+        uint32_t msg = (buttons & 0x04) ? WM_MBUTTONDOWN : WM_MBUTTONUP;
+        if (hwnd) {
+            int cx = (int)s_cursor_x - w->x;
+            int cy = (int)s_cursor_y - w->y;
+            queue_post(hwnd, msg, 0, pack_lparam_point(cx, cy));
+        }
+    }
+    s_cursor_buttons = buttons;
+
+    kputs("[win32k] cursor agora em ("); kput_dec((uint64_t)s_cursor_x);
+    kputc(','); kput_dec((uint64_t)s_cursor_y); kputc(')');
+    if (hwnd) { kputs(" sobre HWND #"); kput_dec((uint64_t)w->id); }
+    kputc('\n');
+}
+
+// ============================================================================
+//  FASE 11 — Getters/Setters do cursor (usados pelas syscalls).
+// ============================================================================
+int32_t win32k_cursor_x(void) { return s_cursor_x; }
+int32_t win32k_cursor_y(void) { return s_cursor_y; }
+
+void win32k_set_cursor(int32_t x, int32_t y) {
+    int SW = scr_width(), SH = scr_height();
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x >= SW) x = SW - 1;
+    if (y >= SH) y = SH - 1;
+    s_cursor_x = x;
+    s_cursor_y = y;
+    s_cursor_initialized = 1;
+    kputs("[win32k] SetCursorPos -> (");
+    kput_dec((uint64_t)s_cursor_x); kputc(',');
+    kput_dec((uint64_t)s_cursor_y); kputs(")\n");
+    if (s_was_active) win32k_compose();
 }
 
 // ============================================================================

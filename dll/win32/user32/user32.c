@@ -27,6 +27,9 @@ __declspec(dllimport) long  NtGdiFillRect(void* hdc, int x, int y, int w, int h,
 // FASE 6: foco + injecao de tecla numa janela especifica (demo headless).
 __declspec(dllimport) long  NtUserSetFocus(void* hwnd);
 __declspec(dllimport) long  NtUserPostKey(void* hwnd, int ascii, int scancode);
+// FASE 11: cursor do mouse.
+__declspec(dllimport) long  NtUserGetCursorPos(void* out_point);
+__declspec(dllimport) long  NtUserSetCursorPos(int x, int y);
 
 // ---- mensagens (subset) ----
 #define WM_CREATE  0x0001
@@ -238,6 +241,19 @@ __declspec(dllexport) void* SetFocus(void* hwnd) {
 // para alimentar varias janelas de cmd de forma deterministica em headless.
 __declspec(dllexport) int PostKeyToWindow(void* hwnd, int ascii) {
     return (int)NtUserPostKey(hwnd, ascii, 0);
+}
+
+// FASE 11 — GetCursorPos(POINT*): le a posicao atual do cursor. POINT tem
+// layout {int x, int y} (mesmo do win32). Devolve 1 se preencheu, 0 senao.
+__declspec(dllexport) int GetCursorPos(POINT* pt) {
+    if (!pt) return 0;
+    return (int)NtUserGetCursorPos(pt);
+}
+
+// FASE 11 — SetCursorPos(x, y): move o cursor para (x,y). Clamp aplicado no
+// kernel (win32k_set_cursor) ao tamanho da tela.
+__declspec(dllexport) int SetCursorPos(int x, int y) {
+    return (int)NtUserSetCursorPos(x, y);
 }
 
 // FillRect(hdc, const RECT*, hbrush): preenche o retangulo com o brush. No

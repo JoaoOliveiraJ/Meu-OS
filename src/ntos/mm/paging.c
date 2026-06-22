@@ -171,15 +171,71 @@ void mm_map_kuser_shared_data(void) {
 }
 
 // ============================================================================
+//  FASE GPU — mm_map_phys_range: mapeia uma faixa fisica arbitraria.
+//
+//  Caminha PML4 -> PDPT -> PD -> PT (usando ensure_table para criar tabelas
+//  sob demanda) e instala um PTE por pagina de 4 KiB, apontando para
+//  phys + (offset desde virt). Util para mapear LFB de GPUs (BAR alta como
+//  0xFD000000 do Bochs VBE) que ficam FORA da identidade de 1 GiB.
+//
+//  Importante: se a faixa cair sobre uma entrada de PD que ja e huge page
+//  (PS=1, como o PD[0] da identidade do boot), recusamos porque nao
+//  podemos sub-tabular sem reformatar o range; devolvemos falha. Em
+//  enderecos virtuais altos (> 1 GiB) isso nunca ocorre.
+//
+//  Por padrao seto PG_USER tambem (consistente com mm_map_zero_page e o
+//  resto do kernel, que e single-ring). 'flags' adicionais (PCD/PWT/NX)
+//  vem do chamador.
+//
+//  Retorna 1 sucesso, 0 falha. Faz flush global do TLB no fim.
+// ============================================================================
+int mm_map_phys_range(uint64_t virt, uint64_t phys, uint64_t size, uint64_t flags) {
+    if (size == 0) return 0;
+
+    // Alinha por baixo virt/phys em 4 KiB; arredonda 'size' para cobrir o fim.
+    uint64_t v0 = virt & ~0xFFFULL;
+    uint64_t p0 = phys & ~0xFFFULL;
+    uint64_t end = (virt + size + 0xFFFULL) & ~0xFFFULL;
+
+    // Garante bits minimos. PG_USER por consistencia com o kernel single-ring.
+    uint64_t pte_flags  = flags | PG_PRESENT | PG_RW | PG_USER;
+    uint64_t tbl_flags  = PG_PRESENT | PG_RW | PG_USER;   // tabelas intermediarias
+
+    uint64_t* pml4 = (uint64_t*)(mm_get_cr3() & PT_MASK);
+
+    for (uint64_t v = v0, p = p0; v < end; v += 0x1000ULL, p += 0x1000ULL) {
+        uint64_t pml4_idx = (v >> 39) & 0x1FF;
+        uint64_t pdpt_idx = (v >> 30) & 0x1FF;
+        uint64_t pd_idx   = (v >> 21) & 0x1FF;
+        uint64_t pt_idx   = (v >> 12) & 0x1FF;
+
+        uint64_t* pdpt = ensure_table(pml4, pml4_idx, tbl_flags);
+        if (!pdpt) return 0;
+        uint64_t* pd   = ensure_table(pdpt, pdpt_idx, tbl_flags);
+        if (!pd)   return 0;
+
+        // Se PD ja aponta para huge page (PS=1), nao da pra sub-tabular sem
+        // reformatar — recusa (range invalido para este caminho).
+        if (pd[pd_idx] & 0x80ULL) return 0;
+
+        uint64_t* pt = ensure_table(pd, pd_idx, tbl_flags);
+        if (!pt) return 0;
+
+        // Sobrescreve direto: se ja havia mapeamento, e re-mapeamento explicito.
+        pt[pt_idx] = (p & PT_MASK) | pte_flags;
+    }
+
+    // Flush TLB local (reload CR3). Single-CPU: basta isso.
+    __asm__ volatile ("mov %%cr3, %%rax\n mov %%rax, %%cr3" ::: "rax", "memory");
+    return 1;
+}
+
+// ============================================================================
 //  FASE 7.9 — mm_map_zero_page: caminho de recuperacao de page-fault.
 //
-//  Mapeia uma pagina (4 KiB) ZERADA no endereco virtual "va" (alinhado por
-//  baixo). Cria PDPT/PD/PT sob demanda — exatamente como ensure_table acima.
-//
-//  Marca PG_USER tambem para que codigo de qualquer DPL leia/escreva (o
-//  fault-handler nao sabe em que ring o driver estava, mas todos os drivers
-//  do MeuOS rodam em ring 0 — manter PG_USER nao reduz seguranca aqui e
-//  ajuda quando o codigo tocado e mapeamento ring-3 que cruzou para ring 0).
+//  Aloca um frame, zera, e mapeia em 'va' (alinhado por baixo em 4 KiB) via
+//  mm_map_phys_range — reusa toda a logica de walk/ensure_table. Marca
+//  PG_USER por consistencia com o resto do kernel (single-ring).
 //
 //  Retorno: 1 = pagina presente apos a chamada, 0 = falha (sem RAM, etc.).
 // ============================================================================
@@ -187,46 +243,39 @@ int mm_map_zero_page(uint64_t va) {
     if (!va) return 0;
     uint64_t addr = va & ~0xFFFULL;             // alinha por baixo em 4 KiB
 
+    // Caso especial: o caminho de recovery e chamado MUITAS vezes em sequencia
+    // pelo mesmo cr2; se a pagina ja esta presente, simplesmente re-zera o
+    // frame existente em vez de alocar um novo (preserva contabilidade do PMM).
     uint64_t* pml4 = (uint64_t*)(mm_get_cr3() & PT_MASK);
     uint64_t pml4_idx = (addr >> 39) & 0x1FF;
     uint64_t pdpt_idx = (addr >> 30) & 0x1FF;
     uint64_t pd_idx   = (addr >> 21) & 0x1FF;
     uint64_t pt_idx   = (addr >> 12) & 0x1FF;
 
-    uint64_t flags = PG_PRESENT | PG_RW | PG_USER;
-    uint64_t* pdpt = ensure_table(pml4, pml4_idx, flags);
-    if (!pdpt) return 0;
-    uint64_t* pd   = ensure_table(pdpt, pdpt_idx, flags);
-    if (!pd)   return 0;
-
-    // Atencao: se o PD ja aponta para pagina de 2 MiB (PS=1, como em PD[0] no
-    // boot), nao podemos sub-tabular sem reformatar — devolve sucesso porque
-    // a pagina ja deve estar presente (mas se nao estava, a CPU teria que ter
-    // refaultado por outro motivo). Em 99% dos casos, ensure_table cria uma
-    // PT nova porque a entrada do PD esta zerada.
-    if (pd[pd_idx] & 0x80ULL /* PS */) {
-        // Pagina 2 MiB ja cobre essa regiao — nao precisa mapear PT.
-        return 1;
-    }
-    uint64_t* pt = ensure_table(pd, pd_idx, flags);
-    if (!pt) return 0;
-
-    // Se ja esta presente (recovery duplo p/ mesmo cr2), apenas zera o frame.
-    if (pt[pt_idx] & PG_PRESENT) {
-        uint64_t f = pt[pt_idx] & PT_MASK;
-        uint8_t* p = (uint8_t*)f;
-        for (int i = 0; i < 4096; i++) p[i] = 0;
-    } else {
-        uint64_t frame = pmm_alloc_frame();
-        if (!frame) return 0;
-        uint8_t* p = (uint8_t*)frame;
-        for (int i = 0; i < 4096; i++) p[i] = 0;
-        pt[pt_idx] = frame | PG_PRESENT | PG_RW | PG_USER;
+    if (pml4[pml4_idx] & PG_PRESENT) {
+        uint64_t* pdpt = pt_addr(pml4[pml4_idx]);
+        if (pdpt[pdpt_idx] & PG_PRESENT) {
+            uint64_t* pd = pt_addr(pdpt[pdpt_idx]);
+            // Huge page (PS=1) ja cobre o endereco — apenas devolve sucesso.
+            if (pd[pd_idx] & 0x80ULL) return 1;
+            if (pd[pd_idx] & PG_PRESENT) {
+                uint64_t* pt = pt_addr(pd[pd_idx]);
+                if (pt[pt_idx] & PG_PRESENT) {
+                    // Reaproveita: zera o frame ja mapeado (sem alocar novo).
+                    uint8_t* p = (uint8_t*)(pt[pt_idx] & PT_MASK);
+                    for (int i = 0; i < 4096; i++) p[i] = 0;
+                    return 1;
+                }
+            }
+        }
     }
 
-    // Flush TLB local (reload CR3). Como UP, basta isso.
-    __asm__ volatile ("mov %%cr3, %%rax\n mov %%rax, %%cr3" ::: "rax", "memory");
-    return 1;
+    // Caminho comum: aloca frame, zera, mapeia via mm_map_phys_range.
+    uint64_t frame = pmm_alloc_frame();
+    if (!frame) return 0;
+    uint8_t* p = (uint8_t*)frame;
+    for (int i = 0; i < 4096; i++) p[i] = 0;
+    return mm_map_phys_range(addr, frame, 0x1000ULL, PG_PRESENT | PG_RW | PG_USER);
 }
 
 // Atualiza campos voláteis (TickCount, SystemTime, InterruptTime). Chamado

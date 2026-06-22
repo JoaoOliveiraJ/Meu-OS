@@ -1,0 +1,6 @@
+; d3d.def — exports informativos da d3d.dll do MeuOS (Direct3D 7/8/9 stub).
+LIBRARY d3d.dll
+EXPORTS
+Direct3DCreate7
+Direct3DCreate8
+Direct3DCreate9

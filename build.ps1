@@ -161,9 +161,11 @@ $kernel32Src = Join-Path $dll 'win32\kernel32\kernel32.c'
 $user32Src   = Join-Path $dll 'win32\user32\user32.c'
 $gdi32Src    = Join-Path $dll 'win32\gdi32\gdi32.c'
 $advapi32Src = Join-Path $dll 'win32\advapi32\advapi32.c'
+$ddrawSrc    = Join-Path $dll 'win32\ddraw\ddraw.c'
+$d3dSrc      = Join-Path $dll 'win32\d3d9\d3d9.c'
 if (Test-Path $ntdllSrc) {
     $dc = @('-target','x86_64-windows-gnu','-shared','-nostdlib','-e','DllMain')
-    Write-Host "[dll] ntdll.dll + kernel32.dll + user32.dll + gdi32.dll + advapi32.dll"
+    Write-Host "[dll] ntdll.dll + kernel32.dll + user32.dll + gdi32.dll + advapi32.dll + ddraw.dll + d3d9.dll"
     & $zig cc @dc '-Wl,--image-base=0xA00000' "-Wl,--out-implib,$(Join-Path $out 'libntdll.a')" `
         -o (Join-Path $out 'ntdll.dll') $ntdllSrc
     if ($LASTEXITCODE) { throw "ntdll.dll falhou." }
@@ -184,6 +186,50 @@ if (Test-Path $ntdllSrc) {
     & $zig cc @dc '-Wl,--image-base=0x3200000' "-Wl,--out-implib,$(Join-Path $out 'libadvapi32.a')" `
         -o (Join-Path $out 'advapi32.dll') $advapi32Src (Join-Path $out 'libntdll.a')
     if ($LASTEXITCODE) { throw "advapi32.dll falhou." }
+    # ddraw.dll (FASE 9.3): DirectDraw 7 stub. Cria objetos COM falsos (IDirectDraw7
+    #   e IDirectDrawSurface7) que devolvem DD_OK em quase tudo, apoiados num pool
+    #   estatico de superficies (sem pintar pixels — o win32k ja e dono do FB).
+    #   Nao depende de ntdll (so usa _tls_index + DllMain), entao linka sozinho.
+    #   ImageBase 0x3E00000 (livre; entre calller.sys 0x3A00000 e a regiao do PMM
+    #   >=0x4000000). Pode ser carregado por apps que importem ddraw.
+    if (Test-Path $ddrawSrc) {
+        & $zig cc @dc '-Wl,--image-base=0x3E00000' "-Wl,--out-implib,$(Join-Path $out 'libddraw.a')" `
+            -o (Join-Path $out 'ddraw.dll') $ddrawSrc
+        if ($LASTEXITCODE) { throw "ddraw.dll falhou." }
+    }
+    # d3d9.dll (FASE 9.4): Direct3D 7/8/9 stub. Acoplado a ddraw.dll: cria objetos
+    #   COM falsos (IDirect3D7 e IDirect3DDevice7) que devolvem D3D_OK em quase
+    #   tudo. Sem rasterizador real (o win32k ja e dono do FB). Nao depende de
+    #   ntdll (so usa _tls_index + DllMain), entao linka sozinho.
+    #   ImageBase 0x3C00000 (60 MiB; livre entre calller.sys 0x3A00000 e
+    #   ddraw 0x3E00000 — ainda dentro da zona morta 48-64 MiB, fora da regiao
+    #   do PMM >=0x4000000). Pode ser carregado por apps que importem d3d.
+    if (Test-Path $d3dSrc) {
+        & $zig cc @dc '-Wl,--image-base=0x3C00000' "-Wl,--out-implib,$(Join-Path $out 'libd3d9.a')" `
+            -o (Join-Path $out 'd3d9.dll') $d3dSrc
+        if ($LASTEXITCODE) { throw "d3d9.dll falhou." }
+    }
+}
+
+# FASE 9.4 — DEMO Direct3D 7 (.exe): GDI (CreateWindow + FillRect + TextOut) +
+# DirectDraw (DirectDrawCreate7 + CreateSurface) + Direct3D (Direct3DCreate7 +
+# CreateDevice + BeginScene/Clear/DrawPrimitive/EndScene). Compilado DEPOIS das
+# DLLs e linkado contra TODAS as nossas import-libs (libntdll/kernel32/user32/
+# gdi32/ddraw/d3d). ImageBase 0x400000 (4 MiB): faixa livre entre o kernel
+# (0x100000-~0x1D5000) e o USTACK (0x600000). NAO usa 0x4200000 (PMM_BASE 64
+# MiB; qualquer base >= 0x4000000 colide com frames gerenciados pelo PMM,
+# corrompendo o bitmap). pd[2] do PD: livre, sem nenhum outro modulo.
+$dxdemoApp = Join-Path $ex 'dxdemo\dxdemo.c'
+if ((Test-Path $dxdemoApp) -and (Test-Path (Join-Path $out 'libd3d9.a')) -and `
+    (Test-Path (Join-Path $out 'libddraw.a'))) {
+    Write-Host "[exemplo] apps\dxdemo\dxdemo.c -> build\dxdemo.exe (.exe GDI + DirectDraw + D3D)"
+    & $zig cc -target x86_64-windows-gnu -nostdlib -e _start `
+        '-Wl,--image-base=0x400000' '-Wl,--subsystem,console' "-I$sdk", "-I$ddk" `
+        -o (Join-Path $out 'dxdemo.exe') $dxdemoApp `
+        (Join-Path $out 'libkernel32.a') (Join-Path $out 'libuser32.a') `
+        (Join-Path $out 'libgdi32.a')    (Join-Path $out 'libntdll.a') `
+        (Join-Path $out 'libddraw.a')    (Join-Path $out 'libd3d9.a')
+    if ($LASTEXITCODE) { throw "Compilacao do dxdemo\dxdemo.c falhou." }
 }
 
 # FASE 4 — DEMO informacao do sistema (.exe): NtQuerySystemInformation (versao do

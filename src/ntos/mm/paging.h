@@ -12,6 +12,25 @@ void mm_kuser_tick(void);
 // (sem RAM ou parametro invalido). Faz flush local do TLB no fim.
 int mm_map_zero_page(uint64_t va);
 
+// Flags expostos para mm_map_phys_range (mesmos bits da arquitetura x86_64).
+#define MM_FLAG_PRESENT  0x1ULL
+#define MM_FLAG_RW       0x2ULL
+#define MM_FLAG_USER     0x4ULL
+#define MM_FLAG_PWT      0x8ULL   // page write-through (uncached recomendado p/ MMIO)
+#define MM_FLAG_PCD      0x10ULL  // page cache disable
+#define MM_FLAG_NX       (1ULL << 63)
+
+// FASE GPU — Mapeia uma faixa fisica arbitraria [phys, phys+size) em virt
+// (alinhamento por baixo em 4 KiB). Caminha PML4 -> PDPT -> PD -> PT criando
+// tabelas sob demanda (ensure_table) e popula cada PTE para a pagina fisica
+// correspondente com os 'flags' dados. 'flags' deve conter ao menos
+// MM_FLAG_PRESENT|MM_FLAG_RW; para MMIO de dispositivo prefira tambem
+// MM_FLAG_PCD (cache disable) para garantir ordem de escrita.
+// Faz flush global do TLB ao final. Retorna 1 em sucesso, 0 em falha
+// (sem RAM para as tabelas, range invalido, ou bater em paginas de 2 MiB ja
+// mapeadas na faixa).
+int mm_map_phys_range(uint64_t virt, uint64_t phys, uint64_t size, uint64_t flags);
+
 
 // Marca o intervalo [addr, addr+size) como acessivel em modo usuario (ring 3),
 // setando o bit U/S na cadeia de paginas (PML4[0], PDPT[0] e as paginas de 2 MiB).

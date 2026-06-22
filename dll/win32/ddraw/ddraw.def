@@ -1,0 +1,7 @@
+; ddraw.def — exports informativos da ddraw.dll do MeuOS (DirectDraw 7 stub).
+LIBRARY ddraw.dll
+EXPORTS
+DirectDrawCreate
+DirectDrawCreateEx
+DirectDrawEnumerateA
+DirectDrawEnumerateExA

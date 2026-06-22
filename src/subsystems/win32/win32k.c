@@ -12,8 +12,15 @@
 // ============================================================================
 #include "win32/win32k.h"
 #include "video/video.h"
+#include "display/BasicDisplay/gpu.h"
 #include "ob/object.h"
 #include "ps/process.h"
+#include "mm/heap.h"
+
+// Fonte 8x8 embutida (drivers/video/font8x8.c) — usada pelo renderizador de
+// texto deste arquivo quando o backend e o GPU (LFB 32 bpp), pois o helper
+// fb_draw_text so escreve no framebuffer de 8 bpp do mode 13h.
+extern const uint8_t g_font8x8[96][8];
 
 extern void kputs(const char* s);
 extern void kputc(char c);
@@ -37,6 +44,86 @@ extern volatile uint64_t g_ticks;   // timer (IRQ0) — usado como "hora" da MSG
 #define START_COLOR      FB_GREEN    // botao "Iniciar"
 #define TBBTN_ACTIVE     FB_LIGHT_GRAY  // botao da janela com foco (afundado)
 #define TBBTN_INACTIVE   FB_DARK_GRAY
+
+// ============================================================================
+//  FASE 9.2 — Backend de pixels do win32k (GPU 32 bpp OU VGA mode13h 8 bpp).
+//
+//  O Window Manager mantem a mesma logica (HWND, z-order, fila de mensagens):
+//  so o desenho efetivo dos pixels e que escolhe o backend em runtime. Se o
+//  driver de GPU (Bochs VBE, drivers/video/gpu.c) inicializou (gpu_active()),
+//  usamos gpu_* (LFB 32 bpp, ate 1024x768); senao caimos para o mode 13h
+//  (fb_* em 320x200x8, paleta DOS).
+//
+//  Para nao quebrar o codigo existente, cada cor e passada como uint8_t (indice
+//  de paleta) e CONVERTIDA via palette_8_to_32 antes de ir para gpu_*. Assim a
+//  semantica visual e identica nos dois backends — "FB_BLUE" continua sendo o
+//  mesmo azul nas duas telas.
+//
+//  ensure_screen() inicializa o backend correto sob demanda (lazy). Os getters
+//  scr_width/scr_height refletem o backend ativo (1024/768 ou 320/200), o que
+//  permite a janela "wallpaper" preencher a tela inteira na nova resolucao.
+// ============================================================================
+static int w32k_use_gpu(void) { return gpu_active(); }
+
+static int scr_width(void)  { return w32k_use_gpu() ? (int)gpu_width()  : FB_WIDTH;  }
+static int scr_height(void) { return w32k_use_gpu() ? (int)gpu_height() : FB_HEIGHT; }
+
+static void w32k_clear(uint8_t color8) {
+    if (w32k_use_gpu()) gpu_clear(palette_8_to_32(color8));
+    else                fb_clear(color8);
+}
+static void w32k_fill_rect(int x, int y, int w, int h, uint8_t color8) {
+    if (w32k_use_gpu()) gpu_fill_rect(x, y, w, h, palette_8_to_32(color8));
+    else                fb_fill_rect(x, y, w, h, color8);
+}
+static void w32k_hline(int x, int y, int w, uint8_t color8) {
+    if (w32k_use_gpu()) gpu_fill_rect(x, y, w, 1, palette_8_to_32(color8));
+    else                fb_hline(x, y, w, color8);
+}
+static void w32k_vline(int x, int y, int h, uint8_t color8) {
+    if (w32k_use_gpu()) gpu_fill_rect(x, y, 1, h, palette_8_to_32(color8));
+    else                fb_vline(x, y, h, color8);
+}
+static void w32k_rect(int x, int y, int w, int h, uint8_t color8) {
+    if (w <= 0 || h <= 0) return;
+    w32k_hline(x, y, w, color8);
+    w32k_hline(x, y + h - 1, w, color8);
+    w32k_vline(x, y, h, color8);
+    w32k_vline(x + w - 1, y, h, color8);
+}
+
+// Desenha UM caractere 8x8 usando o glifo embutido. bg=0xFF => transparente.
+// No backend GPU pintamos pixel a pixel via gpu_pixel (32 bpp). No backend
+// mode13h delegamos ao fb_draw_char (mesma fonte, escrita no LFB de 8 bpp).
+static void w32k_draw_char(int x, int y, char c, uint8_t fg8, uint8_t bg8) {
+    if (!w32k_use_gpu()) { fb_draw_char(x, y, c, fg8, bg8); return; }
+
+    unsigned char uc = (unsigned char)c;
+    if (uc < 0x20 || uc > 0x7F) uc = '?';
+    const uint8_t* glyph = g_font8x8[uc - 0x20];
+    uint32_t fg = palette_8_to_32(fg8);
+    uint32_t bg = palette_8_to_32(bg8);
+    for (int row = 0; row < 8; row++) {
+        uint8_t bits = glyph[row];
+        for (int col = 0; col < 8; col++) {
+            if (bits & (0x80 >> col))      gpu_pixel(x + col, y + row, fg);
+            else if (bg8 != 0xFF)           gpu_pixel(x + col, y + row, bg);
+        }
+    }
+}
+static void w32k_draw_text(int x, int y, const char* s, uint8_t fg8, uint8_t bg8) {
+    if (!w32k_use_gpu()) { fb_draw_text(x, y, s, fg8, bg8); return; }
+
+    int cx = x, cy = y;
+    int W = scr_width();
+    while (*s) {
+        char c = *s++;
+        if (c == '\n') { cx = x; cy += 8; continue; }
+        w32k_draw_char(cx, cy, c, fg8, bg8);
+        cx += 8;
+        if (cx + 8 > W) { cx = x; cy += 8; }
+    }
+}
 
 // ============================================================================
 //  Janelas (arvore + z-order)
@@ -93,10 +180,13 @@ static WND* wnd_from_handle(void* h) { return wnd_from_id((uint32_t)(uintptr_t)h
 
 int win32k_has_windows(void) { return s_nwin > 0; }
 
-// Garante que o framebuffer grafico (mode 13h) esta ligado antes de desenhar.
-// fb_init e idempotente; chamamos sob demanda (lazy) no 1o desenho da GUI, para
-// preservar os logs de boot no VGA texto ate a GUI subir.
-static void ensure_fb(void) { if (!fb_active()) fb_init(); }
+// Garante que ALGUM backend grafico esta ligado antes de desenhar. Se a GPU
+// (Bochs VBE / LFB 32 bpp) ja foi inicializada pelo kmain, usa ela; senao
+// liga o mode 13h (320x200x8) sob demanda. Idempotente.
+static void ensure_fb(void) {
+    if (w32k_use_gpu()) return;          // GPU ja ativa: nada a fazer
+    if (!fb_active()) fb_init();         // fallback: VGA mode13h
+}
 
 // ============================================================================
 //  Fila de mensagens (uma fila global — uma thread GUI por enquanto)
@@ -191,20 +281,20 @@ void win32k_init(void) {
 static void draw_window_chrome(WND* wptr) {
     // Janela de fundo (papel de parede): so a area cliente, sem barra/moldura.
     if (wptr->flags & WNDF_DESKTOP) {
-        fb_fill_rect(wptr->x, wptr->y, wptr->w, wptr->h, wptr->bgColor);
+        w32k_fill_rect(wptr->x, wptr->y, wptr->w, wptr->h, wptr->bgColor);
         return;
     }
     int active = (wptr->id == s_focus_id);
     // corpo (area cliente) — cor da janela (cinza por padrao; preto p/ console)
-    fb_fill_rect(wptr->x, wptr->y, wptr->w, wptr->h, wptr->bgColor);
+    w32k_fill_rect(wptr->x, wptr->y, wptr->w, wptr->h, wptr->bgColor);
     // barra de titulo
-    fb_fill_rect(wptr->x, wptr->y, wptr->w, TITLE_H, active ? TITLE_ACTIVE : TITLE_INACTIVE);
+    w32k_fill_rect(wptr->x, wptr->y, wptr->w, TITLE_H, active ? TITLE_ACTIVE : TITLE_INACTIVE);
     // texto do titulo
-    fb_draw_text(wptr->x + 3, wptr->y + 2, wptr->title, TITLE_TEXT, 0xFF);
+    w32k_draw_text(wptr->x + 3, wptr->y + 2, wptr->title, TITLE_TEXT, 0xFF);
     // moldura preta
-    fb_rect(wptr->x, wptr->y, wptr->w, wptr->h, FRAME_COLOR);
+    w32k_rect(wptr->x, wptr->y, wptr->w, wptr->h, FRAME_COLOR);
     // separador da barra de titulo
-    fb_hline(wptr->x, wptr->y + TITLE_H, wptr->w, FRAME_COLOR);
+    w32k_hline(wptr->x, wptr->y + TITLE_H, wptr->w, FRAME_COLOR);
 }
 
 // Conta as janelas top-level visiveis (exclui o papel de parede). Usado pela
@@ -219,30 +309,31 @@ static int count_taskbar_windows(void) {
 // Desenha a barra de tarefas no rodape: botao "Iniciar" + um botao por janela
 // (o da janela com foco fica destacado). Loga cada botao na serial.
 static void draw_taskbar(void) {
-    int ty = FB_HEIGHT - TASKBAR_H;
-    fb_fill_rect(0, ty, FB_WIDTH, TASKBAR_H, TASKBAR_COLOR);
-    fb_hline(0, ty, FB_WIDTH, FB_WHITE);          // borda superior (relevo)
+    int W  = scr_width();
+    int ty = scr_height() - TASKBAR_H;
+    w32k_fill_rect(0, ty, W, TASKBAR_H, TASKBAR_COLOR);
+    w32k_hline(0, ty, W, FB_WHITE);          // borda superior (relevo)
 
     // Botao "Iniciar".
-    fb_fill_rect(2, ty + 2, 40, TASKBAR_H - 4, START_COLOR);
-    fb_rect(2, ty + 2, 40, TASKBAR_H - 4, FRAME_COLOR);
-    fb_draw_text(6, ty + 3, "Iniciar", FB_BLACK, 0xFF);
+    w32k_fill_rect(2, ty + 2, 40, TASKBAR_H - 4, START_COLOR);
+    w32k_rect(2, ty + 2, 40, TASKBAR_H - 4, FRAME_COLOR);
+    w32k_draw_text(6, ty + 3, "Iniciar", FB_BLACK, 0xFF);
     kputs("[win32k] taskbar: [Iniciar]");
 
-    // Um botao por janela top-level (max ~5 cabem em 320px).
+    // Um botao por janela top-level (cabem mais botoes na nova resolucao).
     int bx = 46, bw = 52;
     for (int i = 0; i < MAX_WINDOWS; i++) {
         WND* w = &s_wins[i];
         if (!w->used || !w->visible || (w->flags & WNDF_DESKTOP)) continue;
-        if (bx + bw > FB_WIDTH - 2) break;
+        if (bx + bw > W - 2) break;
         int active = (w->id == s_focus_id);
-        fb_fill_rect(bx, ty + 2, bw, TASKBAR_H - 4, active ? TBBTN_ACTIVE : TBBTN_INACTIVE);
-        fb_rect(bx, ty + 2, bw, TASKBAR_H - 4, FRAME_COLOR);
+        w32k_fill_rect(bx, ty + 2, bw, TASKBAR_H - 4, active ? TBBTN_ACTIVE : TBBTN_INACTIVE);
+        w32k_rect(bx, ty + 2, bw, TASKBAR_H - 4, FRAME_COLOR);
         // Titulo abreviado (cabe ~6 chars na fonte 8x8).
         char lbl[8]; int k = 0;
         for (; k < 6 && w->title[k]; k++) lbl[k] = w->title[k];
         lbl[k] = 0;
-        fb_draw_text(bx + 2, ty + 3, lbl, active ? FB_BLACK : FB_WHITE, 0xFF);
+        w32k_draw_text(bx + 2, ty + 3, lbl, active ? FB_BLACK : FB_WHITE, 0xFF);
         kputs(" ["); kputs(lbl);
         if (active) kputs("*");        // * = janela com foco
         kputs("]");
@@ -253,12 +344,14 @@ static void draw_taskbar(void) {
 
 void win32k_compose(void) {
     ensure_fb();
-    if (!fb_active()) return;
+    // Backend GPU OU mode13h precisa estar ativo.
+    if (!w32k_use_gpu() && !fb_active()) return;
     s_was_active = 1;                      // a GUI tomou a tela ao menos uma vez
     kputs("[win32k] compose: desktop + ");
-    kput_dec((uint64_t)s_nwin); kputs(" janela(s) (z-order) + barra de tarefas\n");
+    kput_dec((uint64_t)s_nwin); kputs(" janela(s) (z-order) + barra de tarefas");
+    kputs(w32k_use_gpu() ? " [backend: gpu/LFB 32bpp]\n" : " [backend: vga mode13h 8bpp]\n");
 
-    fb_clear(DESKTOP_COLOR);               // fundo (caso nao haja papel de parede)
+    w32k_clear(DESKTOP_COLOR);             // fundo (caso nao haja papel de parede)
 
     // Desenha em ordem de z crescente (as de z maior por cima). Selection sort
     // simples por z (poucas janelas). O papel de parede (z=1) fica no fundo.
@@ -321,20 +414,22 @@ uintptr_t NtUserCreateWindowEx_k(W32_CREATE* c) {
     // Cor da area cliente: WND_BG_DEFAULT -> cinza padrao (compat. Fase 2).
     w->bgColor = (c->bgColor == WND_BG_DEFAULT) ? CLIENT_COLOR : (uint8_t)c->bgColor;
 
+    int SW = scr_width(), SH = scr_height();
     if (w->flags & WNDF_DESKTOP) {
         // Janela de fundo (papel de parede): cobre a tela inteira, sem chrome.
-        w->x = 0; w->y = 0; w->w = FB_WIDTH; w->h = FB_HEIGHT;
+        // Usa a resolucao ATIVA (1024x768 com GPU, 320x200 no fallback mode13h).
+        w->x = 0; w->y = 0; w->w = SW; w->h = SH;
     } else {
         w->x = c->x; w->y = c->y;
         w->w = (c->w > 0) ? c->w : 120;
         w->h = (c->h > 0) ? c->h : 80;
-        // Clipa ao desktop (mode 13h = 320x200) para a janela ficar visivel.
-        if (w->w > FB_WIDTH)  w->w = FB_WIDTH;
-        if (w->h > FB_HEIGHT) w->h = FB_HEIGHT;
+        // Clipa ao desktop (na resolucao do backend ativo) p/ ficar visivel.
+        if (w->w > SW) w->w = SW;
+        if (w->h > SH) w->h = SH;
         if (w->x < 0) w->x = 0;
         if (w->y < 0) w->y = 0;
-        if (w->x + w->w > FB_WIDTH)  w->x = FB_WIDTH  - w->w;
-        if (w->y + w->h > FB_HEIGHT) w->y = FB_HEIGHT - w->h;
+        if (w->x + w->w > SW) w->x = SW - w->w;
+        if (w->y + w->h > SH) w->y = SH - w->h;
     }
     str_cpy(w->title, c->windowName, 48);
     str_cpy(w->className, c->className, 32);
@@ -577,7 +672,7 @@ static uintptr_t textout_impl(void* hdc, int x, int y, const char* str, int len,
     char buf[64]; int n = 0;
     if (str) for (n = 0; n < len && n < 63 && str[n]; n++) buf[n] = str[n];
     buf[n] = 0;
-    fb_draw_text(ox + x, oy + y, buf, fg, bg);
+    w32k_draw_text(ox + x, oy + y, buf, fg, bg);
     kputs("[gdi] TextOut(HDC, x="); kput_dec((uint64_t)x); kputs(", y=");
     kput_dec((uint64_t)y); kputs(", fg="); kput_dec((uint64_t)fg);
     kputs(", \""); kputs(buf); kputs("\") -> desktop(");
@@ -598,6 +693,52 @@ uintptr_t NtGdiTextOutEx_k(void* hdc, int x, int y, const char* str, int len,
     return textout_impl(hdc, x, y, str, len, (uint8_t)fg, (uint8_t)bg);
 }
 
+// ============================================================================
+//  FASE 9.2 — DIB (Device Independent Bitmap) MINIMO.
+//
+//  Aloca um buffer de width*height*4 bytes (XRGB888) no heap do kernel e
+//  devolve um HBITMAP (na verdade, ponteiro para um objeto W32_DIB com width/
+//  height + ponteiro p/ os bits). Sem GDI completo: nao ha BitBlt aqui — apps
+//  podem usar como back-buffer e copiar manualmente quando precisarem.
+//
+//  Em ppBits o chamador recebe o ponteiro p/ os bits (igual a CreateDIBSection
+//  do GDI, que devolve um ponteiro p/ a memoria do bitmap fora do hbm).
+// ============================================================================
+typedef struct _W32_DIB {
+    int      width;
+    int      height;
+    uint32_t bpp;        // sempre 32 (XRGB888)
+    void*    bits;       // buffer de width*height*4 bytes
+} W32_DIB;
+
+uintptr_t NtGdiCreateDIBSection_k(int width, int height, void** ppBits) {
+    if (width <= 0 || height <= 0) return 0;
+    // Limite defensivo (max ~4 MiB por DIB; 1024x768 cabe).
+    if ((uint64_t)width * (uint64_t)height > (uint64_t)(4 * 1024 * 1024)) return 0;
+
+    W32_DIB* d = (W32_DIB*)kmalloc(sizeof(W32_DIB));
+    if (!d) return 0;
+    d->width  = width;
+    d->height = height;
+    d->bpp    = 32;
+    size_t nbytes = (size_t)width * (size_t)height * 4u;
+    d->bits = kmalloc(nbytes);
+    if (!d->bits) { return 0; }   // sem kfree(d): heap simples sem coalesce robusto
+
+    // Zera o bitmap (preto opaco).
+    uint8_t* p = (uint8_t*)d->bits;
+    for (size_t i = 0; i < nbytes; i++) p[i] = 0;
+
+    if (ppBits) *ppBits = d->bits;
+
+    kputs("[gdi] CreateDIBSection("); kput_dec((uint64_t)width); kputc('x');
+    kput_dec((uint64_t)height); kputs("x32) -> HBITMAP=");
+    kput_hex((uint64_t)(uintptr_t)d);
+    kputs(" bits="); kput_hex((uint64_t)(uintptr_t)d->bits);
+    kputs(" ("); kput_dec((uint64_t)nbytes); kputs(" bytes)\n");
+    return (uintptr_t)d;
+}
+
 uintptr_t NtGdiFillRect_k(void* hdc, int x, int y, int w, int h, void* hbrush) {
     ensure_fb();
     WND* win = dc_window(hdc);
@@ -606,7 +747,7 @@ uintptr_t NtGdiFillRect_k(void* hdc, int x, int y, int w, int h, void* hbrush) {
     uint8_t color = FB_WHITE;
     W32_BRUSH* b = (W32_BRUSH*)hbrush;
     if (b) color = (uint8_t)b->color;   // brushes sao ponteiros diretos
-    fb_fill_rect(ox + x, oy + y, w, h, color);
+    w32k_fill_rect(ox + x, oy + y, w, h, color);
     kputs("[gdi] FillRect(HDC, x="); kput_dec((uint64_t)x); kputs(", y=");
     kput_dec((uint64_t)y); kputs(", w="); kput_dec((uint64_t)w); kputs(", h=");
     kput_dec((uint64_t)h); kputs(", cor="); kput_dec((uint64_t)color);

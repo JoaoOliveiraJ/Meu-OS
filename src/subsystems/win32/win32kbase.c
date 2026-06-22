@@ -372,6 +372,13 @@ void win32k_compose(void) {
 
     // Barra de tarefas SEMPRE por cima de tudo (se ha alguma janela "normal").
     if (count_taskbar_windows() > 0) draw_taskbar();
+
+    // FASE 10.4 — Apos cada compose, "apresenta" o frame ao display. Em
+    // virtio-gpu isso envia TRANSFER_TO_HOST_2D + RESOURCE_FLUSH para o host
+    // re-ler nosso framebuffer e atualizar a tela. Em Bochs VBE e no-op (LFB
+    // MMIO ja propaga as escritas). Sem este flush, em virtio-gpu o desktop
+    // SO apareceria no proximo evento que chamasse explicitamente gpu_present.
+    if (w32k_use_gpu()) gpu_present();
 }
 
 // ============================================================================

@@ -3,6 +3,7 @@
 #include "video/vga.h"
 #include "video/video.h"
 #include "display/BasicDisplay/gpu.h"
+#include "display/VirtioGpu/VirtioGpu.h"
 #include "serial/serial.h"
 #include "input/keyboard.h"
 #include "ke/amd64/gdt.h"
@@ -653,12 +654,36 @@ void kmain(uint32_t mb_info) {
     syscall_msr_init();
     kputs("[ok] HAL: portas de I/O + MMIO + enumeracao PCI + CPU info (CPUID) + KUSER_SHARED_DATA + KPCR/GS_BASE + SYSCALL\n");
 
-    // --- FASE GPU: inicializa Bochs VBE (LFB grafico de alta resolucao) ---
-    // Tenta achar o PCI 1234:1111 (QEMU std-vga / Bochs Display Interface) e
-    // mapear o LFB via mm_map_phys_range. Sucesso = temos modo 1024x768x32
-    // disponivel via gpu_*; falha silenciosa = fb_demo continua em mode13h.
+    // --- FASE 10.1: detecta virtio-gpu (modern, virtio 1.1) ---
+    // Caminha PCI capabilities, mapeia common/notify/isr/device cfg fora da
+    // identidade, e roda o status protocol ate FEATURES_OK. Sem QEMU rodando
+    // com -device virtio-gpu-pci, a deteccao falha silenciosamente e o Bochs
+    // VBE permanece como caminho de video (fallback).
+    if (virtio_gpu_detect()) {
+        kputs("[ok] virtio-gpu: deteccao + MMIO + FEATURES_OK (pronto p/ fase 10.2)\n");
+        // FASE 10.3: smoke test (soft). Submete os 7 comandos 2D essenciais
+        // pelo controlq, SEM trocar o backend de video (sem SET_SCANOUT). O
+        // Bochs VBE continua como caminho de display ate a fase de switch.
+        if (virtio_gpu_smoke_test()) {
+            kputs("[ok] virtio-gpu: smoke test passou (CREATE_2D/ATTACH/TRANSFER/FLUSH/UNREF + GET_DISPLAY_INFO)\n");
+        } else {
+            kputs("[ok] virtio-gpu: smoke test FALHOU (continuando com Bochs VBE)\n");
+        }
+    } else {
+        kputs("[ok] virtio-gpu: indisponivel; Bochs VBE como caminho de video\n");
+    }
+
+    // --- FASE GPU: inicializa o backend de display (virtio-gpu OU Bochs VBE) ---
+    // gpu_init tenta virtio-gpu PRIMEIRO (se virtio_gpu_detect() + DRIVER_OK ja
+    // ocorreu acima), alocando um framebuffer DMA + SET_SCANOUT. Caindo no
+    // fallback, tenta Bochs VBE em 1024x768x32. Falha silenciosa = fb_demo
+    // continua em mode13h.
     if (gpu_init(1024, 768)) {
-        kputs("[ok] GPU: Bochs VBE 1024x768x32 (LFB mapeado fora da identidade)\n");
+        if (virtio_gpu_display_ok()) {
+            kputs("[ok] GPU: virtio-gpu 1024x768x32 BGRA (SET_SCANOUT 0; host apresenta NOSSO framebuffer)\n");
+        } else {
+            kputs("[ok] GPU: Bochs VBE 1024x768x32 (LFB mapeado fora da identidade)\n");
+        }
     } else {
         kputs("[ok] GPU: hardware Bochs/QEMU std-vga nao detectado; mode13h fallback ativo\n");
     }

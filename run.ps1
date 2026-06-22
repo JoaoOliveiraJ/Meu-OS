@@ -73,8 +73,16 @@ foreach ($m in $Modules) {
 $initrd = $names -join ','
 
 # Rodamos com cwd = build\, entao usamos nomes relativos (sem espacos).
+# FASE 10.1: adiciona um virtio-gpu-pci secundario para o driver virtio detectar
+# (vendor=0x1AF4 device=0x1050). O -vga std permanece como fallback Bochs VBE
+# (vendor=0x1234 device=0x1111). Os dois coexistem na enumeracao PCI.
+# FASE 10.4: damos um id ao virtio-gpu p/ o QMP screendump poder capturar o
+# scanout dele (caso contrario, o screendump default captura o std-vga, que
+# em headless permanece em modo texto VGA 720x400 e nao mostra nada do nosso
+# desktop renderizado via virtio-gpu).
 $qargs = @('-kernel', 'kernel.bin', '-m', '256', '-no-reboot', '-serial', 'stdio',
-           '-cpu', 'qemu64,-hypervisor,vendor=GenuineIntel')
+           '-cpu', 'qemu64,-hypervisor,vendor=GenuineIntel',
+           '-device', 'virtio-gpu-pci,id=vgpu0')
 if ($initrd)   { $qargs += @('-initrd', $initrd) }
 if ($Headless) { $qargs += @('-display', 'none') }
 # FASE GPU: -Screendump abre QMP via TCP e, apos o boot, manda 'screendump' p/
@@ -113,10 +121,21 @@ if ($TimeoutSec -gt 0) {
             [void]$reader.ReadLine()
             $ppm = Join-Path $build 'screen.ppm'
             if (Test-Path $ppm) { Remove-Item $ppm -Force -ErrorAction SilentlyContinue }
+            # FASE 10.4: tenta capturar do scanout da virtio-gpu (id=vgpu0). Se
+            # o QEMU recusar a arg device (versao antiga) ou nao achar, cai pro
+            # screendump default (std-vga). Em ambos os casos seguimos sem
+            # explodir o boot.
             $cmd = '{"execute":"screendump","arguments":{"filename":"' +
-                   ($ppm -replace '\\','\\') + '"}}'
+                   ($ppm -replace '\\','\\') + '","device":"vgpu0","head":0}}'
             $writer.WriteLine($cmd)
-            [void]$reader.ReadLine()
+            $resp = $reader.ReadLine()
+            if ($resp -match '"error"') {
+                Write-Host "--- screendump (vgpu0) falhou: $resp; tentando default ---"
+                $cmd2 = '{"execute":"screendump","arguments":{"filename":"' +
+                        ($ppm -replace '\\','\\') + '"}}'
+                $writer.WriteLine($cmd2)
+                [void]$reader.ReadLine()
+            }
             $client.Close()
             Write-Host "--- screendump -> $ppm ---"
         } catch {

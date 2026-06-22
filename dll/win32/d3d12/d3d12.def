@@ -1,0 +1,7 @@
+; d3d12.def — exports informativos da d3d12.dll do MeuOS
+; (Direct3D 12 stub — FASE 9.8).
+LIBRARY d3d12.dll
+EXPORTS
+D3D12CreateDevice
+D3D12GetDebugInterface
+D3D12SerializeRootSignature

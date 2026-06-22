@@ -1,0 +1,6 @@
+; d3d11.def — exports informativos da d3d11.dll do MeuOS
+; (Direct3D 11 stub — FASE 9.8).
+LIBRARY d3d11.dll
+EXPORTS
+D3D11CreateDevice
+D3D11CreateDeviceAndSwapChain

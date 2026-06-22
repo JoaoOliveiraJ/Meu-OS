@@ -1,0 +1,5 @@
+; dxcore.def — exports informativos da dxcore.dll do MeuOS
+; (DXCore stub — FASE 9.9).
+LIBRARY dxcore.dll
+EXPORTS
+DXCoreCreateAdapterFactory

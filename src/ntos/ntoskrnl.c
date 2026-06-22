@@ -40,6 +40,9 @@
 #include "ps/cid_table.h"     // FASE 7.5: PspCidTable exposta como variavel
 #include "mm/mdl.h"           // FASE 7.6: MDL real (IoAllocateMdl/MmProbeAndLockPages/...)
 #include "mm/virtmem.h"// FASE 5: Mm*/Nt*VirtualMemory (alloc/free/protect)
+// FASE DX: dispatcher DirectX em kernel (dxgkrnl) + memory manager video (dxgmms).
+#include "dx/dxgkrnl/dxgkrnl.h"
+#include "dx/dxgmms/dxgmms.h"
 
 // Forwards das funcoes implementadas em ke/kpcr.c (NTAPI / ms_abi).
 __attribute__((ms_abi)) ULONG KeGetCurrentProcessorNumber_k(void);
@@ -881,6 +884,27 @@ static const struct { const char* name; void* fn; } g_ntexports[] = {
     EX("BCryptVerifySignature",        NT_BCryptVerifySignature),
     EX("BCryptImportKeyPair",          NT_BCryptImportKeyPair),
     EX("__C_specific_handler",         __C_specific_handler),
+
+    // ======== FASE DX — dxgkrnl + dxgmms ========
+    // Estes exports aparecem em dxgkrnl.sys / dxgmms2.sys reais do Windows.
+    // Drivers de display (BasicDisplay, indddi, KMDs de fornecedores) importam
+    // estes simbolos por nome — entao mantemos os mesmos nomes do NT (sem
+    // sufixo _k) para que pe_bind_imports resolva sem traducao.
+    EX("DxgkInitialize",               DxgkInitialize),
+    EX("DxgkShutdown",                 DxgkShutdown),
+    EX("DxgkOpenAdapter",              DxgkOpenAdapter),
+    EX("DxgkCreateDevice",             DxgkCreateDevice),
+    EX("DxgkCreateContext",            DxgkCreateContext),
+    EX("DxgkCreateAllocation",         DxgkCreateAllocation),
+    EX("DxgkPresent",                  DxgkPresent),
+    EX("DxgkPresentDisplayOnly",       DxgkPresentDisplayOnly),
+    EX("DxgkSubmitCommand",            DxgkSubmitCommand),
+    EX("DxgMmsInitialize",             DxgMmsInitialize),
+    EX("DxgMmsShutdown",               DxgMmsShutdown),
+    EX("DxgMmsAllocate",               DxgMmsAllocate),
+    EX("DxgMmsFree",                   DxgMmsFree),
+    EX("DxgMmsLock",                   DxgMmsLock),
+    EX("DxgMmsUnlock",                 DxgMmsUnlock),
 
     { 0, 0 }
 };

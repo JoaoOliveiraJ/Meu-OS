@@ -4,6 +4,189 @@ Todas as mudanças relevantes do projeto. Formato baseado em
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.0/) e
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.7.0] - 2026-06-22
+
+Sétima versão. **Migração arquitetural de XDDM para WDDM 2.x** — modelo
+Windows 10/11. Implementa o stack DirectX moderno completo: `dxgkrnl.sys` +
+`dxgmms.sys` no kernel, 6 novas DLLs ring 3 (`dxgi.dll`, `d3d11.dll`,
+`d3d12.dll`, `d2d1.dll`, `dwrite.dll`, `dxcore.dll`), `ddraw.dll` vira shim
+que delega para `d3d11.dll` (igual Windows 10 real), `win32k` split em
+`win32kbase.c` + `win32kfull.c` (modelo NT 6.4 = Win 8.1+), e
+`d3d11demo.exe` exercitando o stack ponta a ponta. Build verde, boot verde,
+zero regressão. **13 DLLs Win10/11** funcionais no MeuOS.
+
+### Adicionado
+
+- **FASE 9.7 — `dxgkrnl.sys` + `dxgmms.sys` (DirectX kernel-mode WDDM)**
+  *(`src/subsystems/dx/dxgkrnl/`, `src/subsystems/dx/dxgmms/`)*:
+  - `dxgkrnl` espelha o `dxgkrnl.sys` real do Win10/11: dispatcher central
+    do DirectX em kernel-mode. TODAS as chamadas D3D/DXGI vindas das DLLs
+    passam por aqui (no Windows real via syscalls; no MeuOS via direct
+    call por enquanto).
+  - APIs publicas (15 novos exports em `ntoskrnl.c`):
+    `DxgkInitialize/Shutdown`, `DxgkOpenAdapter`, `DxgkCreateDevice/Context/Allocation`,
+    `DxgkPresent`, `DxgkPresentDisplayOnly`, `DxgkSubmitCommand`.
+  - Pools estaticos: 4 adapters / 16 devices / 32 contexts / 64 allocations.
+    Cada estrutura segue layout NT (DXGK_ADAPTER, DXGK_DEVICE, DXGK_CONTEXT,
+    DXGK_ALLOCATION com kmd_context, refcount, width/height/bpp/pitch).
+  - `DxgkInitialize` le `gpu_active/width/height/bpp/pitch` do BasicDisplay
+    e prepara o adapter primario. `DxgkPresent` delega para `gpu_fill_rect`;
+    `DxgkPresentDisplayOnly` faz blit pixel-a-pixel via `gpu_pixel`.
+  - `dxgmms` espelha `DxgMms2.sys`: GPU memory manager. Pool fixo de 64
+    DXGMMS_RESIDENCY (estados NONE/IN_RAM/IN_VRAM/LOCKED), backed por
+    `kmalloc`. Exports: `DxgMmsInitialize/Shutdown/Allocate/Free/Lock/Unlock`.
+  - `kmain` chama `DxgkInitialize()` + `DxgMmsInitialize()` apos `gpu_init()`.
+  - Log: `[dxgk] DxgkInitialize: adapter primario 1024x768x32 pitch=4096 (gpu backend OK)`
+    e `[dxgmms] init OK (pool=64 descritores, backend=heap kernel)`.
+
+- **FASE 9.8 — `dxgi.dll` (DirectX Graphics Infrastructure)**
+  *(`dll/win32/dxgi/{dxgi.c, dxgi.def}`)*:
+  - PE32+ ImageBase `0x3F00000` (entre ddraw e PMM_BASE).
+  - ABI COM completo de `IDXGIFactory`/`Factory1`/`Factory2`, `IDXGIAdapter`/
+    `Adapter1`, `IDXGIOutput`, `IDXGISwapChain`. Pools estaticos 4/4/4/8.
+  - `IDXGIAdapter::GetDesc/GetDesc1` retornam **VendorId=0x1234, DeviceId=0x1111**
+    (Bochs VBE real!), Description=`L"MeuOS Bochs Display Driver"`,
+    DedicatedVideoMemory=64 MiB.
+  - `IDXGIOutput::GetDisplayModeList` expoe `1024x768@60Hz BGRA`.
+  - `IDXGISwapChain::Present` delega para hook `DxgkPresentDisplayOnly` via
+    `DXGISetPresentBackend()` (plugavel pra UMD/dxgkrnl no futuro).
+  - Exports: `CreateDXGIFactory`, `CreateDXGIFactory1`, `CreateDXGIFactory2`,
+    `DXGISetPresentBackend`.
+
+- **FASE 9.9 — `d3d11.dll` + `d3d12.dll`**
+  *(APIs primarias Windows 10 e 11)*:
+  - `dll/win32/d3d11/d3d11.c` (~45 KB, PE32+, ImageBase `0x4500000` +
+    `--dynamicbase` por estar >= PMM_BASE):
+    `ID3D11Device` com **27 metodos** (Create Buffer/Tex1D/2D/3D/SRV/UAV/RTV/
+    DSV/InputLayout/VS/GS/GSStreamOut/PS/HS/DS/CS/ClassLinkage/Blend/
+    DepthStencil/Rasterizer/Sampler/Query/Predicate/Counter/DeferredContext +
+    GetImmediateContext/FeatureLevel/CreationFlags/RemovedReason) +
+    `ID3D11DeviceContext` com **32 metodos** (VS/PS/IA/RS/OM/Clear/Draw/
+    Map/Unmap) + `ID3D11Resource` generico (BUFFER/TEX2D/RTV/DSV/SRV/
+    shaders/InputLayout/RasterState/BlendState/DepthStencil/Sampler/Query).
+  - Pools estaticos: 4 devices / 16 contexts / 64 resources.
+  - Exports: `D3D11CreateDevice`, `D3D11CreateDeviceAndSwapChain` (este ultimo
+    aloca um IDXGISwapChain ABI-compativel com vtable propria — fix do bug
+    inicial que causava #UD ao chamar Present).
+  - `dll/win32/d3d12/d3d12.c` (~71 KB, ImageBase `0x4600000` + `--dynamicbase`):
+    `ID3D12Device` com **40+ metodos** (CommandQueue/Allocator/List/
+    PipelineState/RootSignature/DescriptorHeap/Fence/CommittedResource/
+    PlacedResource/ReservedResource/Heap/QueryHeap/CommandSignature +
+    GetDescriptorHandleIncrementSize/GetAdapterLuid),
+    `ID3D12CommandQueue` (ExecuteCommandLists/Signal/Wait/GetTimestampFrequency),
+    `ID3D12CommandList` (Close/Reset + DrawInstanced/DrawIndexedInstanced/
+    Dispatch/Copy*/ResourceBarrier/Clear*/RSSet*/OMSet*/SetPipelineState/
+    SetRoot*/SetDescriptorHeaps/IA*), `ID3D12Fence`, `ID3D12Resource`.
+  - Pools: 4 devices / 8 queues / 16 allocators / 32 lists / 16 fences /
+    64 resources / 16 pipelines / 16 rootsigs / 16 heaps / 16 blobs.
+  - Exports: `D3D12CreateDevice`, `D3D12GetDebugInterface`,
+    `D3D12SerializeRootSignature`.
+
+- **FASE 9.10 — `d2d1.dll` + `dwrite.dll` + `dxcore.dll`**
+  *(Direct2D moderno + DirectWrite + DirectX Core Win11)*:
+  - `dll/win32/d2d1/d2d1.c` (~38 KB, ImageBase `0x4700000`): `ID2D1Factory`
+    (CreateRectangle/RoundedRect/Ellipse/PathGeometry/HwndRenderTarget/
+    DxgiSurfaceRT/DCRT/WicBitmapRT/StrokeStyle/DrawingStateBlock +
+    GetDesktopDpi/ReloadSystemMetrics), `ID2D1RenderTarget` com **52 metodos**
+    (BeginDraw/EndDraw/Clear/Draw|FillRectangle/RoundedRect/Ellipse/
+    Geometry/Bitmap/Text/TextLayout/GlyphRun + CreateBrush/Bitmap +
+    SetTransform/Antialias/Layer/Clip + Flush/Save/RestoreDrawingState +
+    GetSize/PixelSize/MaxBitmapSize/IsSupported), `ID2D1Brush`, `ID2D1Bitmap`,
+    `ID2D1Geometry`. Pools: 4/4/16/16/16.
+  - `dll/win32/dwrite/dwrite.c` (~43 KB, ImageBase `0x4800000`):
+    `IDWriteFactory` (25 metodos), `IDWriteTextFormat` (28 metodos),
+    `IDWriteTextLayout` (19 metodos com metricas estimadas baseado em fontSize),
+    `IDWriteFontCollection`, `IDWriteFontFamily`, `IDWriteFont` (metricas
+    coerentes 2048 EM Segoe UI-like).
+  - `dll/win32/dxcore/dxcore.c` (~20 KB, ImageBase `0x4900000`):
+    `IDXCoreAdapterFactory`, `IDXCoreAdapterList`, `IDXCoreAdapter` com 18
+    propriedades (InstanceLuid, DriverVersion, DriverDescription=
+    `"BasicDisplay (MeuOS)"`, HardwareID `0x1234:0x1111`,
+    KmdModelVersion=WDDM 3.0, DedicatedAdapterMemory=16 MiB,
+    SharedSystemMemory=128 MiB, IsHardware=0, IsIntegrated=1, etc.).
+  - Exports: `D2D1CreateFactory`, `DWriteCreateFactory`,
+    `DXCoreCreateAdapterFactory`.
+  - Bug fix: `UINT16`/`INT16` typedefs precisavam vir ANTES de
+    `DWRITE_FONT_METRICS` (resolveu 10 erros de compilacao).
+
+- **FASE 9.11 — `ddraw` shim + `win32k` split + `d3d11demo.exe`**:
+  - **ddraw vira shim que delega para d3d11** (igual Win10 real): `ddraw.c`
+    `IDirectDraw7::CreateSurface` chama `D3D11CreateDevice` via `libd3d11.a`
+    na 1a invocacao; `IDirectDrawSurface7::Blt` marca flag de compat;
+    novo export `DdrawCompatModeActive()`. `build.ps1` re-linka `ddraw.dll`
+    apos `d3d11.dll` ser construida.
+  - **win32k split** (modelo NT 6.4 = Win 8.1+):
+    `src/subsystems/win32/win32kbase.c` = HWND mgmt, message queue, focus,
+    compose, taskbar, GDI minimo (NtUserGet*Message, NtUserPostMessage,
+    NtUserSetFocus, win32k_compose, draw_taskbar);
+    `src/subsystems/win32/win32kfull.c` = TextOut com cor, FillRect avancado,
+    DIB, NtGdi* avancados;
+    `src/subsystems/win32/win32k.c` = SHIM que #include's os dois (mantem um
+    unico .o sem fragmentar symbols).
+    Log: `[win32k] base + full carregados (Windows 8.1+ split model)`.
+  - **`apps/d3d11demo/d3d11demo.c`** (PE32+, ImageBase escolhido pelo agente
+    pra evitar PMM): exerce stack WDDM completo —
+    `CreateWindowExA` 1024x768 -> `CreateDXGIFactory` -> S_OK ->
+    `EnumAdapters(0)` -> Vendor=0x1234 Device=0x1111 ->
+    `D3D11CreateDeviceAndSwapChain` -> S_OK ->
+    `ClearRenderTargetView(0.2, 0.4, 0.7, 1.0)` ->
+    `IDXGISwapChain::Present(1, 0)` -> `GetMessage` loop com `WM_PAINT`
+    refazendo Clear+Present (frame 2) -> `PostQuitMessage` -> Release
+    dos 4 objetos COM -> `ExitProcess(0)`.
+  - Bug fix em `d3d11.c`: `D3D11CreateDeviceAndSwapChain` agora aloca um
+    IDXGISwapChain ABI-compativel com vtable propria (slot Present correto)
+    em vez de devolver o device como swap chain — corrige #UD em Present.
+  - `run.ps1` carrega `d3d11demo.exe` apos `dxdemo.exe` na lista default.
+
+### Estrutura final do projeto v0.7.0
+
+```
+src/
+├── boot/                                 multiboot
+├── ntos/                                 ntoskrnl (executive)
+├── hal/                                  HAL
+├── drivers/
+│   ├── input/keyboard
+│   ├── display/BasicDisplay/             KMD WDDM-style (Bochs VBE)
+│   ├── video/{vga, video, font8x8}       legado XDDM (Win XP)
+│   ├── serial/serial
+│   └── filesystems/ntfs/...
+└── subsystems/
+    ├── win32/{win32, win32k, win32kbase, win32kfull}   NT 6.4 split
+    └── dx/                                              NOVO (WDDM 2.x)
+        ├── dxgkrnl/                      DirectX kernel dispatcher
+        └── dxgmms/                        GPU memory manager
+
+dll/win32/
+├── kernel32, user32, gdi32, advapi32     classics
+├── ddraw                                  shim -> d3d11 (Win10+ behavior)
+├── d3d9                                   D3D7/8/9 stubs (legado)
+├── dxgi                                   Win10 — Graphics Infrastructure
+├── d3d11                                  Win10 primary API
+├── d3d12                                  Win11 primary API
+├── d2d1                                   Direct2D
+├── dwrite                                 DirectWrite
+└── dxcore                                 Win11 — alternativa ao DXGI
+
+apps/
+├── dxdemo/dxdemo.c                        XDDM stack (ddraw + d3d9)
+└── d3d11demo/d3d11demo.c                  WDDM stack (dxgi + d3d11)
+```
+
+**Evidencia consolidada** (run.ps1 -Headless -TimeoutSec 16):
+- **18 `[ok]`** (era 17 — +1 do DX subsystem)
+- 0 `[EXCECAO]`, 0 Page Fault, 0 stub generico, 0 import nao resolvido
+- 3x `0xCAFEBABE` (IOCTL intacto)
+- calller.sys 100% (DriverEntry + 3x thread tick + thread exit + DriverUnload)
+- 1x `[dxgk] DxgkInitialize: adapter primario 1024x768x32`
+- 1x `[dxgmms] init OK (pool=64, backend=heap kernel)`
+- 1x `[win32k] base + full carregados (Windows 8.1+ split model)`
+- 13 DLLs no build: `ntdll, kernel32, user32, gdi32, advapi32, ddraw, d3d9,
+  dxgi, d3d11, d3d12, d2d1, dwrite, dxcore`
+- `dxdemo.exe` roda (XDDM compat) + `d3d11demo.exe` roda (WDDM novo)
+- screendump 1024x768x32 capturado via QMP
+- `Sistema no ar.`
+
 ## [0.6.0] - 2026-06-22
 
 Sexta versão. **GPU stack XDDM completo** (modelo Windows XP/2000):
@@ -1161,7 +1344,8 @@ do Windows (PE32+) com arquitetura no estilo NT.
 - `cpuid` destruía `EBX` (ponteiro do Multiboot) — `EBX` passou a ser salvo no
   primeiro instante do boot, antes de qualquer `cpuid`.
 
-[Não lançado]: https://github.com/JoaoOliveiraJ/Meu-OS/compare/v0.6.0...HEAD
+[Não lançado]: https://github.com/JoaoOliveiraJ/Meu-OS/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.7.0
 [0.6.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.6.0
 [0.5.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.5.0
 [0.4.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.4.0

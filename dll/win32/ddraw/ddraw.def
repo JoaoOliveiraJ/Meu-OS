@@ -1,7 +1,9 @@
-; ddraw.def — exports informativos da ddraw.dll do MeuOS (DirectDraw 7 stub).
+; ddraw.def — exports informativos da ddraw.dll do MeuOS (DirectDraw 7 stub
+; + FASE 9.10 compat shim para d3d11.dll).
 LIBRARY ddraw.dll
 EXPORTS
 DirectDrawCreate
 DirectDrawCreateEx
 DirectDrawEnumerateA
 DirectDrawEnumerateExA
+DdrawCompatModeActive

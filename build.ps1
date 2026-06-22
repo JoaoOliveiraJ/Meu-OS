@@ -163,9 +163,15 @@ $gdi32Src    = Join-Path $dll 'win32\gdi32\gdi32.c'
 $advapi32Src = Join-Path $dll 'win32\advapi32\advapi32.c'
 $ddrawSrc    = Join-Path $dll 'win32\ddraw\ddraw.c'
 $d3dSrc      = Join-Path $dll 'win32\d3d9\d3d9.c'
+$dxgiSrc     = Join-Path $dll 'win32\dxgi\dxgi.c'
+$d3d11Src    = Join-Path $dll 'win32\d3d11\d3d11.c'
+$d3d12Src    = Join-Path $dll 'win32\d3d12\d3d12.c'
+$d2d1Src     = Join-Path $dll 'win32\d2d1\d2d1.c'
+$dwriteSrc   = Join-Path $dll 'win32\dwrite\dwrite.c'
+$dxcoreSrc   = Join-Path $dll 'win32\dxcore\dxcore.c'
 if (Test-Path $ntdllSrc) {
     $dc = @('-target','x86_64-windows-gnu','-shared','-nostdlib','-e','DllMain')
-    Write-Host "[dll] ntdll.dll + kernel32.dll + user32.dll + gdi32.dll + advapi32.dll + ddraw.dll + d3d9.dll"
+    Write-Host "[dll] ntdll.dll + kernel32.dll + user32.dll + gdi32.dll + advapi32.dll + ddraw.dll + d3d9.dll + dxgi.dll + d3d11.dll + d3d12.dll + d2d1.dll + dwrite.dll + dxcore.dll"
     & $zig cc @dc '-Wl,--image-base=0xA00000' "-Wl,--out-implib,$(Join-Path $out 'libntdll.a')" `
         -o (Join-Path $out 'ntdll.dll') $ntdllSrc
     if ($LASTEXITCODE) { throw "ntdll.dll falhou." }
@@ -186,15 +192,29 @@ if (Test-Path $ntdllSrc) {
     & $zig cc @dc '-Wl,--image-base=0x3200000' "-Wl,--out-implib,$(Join-Path $out 'libadvapi32.a')" `
         -o (Join-Path $out 'advapi32.dll') $advapi32Src (Join-Path $out 'libntdll.a')
     if ($LASTEXITCODE) { throw "advapi32.dll falhou." }
-    # ddraw.dll (FASE 9.3): DirectDraw 7 stub. Cria objetos COM falsos (IDirectDraw7
-    #   e IDirectDrawSurface7) que devolvem DD_OK em quase tudo, apoiados num pool
-    #   estatico de superficies (sem pintar pixels — o win32k ja e dono do FB).
-    #   Nao depende de ntdll (so usa _tls_index + DllMain), entao linka sozinho.
-    #   ImageBase 0x3E00000 (livre; entre calller.sys 0x3A00000 e a regiao do PMM
-    #   >=0x4000000). Pode ser carregado por apps que importem ddraw.
+    # ddraw.dll (FASE 9.3 + 9.10 shim): DirectDraw 7 stub. Cria objetos COM falsos
+    #   (IDirectDraw7 e IDirectDrawSurface7) que devolvem DD_OK em quase tudo,
+    #   apoiados num pool estatico de superficies.
+    #   FASE 9.10 — DELEGACAO PARA D3D11 (compat Windows 10+): ddraw agora importa
+    #   D3D11CreateDevice() para refletir o comportamento real do Windows moderno
+    #   (a ddraw.dll ainda existe mas internamente usa Direct3D 11). Por isso,
+    #   precisa LINKAR contra libd3d11.a — entao deve ser construida APOS d3d11.
+    #   ImageBase 0x3E00000 (livre; entre calller.sys 0x3A00000 e PMM >=0x4000000).
     if (Test-Path $ddrawSrc) {
-        & $zig cc @dc '-Wl,--image-base=0x3E00000' "-Wl,--out-implib,$(Join-Path $out 'libddraw.a')" `
-            -o (Join-Path $out 'ddraw.dll') $ddrawSrc
+        # NOTE: d3d11.dll precisa estar disponivel; e construida algumas linhas abaixo.
+        # A ordem original colocava ddraw ANTES de d3d11. Reorganizamos abaixo: d3d11
+        # e construido primeiro, depois ddraw faz link contra libd3d11.a. Aqui ainda
+        # construimos um stub de ddraw caso libd3d11.a ainda nao exista (1a passada).
+        $libd3d11 = Join-Path $out 'libd3d11.a'
+        if (Test-Path $libd3d11) {
+            & $zig cc @dc '-Wl,--image-base=0x3E00000' '-Wl,--dynamicbase' `
+                "-Wl,--out-implib,$(Join-Path $out 'libddraw.a')" `
+                -o (Join-Path $out 'ddraw.dll') $ddrawSrc $libd3d11
+        } else {
+            & $zig cc @dc '-Wl,--image-base=0x3E00000' '-Wl,--dynamicbase' `
+                "-Wl,--out-implib,$(Join-Path $out 'libddraw.a')" `
+                -o (Join-Path $out 'ddraw.dll') $ddrawSrc
+        }
         if ($LASTEXITCODE) { throw "ddraw.dll falhou." }
     }
     # d3d9.dll (FASE 9.4): Direct3D 7/8/9 stub. Acoplado a ddraw.dll: cria objetos
@@ -208,6 +228,85 @@ if (Test-Path $ntdllSrc) {
         & $zig cc @dc '-Wl,--image-base=0x3C00000' "-Wl,--out-implib,$(Join-Path $out 'libd3d9.a')" `
             -o (Join-Path $out 'd3d9.dll') $d3dSrc
         if ($LASTEXITCODE) { throw "d3d9.dll falhou." }
+    }
+    # dxgi.dll (FASE 9.7+): DXGI 1.x stub. E a infraestrutura comum por baixo de
+    #   D3D10/11/12 do Windows moderno: enumera adapters/outputs, cria swap chains
+    #   e expoe vtable COM completa para apps DXGI. ImageBase 0x3F00000 (entre
+    #   ddraw 0x3E00000 e o PMM 0x4000000 — ddraw so ocupa ~140 KiB a partir de
+    #   0x3E00000, entao 0x3F00000 nao colide). Nao depende de ntdll (so usa
+    #   _tls_index + DllMain), linka sozinho.
+    if (Test-Path $dxgiSrc) {
+        & $zig cc @dc '-Wl,--image-base=0x3F00000' "-Wl,--out-implib,$(Join-Path $out 'libdxgi.a')" `
+            -o (Join-Path $out 'dxgi.dll') $dxgiSrc
+        if ($LASTEXITCODE) { throw "dxgi.dll falhou." }
+    }
+    # d3d11.dll (FASE 9.8): Direct3D 11 stub. API grafica PRIMARIA do Win8+; vtable
+    #   COM completa de ID3D11Device + ID3D11DeviceContext + recursos. ImageBase
+    #   0x4500000 — colide com PMM_BASE 0x4000000, ENTAO usamos --dynamicbase para
+    #   gerar .reloc e deixar o loader realocar para um endereco virtual livre
+    #   (mesmo mecanismo de drivers .sys e hello32.exe).
+    if (Test-Path $d3d11Src) {
+        & $zig cc @dc '-Wl,--image-base=0x4500000' '-Wl,--dynamicbase' `
+            "-Wl,--out-implib,$(Join-Path $out 'libd3d11.a')" `
+            -o (Join-Path $out 'd3d11.dll') $d3d11Src
+        if ($LASTEXITCODE) { throw "d3d11.dll falhou." }
+    }
+    # FASE 9.10 — re-linkagem do ddraw.dll: agora que libd3d11.a existe, refazemos
+    # o link do ddraw para PUXAR D3D11CreateDevice como import. Sem isto a 1a
+    # passada teria caido no ramo "sem libd3d11" e o shim nao funcionaria. A
+    # segunda passada sobrescreve build\ddraw.dll com a versao definitiva
+    # (compat mode Win10+: ddraw -> d3d11).
+    if ((Test-Path $ddrawSrc) -and (Test-Path (Join-Path $out 'libd3d11.a'))) {
+        Write-Host "[dll] ddraw.dll re-link (compat shim -> d3d11.dll)"
+        & $zig cc @dc '-Wl,--image-base=0x3E00000' '-Wl,--dynamicbase' `
+            "-Wl,--out-implib,$(Join-Path $out 'libddraw.a')" `
+            -o (Join-Path $out 'ddraw.dll') $ddrawSrc (Join-Path $out 'libd3d11.a')
+        if ($LASTEXITCODE) { throw "ddraw.dll re-link falhou." }
+    }
+    # d3d12.dll (FASE 9.8): Direct3D 12 stub. API grafica PRIMARIA do Win10+; vtable
+    #   COM completa de ID3D12Device + ID3D12CommandQueue + ID3D12CommandList +
+    #   recursos + fences. ImageBase 0x4600000 — tambem colide com PMM, mesma
+    #   estrategia (--dynamicbase + .reloc) que d3d11.
+    if (Test-Path $d3d12Src) {
+        & $zig cc @dc '-Wl,--image-base=0x4600000' '-Wl,--dynamicbase' `
+            "-Wl,--out-implib,$(Join-Path $out 'libd3d12.a')" `
+            -o (Join-Path $out 'd3d12.dll') $d3d12Src
+        if ($LASTEXITCODE) { throw "d3d12.dll falhou." }
+    }
+    # d2d1.dll (FASE 9.9): Direct2D stub. API 2D moderna do Win7+ (acima de D3D10/11);
+    #   vtable COM completa de ID2D1Factory + ID2D1RenderTarget + ID2D1Brush +
+    #   ID2D1Bitmap + ID2D1Geometry. Sem rasterizador real (BasicDisplay e dono do FB),
+    #   so ABI completo. ImageBase 0x4700000 — colide com PMM 0x4000000, mesma
+    #   estrategia (--dynamicbase + .reloc) de d3d11/d3d12.
+    if (Test-Path $d2d1Src) {
+        & $zig cc @dc '-Wl,--image-base=0x4700000' '-Wl,--dynamicbase' `
+            "-Wl,--out-implib,$(Join-Path $out 'libd2d1.a')" `
+            -o (Join-Path $out 'd2d1.dll') $d2d1Src
+        if ($LASTEXITCODE) { throw "d2d1.dll falhou." }
+    }
+    # dwrite.dll (FASE 9.9): DirectWrite stub. API moderna de texto do Win7+ (acima
+    #   do GDI/Uniscribe); vtable COM completa de IDWriteFactory + IDWriteTextFormat
+    #   + IDWriteTextLayout + IDWriteFontCollection + IDWriteFontFamily + IDWriteFont.
+    #   Sem fontes reais (font8x8 do bitmap em modo texto e o suficiente), so metricas
+    #   estimadas. ImageBase 0x4800000 — colide com PMM, mesma estrategia (--dynamicbase
+    #   + .reloc) de d3d11/d3d12/d2d1.
+    if (Test-Path $dwriteSrc) {
+        & $zig cc @dc '-Wl,--image-base=0x4800000' '-Wl,--dynamicbase' `
+            "-Wl,--out-implib,$(Join-Path $out 'libdwrite.a')" `
+            -o (Join-Path $out 'dwrite.dll') $dwriteSrc
+        if ($LASTEXITCODE) { throw "dwrite.dll falhou." }
+    }
+    # dxcore.dll (FASE 9.9): DXCore stub. Alternativa leve ao DXGI introduzida no
+    #   Windows 11 para enumeracao de adapters (sem swap chains, sem outputs). vtable
+    #   COM completa de IDXCoreAdapterFactory + IDXCoreAdapterList + IDXCoreAdapter
+    #   com GetProperty para HardwareID/DriverDescription/luid/memorias/etc. Ideal
+    #   para apps DirectML/D3D12 compute headless. ImageBase 0x4900000 — colide com
+    #   PMM, mesma estrategia (--dynamicbase + .reloc) das outras DLLs DX desta fase.
+    if (Test-Path $dxcoreSrc) {
+        & $zig cc @dc '-Wl,--image-base=0x4900000' '-Wl,--dynamicbase' `
+            "-Wl,--out-implib,$(Join-Path $out 'libdxcore.a')" `
+            -o (Join-Path $out 'dxcore.dll') $dxcoreSrc
+        if ($LASTEXITCODE) { throw "dxcore.dll falhou." }
     }
 }
 
@@ -230,6 +329,25 @@ if ((Test-Path $dxdemoApp) -and (Test-Path (Join-Path $out 'libd3d9.a')) -and `
         (Join-Path $out 'libgdi32.a')    (Join-Path $out 'libntdll.a') `
         (Join-Path $out 'libddraw.a')    (Join-Path $out 'libd3d9.a')
     if ($LASTEXITCODE) { throw "Compilacao do dxdemo\dxdemo.c falhou." }
+}
+
+# FASE 9.10 — DEMO Direct3D 11 / WDDM 2.x (.exe): CreateWindow + DXGI factory
+# + EnumAdapters + D3D11CreateDeviceAndSwapChain + ClearRenderTargetView +
+# Present. Linka contra libdxgi.a + libd3d11.a + libkernel32/libuser32/libgdi32/
+# libntdll. ImageBase 0x420000: faixa baixa livre entre o kernel
+# (0x100000-~0x1D5000) e o USTACK (0x600000); 128 KiB depois de 0x400000 (dxdemo)
+# — distancia segura para evitar colisao.
+$d3d11demoApp = Join-Path $ex 'd3d11demo\d3d11demo.c'
+if ((Test-Path $d3d11demoApp) -and (Test-Path (Join-Path $out 'libdxgi.a')) -and `
+    (Test-Path (Join-Path $out 'libd3d11.a'))) {
+    Write-Host "[exemplo] apps\d3d11demo\d3d11demo.c -> build\d3d11demo.exe (.exe DXGI + D3D11)"
+    & $zig cc -target x86_64-windows-gnu -nostdlib -e _start `
+        '-Wl,--image-base=0x420000' '-Wl,--subsystem,console' "-I$sdk", "-I$ddk" `
+        -o (Join-Path $out 'd3d11demo.exe') $d3d11demoApp `
+        (Join-Path $out 'libkernel32.a') (Join-Path $out 'libuser32.a') `
+        (Join-Path $out 'libgdi32.a')    (Join-Path $out 'libntdll.a') `
+        (Join-Path $out 'libdxgi.a')     (Join-Path $out 'libd3d11.a')
+    if ($LASTEXITCODE) { throw "Compilacao do d3d11demo\d3d11demo.c falhou." }
 }
 
 # FASE 4 — DEMO informacao do sistema (.exe): NtQuerySystemInformation (versao do
@@ -306,6 +424,12 @@ $cflags = @(
     '-std=c11','-Wall','-Wextra','-O2','-c'
 )
 foreach ($f in (Get-ChildItem -Path $src -Recurse -Filter *.c)) {
+    # FASE 9.10 — modelo NT 6.4+ de split do win32k: o subsistema agora vive em
+    # 3 arquivos (win32kbase.c, win32kfull.c, win32k.c). Apenas win32k.c e
+    # compilado; ele faz #include dos outros dois para formar UM unico TU
+    # (mesmo modelo Reactos quando precisa preservar nomes de simbolos com
+    # storage 'static'). Pular os parciais aqui evita duplicidade.
+    if ($f.Name -eq 'win32kbase.c' -or $f.Name -eq 'win32kfull.c') { continue }
     $o = Get-ObjName $f
     Write-Host "[cc ] $($f.FullName.Substring($src.Length+1))"
     & $zig cc @cflags $f.FullName -o $o

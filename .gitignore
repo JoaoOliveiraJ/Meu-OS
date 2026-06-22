@@ -1,0 +1,12 @@
+# Ferramentas baixadas e saidas de build
+tools/
+build/
+*.o
+*.elf
+*.log
+
+# Jogo proprietario da Microsoft (3D Pinball Space Cadet) — alvo de teste local,
+# NAO redistribuir. Fica so na sua maquina, fora do repositorio.
+Pinball/
+*.exe
+*.sys

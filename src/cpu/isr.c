@@ -12,6 +12,109 @@ extern void kput_hex(uint64_t v);
 
 volatile uint64_t g_ticks = 0;
 
+// ============================================================================
+//  FASE 7.13 — single-step CPUID interception (software "mini-hipervisor").
+//
+//  Quando g_intercept_cpuid != 0, antes de chamar DriverEntry o driver.c liga
+//  RFLAGS.TF=1 (Trap Flag). A CPU dispara #DB (int 1) DEPOIS de cada instrucao
+//  executada. No handler abaixo, se a instrucao anterior foi CPUID (opcode
+//  0F A2), reescrevemos EAX/EBX/ECX/EDX no 'struct regs' — quando IRETQ
+//  restaurar os registradores, o driver vera os valores FAKE que escolhemos
+//  em vez do que o QEMU TCG retornou. Tudo em ring 0, sem VMX/SVM.
+//
+//  Mascaras aplicadas:
+//   - CPUID.1: zera bit 31 de ECX (HypervisorPresent)
+//   - CPUID.0x40000000..0x4FFFFFFF: zera EAX/EBX/ECX/EDX (esconde TCGTCGTCGTCG)
+//
+//  Anti-loop NAO e necessario aqui (TF e por design: cada iret = +1 step ate
+//  desligarmos TF).
+// ============================================================================
+volatile int g_intercept_cpuid = 0;
+volatile uint64_t g_cpuid_intercepts = 0;   // contador p/ telemetria
+volatile uint64_t g_rdtsc_intercepts = 0;
+volatile uint64_t g_rdmsr_intercepts = 0;
+
+// TSC fake: cresce monotonicamente em deltas pequenos (1000 "ciclos" por leitura).
+// Evita revelar que estamos single-stepping (deltas reais seriam ENORMES).
+static uint64_t s_fake_tsc = 0x100000ULL;
+
+static int try_intercept(struct regs* r) {
+    if (!g_intercept_cpuid) return 0;
+    if (r->rip < 2) return 0;
+
+    // RDTSCP e 3 bytes: 0F 01 F9. Checa antes de RDTSC porque os ultimos 2
+    // bytes de RDTSCP sao "01 F9" que NAO conflita com nada interessante.
+    if (r->rip >= 3) {
+        uint8_t b0 = *(volatile uint8_t*)(uintptr_t)(r->rip - 3);
+        uint8_t b1 = *(volatile uint8_t*)(uintptr_t)(r->rip - 2);
+        uint8_t b2 = *(volatile uint8_t*)(uintptr_t)(r->rip - 1);
+        if (b0 == 0x0F && b1 == 0x01 && b2 == 0xF9) {   // RDTSCP
+            s_fake_tsc += 1000;
+            r->rax = s_fake_tsc & 0xFFFFFFFFULL;
+            r->rdx = s_fake_tsc >> 32;
+            // RDTSCP tambem escreve em ECX (TSC_AUX/processor id) — zero.
+            r->rcx = 0;
+            g_rdtsc_intercepts++;
+            return 1;
+        }
+    }
+
+    uint16_t opc = *(volatile uint16_t*)(uintptr_t)(r->rip - 2);
+
+    // CPUID: 0F A2
+    if (opc == 0xA20F) {
+        uint32_t leaf = (uint32_t)r->rax;
+        // A CPU ja executou o CPUID; rax/rbx/rcx/rdx tem os valores REAIS do TCG.
+        // Sobrescrevemos no frame — IRETQ restaura os fakes para o driver.
+        if (leaf >= 0x40000000u && leaf <= 0x4FFFFFFFu) {
+            r->rax = 0; r->rbx = 0; r->rcx = 0; r->rdx = 0;
+        } else if (leaf == 1u) {
+            r->rcx &= ~(1ULL << 31);   // limpa HypervisorPresent
+        }
+        // Loga o leaf na primeira ocorrencia de cada (para nao floodar serial).
+        static uint32_t s_seen[16]; static int s_nseen = 0;
+        int already = 0;
+        for (int i = 0; i < s_nseen; i++) if (s_seen[i] == leaf) { already = 1; break; }
+        if (!already && s_nseen < 16) {
+            s_seen[s_nseen++] = leaf;
+            kputs("  [intercept] CPUID leaf=0x"); kput_hex(leaf); kputs("\n");
+        }
+        g_cpuid_intercepts++;
+        return 1;
+    }
+
+    // RDTSC: 0F 31  — devolve TSC fake (delta pequeno consistente)
+    if (opc == 0x310F) {
+        s_fake_tsc += 1000;
+        r->rax = s_fake_tsc & 0xFFFFFFFFULL;
+        r->rdx = s_fake_tsc >> 32;
+        g_rdtsc_intercepts++;
+        return 1;
+    }
+
+    // RDMSR: 0F 32  — loga MSR e devolve 0 (driver ve MSR nao-implementado)
+    if (opc == 0x320F) {
+        uint32_t msr = (uint32_t)r->rcx;
+        r->rax = 0; r->rdx = 0;
+        // Log so na 1a vez de cada MSR.
+        static uint32_t s_msr_seen[32]; static int s_nmsr = 0;
+        int already = 0;
+        for (int i = 0; i < s_nmsr; i++) if (s_msr_seen[i] == msr) { already = 1; break; }
+        if (!already && s_nmsr < 32) {
+            s_msr_seen[s_nmsr++] = msr;
+            kputs("  [intercept] RDMSR msr=0x"); kput_hex(msr); kputs(" -> 0\n");
+        }
+        g_rdmsr_intercepts++;
+        return 1;
+    }
+
+    return 0;
+}
+
+uint64_t cpuid_intercept_count(void) { return g_cpuid_intercepts; }
+uint64_t rdtsc_intercept_count(void) { return g_rdtsc_intercepts; }
+uint64_t rdmsr_intercept_count(void) { return g_rdmsr_intercepts; }
+
 static const char* exc_names[32] = {
     "Divisao por zero", "Debug", "NMI", "Breakpoint (int3)", "Overflow",
     "BOUND fora de faixa", "Opcode invalido", "Dispositivo indisponivel",
@@ -108,6 +211,16 @@ void isr_handler(struct regs* r) {
         // int3 (breakpoint): tratamos como nao-fatal so para demonstrar a IDT.
         if (r->int_no == 3) {
             kputs("\n[exc] int3 capturado pela IDT — continuando normalmente.\n");
+            return;
+        }
+        // FASE 7.13: #DB (int 1) gerado pelo Trap Flag (single-step). Se
+        // estamos interceptando CPUID, tenta reescrever o frame e retorna.
+        // CPU ja limpou TF na RFLAGS atual; a RFLAGS salvada no frame ainda
+        // tem TF=1, entao o IRETQ continua o single-step.
+        if (r->int_no == 1) {
+            if (try_intercept(r)) return;
+            // #DB nao causado por intercept conhecido (instrucao normal sob TF).
+            // No-op: IRETQ continua o single-step ate desligarmos TF.
             return;
         }
         kputs("\n[EXCECAO] vetor=");

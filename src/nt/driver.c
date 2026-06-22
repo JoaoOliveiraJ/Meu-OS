@@ -203,10 +203,46 @@ static PDRIVER_OBJECT driver_build_and_entry(const char* drv_name, const void* i
     // sua chamada SOMENTE durante esta janela. Apos retornar, desliga. Assim
     // vemos exatamente quais APIs o driver tocou e a ULTIMA antes do bail.
     extern volatile int g_pintok_trace;
+    // FASE 7.13: interceptacao de CPUID via single-step (Trap Flag). Antes
+    // do DriverEntry liga g_intercept_cpuid=1 e RFLAGS.TF=1. Cada instrucao
+    // do driver dispara #DB; o handler em src/cpu/isr.c reescreve EAX/EBX/
+    // ECX/EDX se a instrucao foi CPUID, escondendo o vendor TCG e o bit
+    // HypervisorPresent. Apos retorno, desliga TF e o interceptor.
+    extern volatile int g_intercept_cpuid;
+    extern uint64_t cpuid_intercept_count(void);
+    extern uint64_t rdtsc_intercept_count(void);
+    extern uint64_t rdmsr_intercept_count(void);
     kputs("[io] chamando DriverEntry...\n");
     g_pintok_trace = 1;
+    uint64_t cpuid_before = cpuid_intercept_count();
+    g_intercept_cpuid = 1;
+    // Liga TF na RFLAGS atual modificando o valor empilhado e re-popando.
+    __asm__ volatile (
+        "pushfq                \n"
+        "orq $0x100, (%%rsp)   \n"   // TF (bit 8) = 1
+        "popfq                 \n"
+        ::: "memory", "cc"
+    );
     NTSTATUS st = DriverEntry(drv, &reg);
+    // Desliga TF antes de qualquer outra coisa (proxima instrucao C nao seria
+    // single-stepada porque o IRETQ ja restaurou TF=1, mas garantimos aqui).
+    __asm__ volatile (
+        "pushfq                  \n"
+        "andq $-257, (%%rsp)     \n"   // TF (bit 8) = 0
+        "popfq                   \n"
+        ::: "memory", "cc"
+    );
+    g_intercept_cpuid = 0;
     g_pintok_trace = 0;
+    uint64_t cpuid_after = cpuid_intercept_count();
+    uint64_t rdtsc_n    = rdtsc_intercept_count();
+    uint64_t rdmsr_n    = rdmsr_intercept_count();
+    if (cpuid_after > cpuid_before || rdtsc_n || rdmsr_n) {
+        kputs("[io] intercept totals: CPUID x"); kput_dec(cpuid_after - cpuid_before);
+        kputs("  RDTSC x"); kput_dec(rdtsc_n);
+        kputs("  RDMSR x"); kput_dec(rdmsr_n);
+        kputs("\n");
+    }
     kputs("[io] DriverEntry retornou status="); kput_hex((uint32_t)st);
     kputs(st == STATUS_SUCCESS ? "  (STATUS_SUCCESS)\n" : "\n");
 

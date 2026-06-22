@@ -4,6 +4,112 @@ Todas as mudanças relevantes do projeto. Formato baseado em
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.0/) e
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.4.0] - 2026-06-22
+
+Quarta versão. **Reorganização arquitetural total**: estrutura de pastas
+agora espelha o **Windows Research Kit (WRK) / ReactOS** com hierarquia
+`src/ntos/{ke,ex,mm,ob,io,ps,cm,lpc,ldr,init,inc}`, separacao
+arquitetural (`src/ntos/ke/amd64/` para tudo x86_64-especifico),
+diretorios por subsistema (`src/drivers/{input,video,serial,filesystems}`,
+`src/subsystems/win32/`) e DLLs em subpastas (`dll/ntdll/`,
+`dll/win32/{kernel32,user32,gdi32,advapi32}/`). 88 arquivos movidos via
+`git mv` (preservam historico). Build verde, boot verde, zero regressao.
+
+### Alterado
+
+- **FASE 8 — Reorganizacao de pastas estilo NT (WRK/ReactOS)**
+  *(88 arquivos movidos, ~31 `#include`s reescritos, `build.ps1` ajustado)*:
+
+  Estrutura nova:
+  ```
+  src/
+  ├── boot/                       ← multiboot stub (era src/arch/boot.asm)
+  │   └── boot.asm
+  ├── ntos/                       ← ntoskrnl (executive)
+  │   ├── ntoskrnl.c              ← era nt/ntexec.c (export table)
+  │   ├── inc/io.h                ← era src/include/io.h
+  │   ├── init/main.c             ← era src/kernel.c
+  │   ├── ke/                     ← Kernel (sync/dispatcher)
+  │   │   ├── sync.c              ← KEVENT/KSPIN_LOCK/KMUTEX
+  │   │   ├── cpu_features.c      ← CR4/XCR0
+  │   │   └── amd64/              ← arquitetura-especifico
+  │   │       ├── isr.asm, idt.c, pic.c, pit.c, isr.c
+  │   │       ├── gdt.c, kpcr.c, msr_init.c
+  │   │       ├── syscall.c, syscall_entry.asm
+  │   │       └── usermode.c
+  │   ├── ex/                     ← Executive
+  │   │   ├── pool.c              ← ExAllocatePool (era ke/pool.c)
+  │   │   ├── callbacks.c         ← Ps/Ob/Cm callbacks (era nt/callbacks.c)
+  │   │   └── seh.c               ← __C_specific_handler (era nt/seh.c)
+  │   ├── mm/                     ← Memory Manager
+  │   │   ├── pmm.c, heap.c, paging.c, mdl.c
+  │   │   ├── section.c           ← era nt/section.c
+  │   │   └── virtmem.c           ← era mm/virtual_memory.c (renomeado)
+  │   ├── ob/object.c             ← Object Manager (era nt/object.c)
+  │   ├── io/                     ← I/O Manager
+  │   │   ├── io.c                ← IRPs (era nt/io.c)
+  │   │   └── driver.c            ← Driver loading (era nt/driver.c)
+  │   ├── ps/                     ← Process Manager
+  │   │   ├── process.c           ← EPROCESS/ETHREAD (era nt/process.c)
+  │   │   ├── cid_table.c         ← PspCidTable (era nt/cid_table.c)
+  │   │   └── systhread.c         ← PsCreateSystemThread (era ke/systhread.c)
+  │   ├── cm/registry.c           ← Configuration Manager (era nt/registry.c)
+  │   ├── lpc/pipe.c              ← Local Procedure Call (era nt/pipe.c)
+  │   └── ldr/                    ← PE Loader (era src/loader/)
+  │       ├── loader.c, pe.c
+  ├── hal/                        ← HAL (mantido)
+  ├── drivers/                    ← built-in drivers
+  │   ├── input/keyboard.{c,h}
+  │   ├── video/{vga,video,font8x8}
+  │   ├── serial/serial.{c,h}
+  │   └── filesystems/ntfs/{ntfs.c,ntfs.h,ntfs_fs.c}
+  └── subsystems/win32/{win32,win32k}
+
+  dll/
+  ├── ntdll/ntdll.c
+  └── win32/{kernel32,user32,gdi32,advapi32}/<name>.c
+  ```
+
+  Mapeamento de `#include`s (substituidos em 31 arquivos por `-replace`):
+  - `nt/object.h` → `ob/object.h`
+  - `nt/io.h` → `io/io.h`
+  - `nt/driver.h` → `io/driver.h`
+  - `nt/process.h` → `ps/process.h`
+  - `nt/cid_table.h` → `ps/cid_table.h`
+  - `nt/callbacks.h` → `ex/callbacks.h`
+  - `nt/section.h` → `mm/section.h`
+  - `nt/registry.h` → `cm/registry.h`
+  - `nt/pipe.h` → `lpc/pipe.h`
+  - `nt/ntexec.h` → `ntoskrnl.h`
+  - `ke/pool.h` → `ex/pool.h`
+  - `ke/systhread.h` → `ps/systhread.h`
+  - `ke/{gdt,kpcr,syscall,usermode}.h` → `ke/amd64/...`
+  - `cpu/{idt,isr,pic,pit}.h` → `ke/amd64/...`
+  - `mm/virtual_memory.h` → `mm/virtmem.h`
+  - `loader/{loader,pe}.h` → `ldr/...`
+  - `drivers/keyboard.h` → `input/keyboard.h`
+  - `drivers/serial.h` → `serial/serial.h`
+  - `drivers/{vga,video}.h` → `video/...`
+  - `drivers/ntfs.h` → `filesystems/ntfs/ntfs.h`
+
+  Ajustes em `build.ps1`:
+  - Novos `-I` paths: `-I src/ntos`, `-I src/ntos/inc`, `-I src/drivers`,
+    `-I src/subsystems` (alem de `-I src` e `-I sdk` ja existentes). Isso faz
+    `#include "ke/sync.h"` resolver em `src/ntos/ke/sync.h` automaticamente,
+    sem precisar prefixar `ntos/` nos `#include`s.
+  - Paths das DLLs atualizados: `dll/ntdll.c` → `dll/ntdll/ntdll.c`, etc.
+  - **HOTFIX**: `Get-ObjName` agora inclui a extensao no nome do `.o`
+    (`ntos_ke_amd64_isr_asm.o` vs `ntos_ke_amd64_isr_c.o`). Antes, com
+    `isr.asm` e `isr.c` na MESMA pasta `src/ntos/ke/amd64/`, ambos
+    gravavam o mesmo `ntos_ke_amd64_isr.o` — o `.c` sobrescrevia o `.asm`
+    e o link falhava com `undefined symbol: isr_stub_table`.
+
+  **Evidencia** (build + run.ps1 -Headless): build verde com 47 .o
+  (4 asm + 43 c), link OK, `kernel.bin` gerado. Boot: 16 `[ok]`, 0
+  `[EXCECAO]`, 3x `DriverEntry status=0x0`, 3x `0xCAFEBABE` (IOCTL
+  intacto), `Sistema no ar`. **calller.sys, mydriver.sys, ioctldriver.sys,
+  guiapp.exe, desktop.exe, todos os apps anteriores rodam 1:1.**
+
 ## [0.3.0] - 2026-06-22
 
 Terceira versão. Foco em **mini-hipervisor de software puro via Trap Flag**:
@@ -878,7 +984,8 @@ do Windows (PE32+) com arquitetura no estilo NT.
 - `cpuid` destruía `EBX` (ponteiro do Multiboot) — `EBX` passou a ser salvo no
   primeiro instante do boot, antes de qualquer `cpuid`.
 
-[Não lançado]: https://github.com/JoaoOliveiraJ/Meu-OS/compare/v0.3.0...HEAD
+[Não lançado]: https://github.com/JoaoOliveiraJ/Meu-OS/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.4.0
 [0.3.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.3.0
 [0.2.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.2.0
 [0.1.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.1.0

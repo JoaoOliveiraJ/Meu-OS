@@ -1,0 +1,750 @@
+#include <stdint.h>
+#include <stddef.h>
+#include "video/vga.h"
+#include "video/video.h"
+#include "serial/serial.h"
+#include "input/keyboard.h"
+#include "ke/amd64/gdt.h"
+#include "ke/amd64/idt.h"
+#include "ke/amd64/pic.h"
+#include "ke/amd64/pit.h"
+#include "ke/amd64/isr.h"
+#include "mm/pmm.h"
+#include "mm/heap.h"
+#include "hal/hal.h"
+#include "hal/cpu.h"
+#include "hal/disk.h"
+#include "filesystems/ntfs/ntfs.h"
+#include "ldr/loader.h"
+#include "io/driver.h"
+#include "ob/object.h"
+#include "io/io.h"
+#include "ps/process.h"
+#include "ex/callbacks.h"
+#include "cm/registry.h"
+#include "ps/cid_table.h"   // FASE 7.5: PspCidTable
+#include "win32/win32k.h"
+
+// FS layer (ntfs_fs.c): device de volume registrado no I/O Manager.
+PDEVICE_OBJECT ntfs_fs_volume_device(void);
+
+// Escreve um caractere na tela (VGA) E na serial.
+void kputc(char c) {
+    vga_putc(c);
+    if (c == '\n') serial_putc('\r');
+    serial_putc(c);
+}
+void kputs(const char* s) { while (*s) kputc(*s++); }
+
+void kput_hex(uint64_t v) {
+    const char* d = "0123456789ABCDEF";
+    kputc('0'); kputc('x');
+    for (int i = 60; i >= 0; i -= 4) kputc(d[(v >> i) & 0xF]);
+}
+void kput_dec(uint64_t v) {
+    char buf[21]; int i = 0;
+    if (v == 0) { kputc('0'); return; }
+    while (v) { buf[i++] = (char)('0' + (v % 10)); v /= 10; }
+    while (i--) kputc(buf[i]);
+}
+
+// Rotinas que o compilador pode chamar implicitamente (freestanding).
+void* memset(void* dst, int v, size_t n) {
+    uint8_t* p = (uint8_t*)dst; while (n--) *p++ = (uint8_t)v; return dst;
+}
+void* memcpy(void* dst, const void* s, size_t n) {
+    uint8_t* a = (uint8_t*)dst; const uint8_t* b = (const uint8_t*)s;
+    while (n--) *a++ = *b++; return dst;
+}
+void* memmove(void* dst, const void* s, size_t n) {
+    uint8_t* a = (uint8_t*)dst; const uint8_t* b = (const uint8_t*)s;
+    if (a < b) { while (n--) *a++ = *b++; }
+    else { a += n; b += n; while (n--) *--a = *--b; }
+    return dst;
+}
+int memcmp(const void* a, const void* b, size_t n) {
+    const uint8_t* x = (const uint8_t*)a; const uint8_t* y = (const uint8_t*)b;
+    while (n--) { if (*x != *y) return (int)*x - (int)*y; x++; y++; }
+    return 0;
+}
+
+// ----------------------------------------------------------------------------
+//  FASE 2 (HAL disco) — teste do disco IDE: le o MBR (setor 0), localiza a
+//  particao NTFS na tabela de particoes e le o BOOT SECTOR dessa particao,
+//  conferindo a assinatura "NTFS    " no offset 3 (regra 4: tudo logado).
+//
+//  Roda DEPOIS de hal_init (a HAL ja achou o controlador IDE) e ANTES de tocar
+//  o framebuffer, para preservar os logs no VGA texto. Sem -Disk, o disco nao
+//  esta presente e a funcao apenas reporta isso (boot segue verde).
+//
+//  Retorna o LBA inicial da particao NTFS (>0) se achou e validou; 0 senao.
+//  Esse LBA e o ponto de partida para montar o NTFS nas fases seguintes.
+// ----------------------------------------------------------------------------
+static uint32_t g_ntfs_part_lba = 0;   // LBA inicial da particao NTFS (0 = nenhuma)
+
+static uint32_t disk_test(void) {
+    kputs("\n--- FASE 2: teste do disco IDE (MBR + boot sector NTFS) ---\n");
+
+    if (!hal_disk_init()) {
+        kputs("[disk] sem disco anexado; pulando o teste de leitura "
+              "(rode: .\\run.ps1 -Headless -Disk).\n");
+        return 0;
+    }
+
+    // 1) Setor 0 = MBR (Master Boot Record).
+    static uint8_t sec[HAL_SECTOR_SIZE];
+    if (HalReadSector(0, sec) != 0) {
+        kputs("[disk] falha ao ler o setor 0 (MBR).\n");
+        return 0;
+    }
+
+    // Assinatura do MBR: 0x55 0xAA nos offsets 510/511.
+    kputs("[disk] MBR assinatura @510 = ");
+    kput_hex(sec[510]); kputc(' '); kput_hex(sec[511]);
+    kputs((sec[510] == 0x55 && sec[511] == 0xAA) ? "  (0x55AA OK)\n"
+                                                 : "  (sem 0x55AA)\n");
+
+    // 2) Tabela de particoes: 4 entradas de 16 bytes a partir do offset 0x1BE.
+    //    Cada entrada: +0 status, +4 type, +8 LBA inicial (dword LE), +12 nsec.
+    //    Procuramos a 1a particao do tipo NTFS (0x07) com LBA inicial valido.
+    uint32_t part_lba = 0;
+    uint8_t  part_type = 0;
+    for (int i = 0; i < 4; i++) {
+        const uint8_t* e = sec + 0x1BE + i * 16;
+        uint8_t  type = e[4];
+        uint32_t lba  = (uint32_t)e[8] | ((uint32_t)e[9] << 8) |
+                        ((uint32_t)e[10] << 16) | ((uint32_t)e[11] << 24);
+        uint32_t nsec = (uint32_t)e[12] | ((uint32_t)e[13] << 8) |
+                        ((uint32_t)e[14] << 16) | ((uint32_t)e[15] << 24);
+        if (type == 0x00) continue;            // entrada vazia
+        kputs("[disk] particao "); kput_dec(i);
+        kputs(": type="); kput_hex(type);
+        kputs(" LBA="); kput_dec(lba);
+        kputs(" nsec="); kput_dec(nsec); kputc('\n');
+        if (part_lba == 0 && (type == 0x07 || type == 0x17)) {  // NTFS / NTFS oculta
+            part_lba = lba; part_type = type;
+        }
+    }
+
+    // Algumas imagens "superfloppy" nao tem MBR/particao: o setor 0 ja e o boot
+    // sector NTFS. Detectamos isso pela assinatura no proprio setor 0.
+    if (part_lba == 0) {
+        if (sec[3] == 'N' && sec[4] == 'T' && sec[5] == 'F' && sec[6] == 'S') {
+            kputs("[disk] sem tabela de particao MBR; setor 0 ja e o boot NTFS "
+                  "(imagem superfloppy).\n");
+            g_ntfs_part_lba = 0;
+            kputs("[disk] assinatura 'NTFS    ' confirmada no boot sector.\n");
+            return 0;   // particao comeca no LBA 0
+        }
+        kputs("[disk] nenhuma particao NTFS (type 0x07) na tabela do MBR.\n");
+        return 0;
+    }
+    (void)part_type;
+
+    // 3) Le o boot sector (VBR) da particao NTFS e confere "NTFS    " @offset 3.
+    kputs("[disk] particao NTFS no LBA "); kput_dec(part_lba);
+    kputs("; lendo o boot sector (VBR)...\n");
+    if (HalReadSector(part_lba, sec) != 0) {
+        kputs("[disk] falha ao ler o boot sector da particao.\n");
+        return 0;
+    }
+
+    // OEM ID no offset 3: deve ser "NTFS    " (NTFS + 4 espacos).
+    kputs("[disk] OEM @3 = '");
+    for (int i = 0; i < 8; i++) {
+        char c = (char)sec[3 + i];
+        kputc((c >= 0x20 && c < 0x7F) ? c : '.');
+    }
+    kputs("'\n");
+
+    int is_ntfs = (sec[3] == 'N' && sec[4] == 'T' && sec[5] == 'F' && sec[6] == 'S');
+    if (is_ntfs) {
+        // BPB do NTFS (campos uteis para a montagem nas proximas fases):
+        uint16_t bytes_per_sec = (uint16_t)(sec[11] | (sec[12] << 8));
+        uint8_t  sec_per_clus  = sec[13];
+        uint64_t total_sectors = 0, mft_lcn = 0;
+        for (int i = 0; i < 8; i++) total_sectors |= (uint64_t)sec[0x28 + i] << (i * 8);
+        for (int i = 0; i < 8; i++) mft_lcn       |= (uint64_t)sec[0x30 + i] << (i * 8);
+        kputs("[disk] NTFS BPB: bytes/setor="); kput_dec(bytes_per_sec);
+        kputs(" setores/cluster="); kput_dec(sec_per_clus);
+        kputs(" total_setores="); kput_dec(total_sectors);
+        kputs(" MFT_LCN="); kput_dec(mft_lcn); kputc('\n');
+        kputs("[disk] assinatura 'NTFS    ' confirmada no boot sector -> OK\n");
+        g_ntfs_part_lba = part_lba;
+
+        // --- Prova de HalWriteSector (NAO destrutiva): le um setor de SOBRA bem
+        //     longe da area usada (so o MBR/boot/MFT estao escritos), salva o
+        //     conteudo, escreve um padrao, le de volta conferindo, e RESTAURA o
+        //     original. Assim comprovamos a ESCRITA por PIO sem corromper a
+        //     imagem (regra 4: setor escrito logado; regra 3: nao quebrar nada).
+        uint32_t scratch = 100000;   // dentro da particao, em area NTFS nao alocada
+        if (scratch < hal_disk_sector_count()) {
+            static uint8_t saved[HAL_SECTOR_SIZE];
+            static uint8_t pattern[HAL_SECTOR_SIZE];
+            static uint8_t readback[HAL_SECTOR_SIZE];
+            kputs("[disk] teste de ESCRITA (nao destrutivo) no setor de sobra ");
+            kput_dec(scratch); kputs(":\n");
+            if (HalReadSector(scratch, saved) == 0) {
+                for (int i = 0; i < HAL_SECTOR_SIZE; i++)
+                    pattern[i] = (uint8_t)(0xA5 ^ (i & 0xFF));
+                if (HalWriteSector(scratch, pattern) == 0 &&
+                    HalReadSector(scratch, readback) == 0) {
+                    int ok = 1;
+                    for (int i = 0; i < HAL_SECTOR_SIZE; i++)
+                        if (readback[i] != pattern[i]) { ok = 0; break; }
+                    kputs(ok ? "[disk] write/readback BATE (escrita PIO OK).\n"
+                             : "[disk] write/readback DIVERGE!\n");
+                    // Restaura o conteudo original (imagem volta ao estado anterior).
+                    HalWriteSector(scratch, saved);
+                    kputs("[disk] setor de sobra restaurado ao conteudo original.\n");
+                }
+            }
+        }
+    } else {
+        kputs("[disk] assinatura NTFS ausente no boot sector (particao nao montada).\n");
+    }
+    return g_ntfs_part_lba;
+}
+
+// ----------------------------------------------------------------------------
+//  FASE 3 — Teste do driver NTFS (LEITURA) + camada de File System.
+//
+//  Monta o volume NTFS (BPB + $MFT), LE \hello.txt resolvendo o caminho ate o
+//  $DATA e mostra o conteudo na serial (deve bater com o texto conhecido da
+//  imagem de teste), e LISTA o diretorio raiz. Tambem exercita a camada de FS
+//  via I/O Manager (FsMountVolume registra \Device\Harddisk0\Partition1 e o
+//  NtCreateFile/NtReadFile resolvem caminho -> MFT -> $DATA).
+//
+//  Roda apos disk_test(), so se houver um volume NTFS (g_ntfs_part_lba).
+// ----------------------------------------------------------------------------
+static void ntfs_print_dir_entry(int index, const NTFS_FILE_INFO* info, void* ctx) {
+    (void)ctx;
+    kputs("[ntfs]   ["); kput_dec(index); kputs("] ");
+    kputs(info->is_dir ? "<DIR>  " : "       ");
+    kputs(info->name);
+    if (!info->is_dir) { kputs("   ("); kput_dec(info->size); kputs(" bytes)"); }
+    kputs("  -> MFT #"); kput_dec(info->mft_record);
+    kputc('\n');
+}
+
+static void ntfs_test(uint32_t part_lba) {
+    // Monta o volume e registra o device de FS no I/O Manager (camada de FS).
+    if (!FsMountVolume(part_lba)) {
+        kputs("[ntfs] montagem/registro do volume falhou; pulando o teste NTFS.\n");
+        return;
+    }
+
+    // 1) LISTAR o diretorio raiz (\). Percorre $INDEX_ROOT/$INDEX_ALLOCATION.
+    kputs("\n[ntfs] === LISTAGEM DO DIRETORIO RAIZ (\\) ===\n");
+    int n = ntfs_list_dir(NTFS_MFT_ROOT, ntfs_print_dir_entry, 0);
+    kputs("[ntfs] total de entradas no diretorio raiz: "); kput_dec(n); kputc('\n');
+
+    // 2) LER \hello.txt: resolve o caminho -> registro MFT -> $DATA, e mostra
+    //    o conteudo (deve == o texto conhecido gravado pela imagem de teste).
+    kputs("\n[ntfs] === LEITURA DE \\hello.txt ===\n");
+    NTFS_FILE_INFO fi;
+    if (ntfs_resolve_path("\\hello.txt", &fi)) {
+        kputs("[ntfs] \\hello.txt resolvido: MFT #"); kput_dec(fi.mft_record);
+        kputs(", tamanho "); kput_dec(fi.size); kputs(" bytes, ");
+        kputs(fi.is_dir ? "DIRETORIO" : "ARQUIVO"); kputc('\n');
+
+        static char content[1024];
+        uint32_t got = ntfs_read_file(fi.mft_record, 0, content,
+                                      (uint32_t)(sizeof(content) - 1));
+        content[got < sizeof(content) ? got : sizeof(content) - 1] = 0;
+        kputs("[ntfs] bytes lidos do $DATA: "); kput_dec(got); kputc('\n');
+        kputs("[ntfs] ---- conteudo de \\hello.txt ----\n");
+        kputs(content);
+        if (got && content[got - 1] != '\n') kputc('\n');
+        kputs("[ntfs] ---- fim do conteudo ----\n");
+    } else {
+        kputs("[ntfs] nao foi possivel resolver \\hello.txt no volume.\n");
+    }
+
+    // 3) LER \dir1\file.txt: prova a descida de diretorio (\dir1 -> file.txt).
+    kputs("\n[ntfs] === LEITURA DE \\dir1\\file.txt (subdiretorio) ===\n");
+    if (ntfs_resolve_path("\\dir1\\file.txt", &fi)) {
+        kputs("[ntfs] \\dir1\\file.txt resolvido: MFT #"); kput_dec(fi.mft_record);
+        kputs(", "); kput_dec(fi.size); kputs(" bytes\n");
+        static char buf2[512];
+        uint32_t got = ntfs_read_file(fi.mft_record, 0, buf2, (uint32_t)(sizeof(buf2) - 1));
+        buf2[got < sizeof(buf2) ? got : sizeof(buf2) - 1] = 0;
+        kputs("[ntfs] conteudo: "); kputs(buf2);
+        if (got && buf2[got - 1] != '\n') kputc('\n');
+    } else {
+        kputs("[ntfs] (\\dir1\\file.txt nao encontrado nesta imagem.)\n");
+    }
+
+    // 4) CAMADA DE FS via I/O MANAGER: prova que \Device\Harddisk0\Partition1
+    //    atende IRPs reais (IRP_MJ_CREATE/READ/DIRECTORY_CONTROL) pelo
+    //    DRIVER_OBJECT.MajorFunction — o mesmo caminho de NtCreateFile/NtReadFile/
+    //    NtQueryDirectoryFile vindo do ring 3. Monta os IRPs e chama IoCallDriver.
+    kputs("\n[ntfs] === CAMADA DE FS via I/O MANAGER (IRPs no device de volume) ===\n");
+    PDEVICE_OBJECT vol = ntfs_fs_volume_device();
+    if (vol) {
+        // (a) IRP_MJ_CREATE — abre o volume.
+        PIRP cr = io_build_request(IRP_MJ_CREATE, vol);
+        if (cr) { IoCallDriver(vol, cr); io_free_irp(cr); }
+
+        // (b) IRP_MJ_READ — le \hello.txt pelo I/O Manager. Aponta o alvo (MFT
+        //     #24) e monta um READ com Key=MFT, ByteOffset=0.
+        if (ntfs_resolve_path("\\hello.txt", &fi)) {
+            ntfs_fs_set_target(fi.mft_record, 0);
+            static char iobuf[128];
+            PIRP rd = io_build_read(vol, iobuf, (uint32_t)(sizeof(iobuf) - 1));
+            if (rd) {
+                rd->CurrentStack->Parameters.Read.Key = (uint32_t)fi.mft_record;
+                rd->CurrentStack->Parameters.Read.ByteOffset = 0;
+                IoCallDriver(vol, rd);
+                uint64_t got = rd->IoStatus.Information;
+                uint64_t n = got < sizeof(iobuf) - 1 ? got : sizeof(iobuf) - 1;
+                for (uint64_t i = 0; i < n; i++)
+                    iobuf[i] = rd->SystemBuffer ? ((char*)rd->SystemBuffer)[i] : 0;
+                iobuf[n] = 0;
+                kputs("[ntfs] IoCallDriver(READ) devolveu "); kput_dec(got);
+                kputs(" bytes: \""); kputs(iobuf); kputs("\"\n");
+                io_free_irp(rd);
+            }
+        }
+
+        // (c) IRP_MJ_DIRECTORY_CONTROL — enumera a raiz, uma entrada por IRP
+        //     (como NtQueryDirectoryFile com ReturnSingleEntry).
+        ntfs_fs_set_target(NTFS_MFT_ROOT, 1);
+        kputs("[ntfs] enumerando a raiz via IRP_MJ_DIRECTORY_CONTROL:\n");
+        for (int guard = 0; guard < 32; guard++) {
+            static uint8_t dbuf[320];
+            PIRP dc = io_build_read(vol, dbuf, (uint32_t)sizeof(dbuf));
+            if (!dc) break;
+            dc->CurrentStack->MajorFunction = IRP_MJ_DIRECTORY_CONTROL;
+            dc->CurrentStack->Parameters.Read.Length = (uint32_t)sizeof(dbuf);
+            IoCallDriver(vol, dc);
+            uint64_t info = dc->IoStatus.Information;
+            io_free_irp(dc);
+            if (info == 0) break;   // STATUS_NO_MORE_FILES
+        }
+
+        // (d) IRP_MJ_WRITE — escreve no $DATA de \dir1\file.txt PELO I/O Manager
+        //     (NtWriteFile no volume monta este IRP). Aponta o alvo, escreve uma
+        //     sobrescrita curta, e RELE via IRP_MJ_READ confirmando.
+        kputs("[ntfs] escrevendo em \\dir1\\file.txt via IRP_MJ_WRITE (I/O Manager):\n");
+        NTFS_FILE_INFO dfi;
+        if (ntfs_resolve_path("\\dir1\\file.txt", &dfi)) {
+            ntfs_fs_set_target(dfi.mft_record, 0);
+            const char* msg = "via IRP!";   // 8 bytes (<= tamanho original)
+            uint32_t mlen = 0; while (msg[mlen]) mlen++;
+            PIRP wr = io_build_write(vol, (void*)msg, mlen);
+            if (wr) {
+                wr->CurrentStack->Parameters.Write.Key = (uint32_t)dfi.mft_record;
+                wr->CurrentStack->Parameters.Write.ByteOffset = 0;
+                IoCallDriver(vol, wr);
+                kputs("[ntfs] IoCallDriver(WRITE) gravou "); kput_dec(wr->IoStatus.Information);
+                kputs(" bytes.\n");
+                io_free_irp(wr);
+            }
+            // RELE via IRP_MJ_READ.
+            static char vbuf[64];
+            PIRP rd = io_build_read(vol, vbuf, (uint32_t)(sizeof(vbuf) - 1));
+            if (rd) {
+                rd->CurrentStack->Parameters.Read.Key = (uint32_t)dfi.mft_record;
+                rd->CurrentStack->Parameters.Read.ByteOffset = 0;
+                IoCallDriver(vol, rd);
+                uint64_t got = rd->IoStatus.Information;
+                uint64_t n = got < sizeof(vbuf) - 1 ? got : sizeof(vbuf) - 1;
+                for (uint64_t i = 0; i < n; i++)
+                    vbuf[i] = rd->SystemBuffer ? ((char*)rd->SystemBuffer)[i] : 0;
+                vbuf[n] = 0;
+                kputs("[ntfs] RELIDO via IRP_MJ_READ: \""); kputs(vbuf); kputs("\"\n");
+                io_free_irp(rd);
+            }
+        }
+    } else {
+        kputs("[ntfs] device de volume nao registrado (camada de FS indisponivel).\n");
+    }
+
+    // ========================================================================
+    //  FASE 4 — ESCRITA NTFS (subconjunto seguro): sobrescreve o $DATA de um
+    //  arquivo existente, REMONTA o estado relendo o registro MFT do disco e
+    //  confirma o novo conteudo na serial (regra: "escreva, releia, confirme").
+    //  build/boot verdes: so usa HalWriteSector em registros JA alocados.
+    // ========================================================================
+    kputs("\n[ntfs] === ESCRITA NTFS (FASE 4) em \\hello.txt ===\n");
+    NTFS_FILE_INFO wfi;
+    if (ntfs_resolve_path("\\hello.txt", &wfi)) {
+        uint64_t rec = wfi.mft_record;
+        kputs("[ntfs] alvo: \\hello.txt = MFT #"); kput_dec(rec);
+        kputs(", tamanho original "); kput_dec(wfi.size); kputs(" bytes.\n");
+
+        // --- (1) SOBRESCRITA do mesmo tamanho (<= original): caminho mais seguro.
+        //     Troca os primeiros bytes do conteudo e confirma relendo do disco.
+        const char* over = "OVERWRITTEN by MeuOS write path!";   // 32 bytes
+        uint32_t olen = 0; while (over[olen]) olen++;
+        kputs("[ntfs] (1) sobrescrevendo "); kput_dec(olen);
+        kputs(" bytes no inicio (tamanho <= original)...\n");
+        uint32_t w1 = ntfs_write_file(rec, 0, over, olen, /*set_eof*/0, /*parent*/0);
+        kputs("[ntfs] (1) ntfs_write_file devolveu "); kput_dec(w1); kputs(" bytes.\n");
+
+        // RELE do disco (ntfs_read_file le o registro MFT de novo via HAL).
+        static char rb[256];
+        uint32_t g1 = ntfs_read_file(rec, 0, rb, (uint32_t)(sizeof(rb) - 1));
+        rb[g1 < sizeof(rb) ? g1 : sizeof(rb) - 1] = 0;
+        kputs("[ntfs] (1) RELIDO do disco ("); kput_dec(g1); kputs(" bytes): \"");
+        kputs(rb); kputs("\"\n");
+        int ok1 = 1; for (uint32_t i = 0; i < olen; i++) if (rb[i] != over[i]) { ok1 = 0; break; }
+        kputs(ok1 ? "[ntfs] (1) OK: sobrescrita PERSISTIU no disco.\n"
+                  : "[ntfs] (1) FALHA: conteudo relido nao bate.\n");
+
+        // --- (2) CRESCER o arquivo (set_eof): novo conteudo MAIOR que o original,
+        //     ainda dentro do registro MFT (resident grow). Atualiza tamanho no
+        //     $FILE_NAME + entrada no $INDEX da raiz (#5). Confirma relendo +
+        //     conferindo o tamanho reportado pela listagem do diretorio.
+        const char* grow =
+            "MeuOS FASE 4: arquivo NTFS reescrito E AUMENTADO no lugar, "
+            "resident grow dentro do registro MFT, com $FILE_NAME e $INDEX_ROOT "
+            "do diretorio raiz atualizados. Releitura do disco confirma. [EOF]";
+        uint32_t glen = 0; while (grow[glen]) glen++;
+        kputs("[ntfs] (2) crescendo o arquivo p/ "); kput_dec(glen);
+        kputs(" bytes (set_eof, atualizando $INDEX da raiz #5)...\n");
+        uint32_t w2 = ntfs_write_file(rec, 0, grow, glen, /*set_eof*/1, /*parent*/NTFS_MFT_ROOT);
+        kputs("[ntfs] (2) ntfs_write_file devolveu "); kput_dec(w2); kputs(" bytes.\n");
+
+        // RELE o conteudo do disco.
+        static char rb2[512];
+        uint32_t g2 = ntfs_read_file(rec, 0, rb2, (uint32_t)(sizeof(rb2) - 1));
+        rb2[g2 < sizeof(rb2) ? g2 : sizeof(rb2) - 1] = 0;
+        kputs("[ntfs] (2) RELIDO do disco ("); kput_dec(g2); kputs(" bytes): \"");
+        kputs(rb2); kputs("\"\n");
+        int ok2 = (g2 == glen);
+        for (uint32_t i = 0; ok2 && i < glen; i++) if (rb2[i] != grow[i]) ok2 = 0;
+        kputs(ok2 ? "[ntfs] (2) OK: arquivo CRESCEU e o novo conteudo persistiu.\n"
+                  : "[ntfs] (2) FALHA: tamanho/conteudo relido nao bate.\n");
+
+        // Confirma o NOVO tamanho via a LISTAGEM do diretorio (le a chave do
+        // $INDEX_ROOT da raiz, que tambem atualizamos).
+        NTFS_FILE_INFO after;
+        if (ntfs_resolve_path("\\hello.txt", &after)) {
+            kputs("[ntfs] (2) diretorio raiz reporta \\hello.txt agora com ");
+            kput_dec(after.size); kputs(" bytes (era "); kput_dec(wfi.size);
+            kputs(") -> "); kputs(after.size == glen ? "OK\n" : "tamanho do indice nao atualizou\n");
+        }
+
+        kputs("[ntfs] ESCRITA NTFS concluida: o disk.img foi modificado (o SHA-256 "
+              "muda; releitura comprova).\n");
+    } else {
+        kputs("[ntfs] (\\hello.txt nao encontrado; pulando o teste de escrita.)\n");
+    }
+
+    // ========================================================================
+    //  FASE 4 — CRIAR e EXCLUIR arquivo (subconjunto seguro, sem alocar cluster).
+    //  Cria \novo.txt na raiz com $DATA residente, RELE do disco confirmando o
+    //  conteudo, LISTA a raiz (deve aparecer), depois EXCLUI e LISTA de novo
+    //  (deve sumir). Tudo logado; build/boot verdes.
+    // ========================================================================
+    kputs("\n[ntfs] === CRIAR/EXCLUIR arquivo (FASE 4) ===\n");
+    {
+        const char* newname = "novo.txt";
+        const char* newdata = "Arquivo CRIADO em runtime pelo MeuOS (novo registro MFT + entrada no $INDEX da raiz).\r\n";
+        uint32_t ndlen = 0; while (newdata[ndlen]) ndlen++;
+        uint64_t newrec = 0;
+        kputs("[ntfs] criando \\novo.txt na raiz (#5)...\n");
+        if (ntfs_create_file(NTFS_MFT_ROOT, newname, /*is_dir*/0, newdata, ndlen, &newrec)) {
+            // RELE pelo caminho (resolve \novo.txt -> registro -> $DATA do disco).
+            NTFS_FILE_INFO nf;
+            if (ntfs_resolve_path("\\novo.txt", &nf)) {
+                kputs("[ntfs] \\novo.txt resolvido: MFT #"); kput_dec(nf.mft_record);
+                kputs(", "); kput_dec(nf.size); kputs(" bytes.\n");
+                static char nrb[256];
+                uint32_t gg = ntfs_read_file(nf.mft_record, 0, nrb, (uint32_t)(sizeof(nrb) - 1));
+                nrb[gg < sizeof(nrb) ? gg : sizeof(nrb) - 1] = 0;
+                kputs("[ntfs] conteudo RELIDO do disco: \""); kputs(nrb); kputs("\"\n");
+                int okc = (gg == ndlen);
+                for (uint32_t i = 0; okc && i < ndlen; i++) if (nrb[i] != newdata[i]) okc = 0;
+                kputs(okc ? "[ntfs] OK: arquivo CRIADO e o conteudo persistiu no disco.\n"
+                          : "[ntfs] FALHA: conteudo do arquivo criado nao bate.\n");
+            } else {
+                kputs("[ntfs] FALHA: \\novo.txt nao resolve apos a criacao.\n");
+            }
+
+            // LISTA a raiz: deve conter novo.txt agora.
+            kputs("[ntfs] raiz APOS criar (deve conter novo.txt):\n");
+            int nafter = ntfs_list_dir(NTFS_MFT_ROOT, ntfs_print_dir_entry, 0);
+            kputs("[ntfs] total de entradas: "); kput_dec(nafter); kputc('\n');
+
+            // EXCLUI \novo.txt.
+            kputs("[ntfs] excluindo \\novo.txt...\n");
+            if (ntfs_delete_file(NTFS_MFT_ROOT, newrec)) {
+                kputs("[ntfs] raiz APOS excluir (novo.txt deve SUMIR):\n");
+                int ndel = ntfs_list_dir(NTFS_MFT_ROOT, ntfs_print_dir_entry, 0);
+                kputs("[ntfs] total de entradas: "); kput_dec(ndel); kputc('\n');
+                NTFS_FILE_INFO gone;
+                kputs(ntfs_resolve_path("\\novo.txt", &gone)
+                          ? "[ntfs] FALHA: \\novo.txt ainda resolve apos a exclusao.\n"
+                          : "[ntfs] OK: \\novo.txt foi EXCLUIDO (nao resolve mais).\n");
+            } else {
+                kputs("[ntfs] exclusao reportou erro.\n");
+            }
+        } else {
+            kputs("[ntfs] criacao de \\novo.txt nao concluiu (ver logs acima).\n");
+        }
+    }
+
+    kputs("\n[ntfs] teste de leitura+escrita+criar/excluir NTFS concluido.\n");
+}
+
+// ----------------------------------------------------------------------------
+//  Demonstracao do FRAMEBUFFER grafico (VGA mode 13h).
+//
+//  Roda DEPOIS de todos os [ok] e dos testes de binario, para nao perder os
+//  logs de boot no VGA texto (que para de ser exibido ao entrar em mode 13h).
+//  Como em headless (-display none) nao ha pixels, LOGAMOS cada operacao na
+//  SERIAL para comprovar a logica. Opcional: screendump via QMP confere a tela.
+// ----------------------------------------------------------------------------
+static void fb_demo(void) {
+    kputs("\n--- Framebuffer grafico (VGA mode 13h, 320x200x256) ---\n");
+
+    kputs("[fb] fb_init(): programando registradores VGA (CRTC/SEQ/GC/AC) + paleta DAC...\n");
+    fb_init();
+    kputs("[fb] mode 13h ativo: framebuffer linear em 0xA0000 (320x200, 8bpp). "
+          "VGA texto deixa de exibir; serial segue.\n");
+
+    // 1) Fundo
+    kputs("[fb] fb_clear(cor=1 azul): pintando 320x200 = 64000 pixels.\n");
+    fb_clear(FB_BLUE);
+
+    // 2) Borda da "tela" (desktop)
+    kputs("[fb] fb_rect(0,0,320,200, cor=15 branco): contorno do desktop.\n");
+    fb_rect(0, 0, FB_WIDTH, FB_HEIGHT, FB_WHITE);
+
+    // 3) Uma "janela" (estilo NT): retangulo preenchido + barra de titulo
+    int wx = 40, wy = 40, ww = 240, wh = 110;
+    kputs("[fb] fb_fill_rect(40,40,240,110, cor=7 cinza): corpo da janela.\n");
+    fb_fill_rect(wx, wy, ww, wh, FB_LIGHT_GRAY);
+    kputs("[fb] fb_fill_rect(40,40,240,12, cor=1 azul): barra de titulo.\n");
+    fb_fill_rect(wx, wy, ww, 12, FB_BLUE);
+    kputs("[fb] fb_rect(40,40,240,110, cor=0 preto): moldura da janela.\n");
+    fb_rect(wx, wy, ww, wh, FB_BLACK);
+
+    // 4) Texto com a fonte 8x8 embutida (titulo + corpo)
+    kputs("[fb] fb_draw_text(48,42,\"MeuOS\", fg=15): titulo na barra.\n");
+    fb_draw_text(wx + 8, wy + 2, "MeuOS - mode 13h", FB_WHITE, 0xFF);
+    kputs("[fb] fb_draw_text(48,60,\"Framebuffer grafico OK\", fg=0): corpo.\n");
+    fb_draw_text(wx + 8, wy + 24, "Framebuffer grafico OK", FB_BLACK, 0xFF);
+    fb_draw_text(wx + 8, wy + 40, "Fonte bitmap 8x8 0-9 ABC", FB_RED, 0xFF);
+    fb_draw_text(wx + 8, wy + 56, "320x200 256 cores @0xA0000", FB_BLUE, 0xFF);
+
+    // 5) Pixels avulsos + barra de cores (rampa de cinza dos indices 16..255)
+    kputs("[fb] fb_pixel: marcando 4 cantos (cores variadas).\n");
+    fb_pixel(2, 2, FB_RED);
+    fb_pixel(FB_WIDTH - 3, 2, FB_GREEN);
+    fb_pixel(2, FB_HEIGHT - 3, FB_YELLOW);
+    fb_pixel(FB_WIDTH - 3, FB_HEIGHT - 3, FB_LIGHT_CYAN);
+    kputs("[fb] fb_fill_rect x16: paleta nomeada (cores 0..15) em baixo.\n");
+    for (int i = 0; i < 16; i++) fb_fill_rect(20 + i * 18, 175, 16, 16, (uint8_t)i);
+
+    // 6) Verifica leitura do framebuffer (prova que escrevemos mesmo)
+    uint8_t got = fb_get_pixel(wx + 8 + 1, wy + 1);  // dentro da barra de titulo (azul)
+    kputs("[fb] fb_get_pixel(barra de titulo) = "); kput_dec(got);
+    kputs(" (esperado 1 = azul) -> ");
+    kputs(got == FB_BLUE ? "OK\n" : "DIVERGENTE\n");
+
+    kputs("[fb] demo concluida: desktop + 1 janela (titulo+corpo+texto) desenhados. "
+          "Use QMP screendump para ver os pixels.\n");
+}
+
+void kmain(uint32_t mb_info) {
+    vga_init();
+    serial_init();
+
+    vga_set_color(0x0A, 0x00);
+    kputs("==================================================\n");
+    kputs("   MeuOS  -  kernel 64 bits, escrito do zero em C\n");
+    kputs("==================================================\n");
+    vga_set_color(0x0F, 0x00);
+
+    kputs("[ok] Long mode 64 bits + GDT + SSE\n");
+    kputs("[ok] Video VGA + Serial COM1\n");
+
+    gdt_init();
+    kputs("[ok] GDT completa (ring 0 + ring 3) + TSS\n");
+
+    idt_init();
+    kputs("[ok] IDT carregada (256 vetores)\n");
+
+    pic_remap();
+    pit_init(100);
+    kputs("[ok] PIC remapeado + PIT 100 Hz + teclado por IRQ\n");
+
+    __asm__ volatile ("sti");
+    kputs("[ok] Interrupcoes habilitadas (sti)\n");
+
+    // Demonstra dispatch de excecao pela IDT (int3, nao-fatal):
+    __asm__ volatile ("int3");
+
+    // Prova o timer (IRQ0): espera ~0,5 s contando ticks.
+    while (g_ticks < 50) __asm__ volatile ("hlt");
+    kputs("[ok] Timer IRQ0 contando: ");
+    kput_dec(g_ticks);
+    kputs(" ticks em ~0,5s\n");
+
+    // --- Gerencia de memoria (base para carregar programas) ---
+    uint32_t mbflags = *(volatile uint32_t*)(uintptr_t)(mb_info + 0);
+    uint64_t mem_top = 0x100000ULL;
+    if (mbflags & 1) {                 // bit 0: campos mem_lower/mem_upper validos
+        uint32_t mem_upper = *(volatile uint32_t*)(uintptr_t)(mb_info + 8);
+        mem_top = 0x100000ULL + (uint64_t)mem_upper * 1024ULL;
+    }
+    kputs("[ok] RAM detectada: "); kput_dec(mem_top / 1024 / 1024); kputs(" MiB\n");
+
+    pmm_init(mem_top);
+    kputs("[ok] PMM: "); kput_dec(pmm_free_frames()); kputs(" frames de 4 KiB livres\n");
+
+    heap_init();
+    void* a = kmalloc(64);
+    void* b = kmalloc(4096);
+    kputs("     kmalloc(64)    = "); kput_hex((uint64_t)(uintptr_t)a); kputc('\n');
+    kputs("     kmalloc(4096)  = "); kput_hex((uint64_t)(uintptr_t)b); kputc('\n');
+    kfree(a);
+    void* d = kmalloc(32);
+    kputs("     reuso pos-free  = "); kput_hex((uint64_t)(uintptr_t)d); kputc('\n');
+    uint64_t fr = pmm_alloc_frame();
+    kputs("     pmm_alloc_frame = "); kput_hex(fr); kputc('\n');
+    kputs("[ok] Heap (kmalloc/kfree) + PMM operacionais\n");
+
+    // --- HAL (Hardware Abstraction Layer): I/O ports + MMIO + enumeracao PCI ---
+    // Loga cada dispositivo PCI achado na serial (controlador IDE, video, etc.).
+    hal_init();
+    hal_cpu_init();        // FASE 7: CPUID -> vendor/family/model + features (cpu.c)
+    // FASE 7.7: CR4 + XCR0. Habilita OSXSAVE (e xsetbv XCR0=0x7 = X87+SSE+AVX
+    // quando suportado) e CR4.SMEP/UMIP/PCIDE quando o CPU expoe. CADA bit e
+    // gateado por CPUID antes de ser setado: bit reservado em CR4 = #GP no boot.
+    // SMAP fica detectado mas NAO setado (kernel ainda copia p/ pagina user no
+    // PE loader sem stac/clac). Drivers reais (pintok.sys) leem CR4 via
+    // KeQueryFeatureFlags/RtlGetEnabledExtendedFeatures: agora o valor bate
+    // com o NT real.
+    extern void cpu_features_init(void);
+    cpu_features_init();
+    // FASE 7.8: deteccao de HYPERVISOR via CPUID (leaves 0x40000000..0x40000005
+    // + bit 31 de CPUID.1.ECX). Loga vendor string e leaves cruas na serial.
+    // No QEMU TCG sem KVM o esperado e zeros / "sem hypervisor" — caminho
+    // seguro: drivers reais ramificam para HW real. Em QEMU+KVM/Hyper-V/VMware
+    // o vendor string aparece (KVMKVMKVM/Microsoft Hv/VMwareVMware) e drivers
+    // de paravirt podem se enxergar.
+    extern void hv_detect_init(void);
+    hv_detect_init();
+    // FASE 7.1: KUSER_SHARED_DATA em 0xFFFFF780_00000000 (drivers reais como
+    // pintok.sys leem TickCount/NtVersion direto desse offset, sem syscall).
+    extern void mm_map_kuser_shared_data(void);
+    mm_map_kuser_shared_data();
+    // FASE 7.2: KPCR em GS_BASE (MSR 0xC0000101). Drivers reais leem gs:[..]
+    // p/ CurrentThread/ProcessorNumber/etc — sem KPCR mapeado, Page Fault na
+    // primeira leitura. Programamos GS_BASE e KERNEL_GS_BASE iguais (UP, sem
+    // swapgs assimetrico).
+    extern void kpcr_init(void);
+    kpcr_init();
+    // FASE 7.4: habilita a instrucao SYSCALL (Intel/AMD). Drivers reais
+    // (pintok.sys) e ntdll.dll usam SYSCALL como forma rapida de pedir um
+    // servico do kernel. Sem EFER.SCE=1, a instrucao gera #GP — exatamente o
+    // que pintok crashava com depois da Fase 7.3 (rip=0x5EA6673, GP err=0).
+    // Programa EFER/STAR/LSTAR/SFMASK/CSTAR; o handler (syscall_entry.asm)
+    // entra direto no isr_handler (mesmo dispatcher do int 0x80).
+    extern void syscall_msr_init(void);
+    syscall_msr_init();
+    kputs("[ok] HAL: portas de I/O + MMIO + enumeracao PCI + CPU info (CPUID) + KUSER_SHARED_DATA + KPCR/GS_BASE + SYSCALL\n");
+
+    // --- FASE 2 (HAL disco): IDE ATA PIO + teste de leitura do MBR/NTFS ---
+    // Identifica o disco (se anexado via -Disk), le o setor 0 (MBR) e o boot
+    // sector da particao NTFS, confirmando a assinatura "NTFS    " (regra 4).
+    uint32_t ntfs_lba = disk_test();
+    kputs("[ok] HAL disco: IDE ATA PIO (HalReadSector/HalWriteSector)\n");
+
+    ob_init();
+    kputs("[ok] Object Manager + namespace (\\Device\\, \\Driver\\)\n");
+
+    // FASE 7 — Driver Framework: tabelas de callbacks (Ps/Ob/Cm/Ex) + registro.
+    callbacks_init();
+    registry_init();
+    kputs("[ok] FASE 7: Callbacks (Ps/Ob/Cm/Ex) + Registro em memoria (\\Registry\\)\n");
+
+    // --- FASE 3: driver NTFS (LEITURA) + camada de File System ---
+    // Se disk_test() achou e validou um boot sector NTFS, monta o volume
+    // (BPB + $MFT), registra \Device\Harddisk0\Partition1 no I/O Manager, LE
+    // \hello.txt (== texto conhecido) e LISTA a raiz (regra 4: tudo logado).
+    if (ntfs_lba) {
+        ntfs_test(ntfs_lba);
+        // FASE 5: o volume fica disponivel como a unidade C: (o syscall layer
+        // mapeia "C:\..." -> \Device\Harddisk0\Partition1\...). O cmd.exe usa C:.
+        kputs("[ntfs] volume disponivel como C: (C:\\ -> "
+              "\\Device\\Harddisk0\\Partition1). cmd.exe usa C:\\>.\n");
+        kputs("[ok] NTFS: volume montado como C: + \\hello.txt lido + raiz listada\n");
+    }
+
+    // FASE 7.5: inicializa a PspCidTable (Client ID Table NT). DEVE ser
+    // ANTES de ps_init/PsCreateProcess para que as insercoes funcionem.
+    cid_init();
+    ps_init();
+    kputs("[ok] Process Manager (EPROCESS/ETHREAD via Object Manager + PspCidTable)\n");
+
+    win32k_init();          // fb_init e feito sob demanda (lazy) no 1o desenho
+    kputs("[ok] win32k: window manager + filas de mensagens + GDI\n");
+
+    // --- Carrega os binarios Windows passados pelo boot (modulos Multiboot) ---
+    // Nada e hardcoded: roda QUALQUER PE passado. Detecta pelo Subsystem:
+    // NATIVE(1) -> driver .sys (executiva NT);  senao -> aplicativo .exe (Win32).
+    vga_set_color(0x0B, 0x00);
+    kputs("\n--- Binarios Windows recebidos do boot ---\n");
+    vga_set_color(0x0F, 0x00);
+    if (mbflags & (1u << 3)) {                                  // bit 3: modulos validos
+        uint32_t mods_count = *(volatile uint32_t*)(uintptr_t)(mb_info + 20);
+        uint32_t mods_addr  = *(volatile uint32_t*)(uintptr_t)(mb_info + 24);
+        kputs("[boot] modulos: "); kput_dec(mods_count); kputc('\n');
+
+        // Passo 1: registra TODOS os modulos por nome (as DLLs ficam disponiveis).
+        for (uint32_t i = 0; i < mods_count; i++) {
+            const uint32_t* m = (const uint32_t*)(uintptr_t)(mods_addr + i * 16);
+            const void* bytes = (const void*)(uintptr_t)m[0];          // mod_start
+            const char* path  = (const char*)(uintptr_t)m[2];          // string (nome)
+            ldr_register(path, bytes);
+        }
+        // Passo 2: .sys -> driver (ring 0);  .exe -> roda em ring 3 (carrega as DLLs).
+        for (uint32_t i = 0; i < mods_count; i++) {
+            const uint32_t* m = (const uint32_t*)(uintptr_t)(mods_addr + i * 16);
+            const void* bytes = (const void*)(uintptr_t)m[0];
+            const char* path  = (const char*)(uintptr_t)m[2];
+            if (ldr_match_ext(path, ".sys")) {
+                kputs("\n[boot] driver de kernel: "); kputs(path); kputc('\n');
+                driver_load(path, bytes);
+            } else if (ldr_match_ext(path, ".exe")) {
+                kputs("\n[boot] aplicativo: "); kputs(path); kputc('\n');
+                ldr_run(path, bytes);
+            }
+            // .dll: carregada sob demanda pelo loader (LdrLoadDll)
+        }
+    } else {
+        kputs("[boot] nenhum modulo. Rode:  .\\run.ps1\n");
+    }
+
+    // --- FASE 2/6: se alguma app GUI ja tomou a tela (guiapp/desktop), o estado
+    // final do framebuffer ja e a GUI — PULAMOS a demo estatica da Fase 1 (senao
+    // ela limparia o desktop). Usamos win32k_was_active() (e nao has_windows),
+    // pois as janelas do ultimo app GUI sao reaped ao ele encerrar, mas a tela
+    // grafica permanece. Sem nenhuma GUI, roda a demo da Fase 1 normalmente.
+    if (win32k_was_active()) {
+        // O desktop (papel de parede + barra de tarefas + janelas de cmd) foi
+        // composto e as janelas pintadas durante o loop do desktop.exe; deixamos
+        // o framebuffer COMO ESTA para o screendump mostrar o ambiente completo.
+        kputs("\n--- FASE 2/6: GUI ativa; desktop/janelas permanecem no framebuffer ---\n");
+        kputs("[win32k] estado final: desktop + barra de tarefas + janela(s) de cmd.\n");
+    } else {
+        // --- FASE 1: modo grafico (framebuffer) + GDI de baixo nivel ---
+        // Demo do driver de video; loga cada operacao na serial (canal de log).
+        // Fica por ULTIMO para preservar os logs no VGA texto ate aqui.
+        fb_demo();
+    }
+
+    vga_set_color(0x0E, 0x00);
+    kputs("\nSistema no ar. Digite algo (teclado por interrupcao):\n");
+    kputs("(tela agora em modo grafico 13h; o eco de teclas segue na serial)\n\n");
+    vga_set_color(0x0F, 0x00);
+    kputs("> ");
+
+    for (;;) __asm__ volatile ("hlt");   // ocioso: tudo acontece via interrupcoes
+}

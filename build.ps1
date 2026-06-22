@@ -37,11 +37,18 @@ if (-not $nasm) { throw "NASM nao encontrado." }
 Write-Host "Zig  : $zig"
 Write-Host "NASM : $nasm`n"
 
-# objeto unico por arquivo, nome derivado do caminho relativo (evita colisoes)
+# Objeto unico por arquivo: caminho relativo + EXTENSAO original embutida no
+# nome. Sem a extensao, isr.asm e isr.c gerariam o mesmo .o e colidiriam (foi
+# o bug da FASE 8 quando movemos isr.{asm,c} pra mesma pasta ntos/ke/amd64).
 function Get-ObjName($file) {
     $rel = $file.FullName.Substring($src.Length).TrimStart('\','/')
     $rel = $rel -replace '[\\/]','_'
-    Join-Path $out ([IO.Path]::ChangeExtension($rel, '.o'))
+    # Substitui '.asm' por '_asm.o' e '.c' por '_c.o'.
+    $base = [IO.Path]::GetFileNameWithoutExtension($rel)
+    $dir  = [IO.Path]::GetDirectoryName($rel)
+    $ext  = [IO.Path]::GetExtension($rel).TrimStart('.')   # 'asm' ou 'c'
+    if ($dir) { Join-Path $out ("${dir}_${base}_${ext}.o") }
+    else      { Join-Path $out ("${base}_${ext}.o") }
 }
 
 $objs = @()
@@ -146,28 +153,35 @@ if (Test-Path $ioapp) {
 # 0c) DLLs do sistema (PE reais COM export table), igual ntdll/kernel32/user32.
 #     ImageBases distintos (sem relocacao); ntdll gera a import-lib usada pelas outras.
 $dll = Join-Path $root 'dll'
-if (Test-Path (Join-Path $dll 'ntdll.c')) {
+# FASE 8 (organizacao NT-style): cada DLL agora vive em sua propria subpasta
+# (dll/ntdll/ntdll.c, dll/win32/kernel32/kernel32.c, ...).
+$ntdllSrc    = Join-Path $dll 'ntdll\ntdll.c'
+$kernel32Src = Join-Path $dll 'win32\kernel32\kernel32.c'
+$user32Src   = Join-Path $dll 'win32\user32\user32.c'
+$gdi32Src    = Join-Path $dll 'win32\gdi32\gdi32.c'
+$advapi32Src = Join-Path $dll 'win32\advapi32\advapi32.c'
+if (Test-Path $ntdllSrc) {
     $dc = @('-target','x86_64-windows-gnu','-shared','-nostdlib','-e','DllMain')
-    Write-Host "[dll] ntdll.dll + kernel32.dll + user32.dll"
+    Write-Host "[dll] ntdll.dll + kernel32.dll + user32.dll + gdi32.dll + advapi32.dll"
     & $zig cc @dc '-Wl,--image-base=0xA00000' "-Wl,--out-implib,$(Join-Path $out 'libntdll.a')" `
-        -o (Join-Path $out 'ntdll.dll') (Join-Path $dll 'ntdll.c')
+        -o (Join-Path $out 'ntdll.dll') $ntdllSrc
     if ($LASTEXITCODE) { throw "ntdll.dll falhou." }
     & $zig cc @dc '-Wl,--image-base=0xC00000' "-Wl,--out-implib,$(Join-Path $out 'libkernel32.a')" `
-        -o (Join-Path $out 'kernel32.dll') (Join-Path $dll 'kernel32.c') (Join-Path $out 'libntdll.a')
+        -o (Join-Path $out 'kernel32.dll') $kernel32Src (Join-Path $out 'libntdll.a')
     if ($LASTEXITCODE) { throw "kernel32.dll falhou." }
     & $zig cc @dc '-Wl,--image-base=0xE00000' "-Wl,--out-implib,$(Join-Path $out 'libuser32.a')" `
-        -o (Join-Path $out 'user32.dll') (Join-Path $dll 'user32.c') (Join-Path $out 'libntdll.a')
+        -o (Join-Path $out 'user32.dll') $user32Src (Join-Path $out 'libntdll.a')
     if ($LASTEXITCODE) { throw "user32.dll falhou." }
     # gdi32.dll: API GDI (TextOutA/FillRect/GetStockObject/CreateSolidBrush) -> ntdll.
     #   ImageBase 0x1A00000 (livre; ver a lista de bases ja usadas no README).
     & $zig cc @dc '-Wl,--image-base=0x1A00000' "-Wl,--out-implib,$(Join-Path $out 'libgdi32.a')" `
-        -o (Join-Path $out 'gdi32.dll') (Join-Path $dll 'gdi32.c') (Join-Path $out 'libntdll.a')
+        -o (Join-Path $out 'gdi32.dll') $gdi32Src (Join-Path $out 'libntdll.a')
     if ($LASTEXITCODE) { throw "gdi32.dll falhou." }
     # advapi32.dll (FASE 4): Service Control Manager (stubs) + registro (Reg*) -> ntdll.
     #   ImageBase 0x3200000 (zona morta 48-64 MiB, fora do heap [0x2000000,0x3000000)
     #   e da regiao do PMM >=0x4000000; nao colide com nenhum modulo).
     & $zig cc @dc '-Wl,--image-base=0x3200000' "-Wl,--out-implib,$(Join-Path $out 'libadvapi32.a')" `
-        -o (Join-Path $out 'advapi32.dll') (Join-Path $dll 'advapi32.c') (Join-Path $out 'libntdll.a')
+        -o (Join-Path $out 'advapi32.dll') $advapi32Src (Join-Path $out 'libntdll.a')
     if ($LASTEXITCODE) { throw "advapi32.dll falhou." }
 }
 
@@ -230,10 +244,18 @@ foreach ($a in Get-ChildItem -Path $src -Recurse -Filter *.asm) {
 }
 
 # 2) C do kernel (zig cc, freestanding x86-64). -I sdk: tipos do DDK.
+# FASE 8: reorganizacao estilo WRK/ReactOS — agora o include path resolve
+# "ke/sync.h" em src/ntos/ke/sync.h, "ob/object.h" em src/ntos/ob/, etc.
+# Drivers em src/drivers/ ficam acessiveis via "input/keyboard.h" etc.
 $cflags = @(
     '-target','x86_64-freestanding-none','-ffreestanding','-nostdlib',
     '-fno-stack-protector','-fno-pic','-fno-pie','-mno-red-zone',
-    "-I$src", "-I$(Join-Path $src 'include')", "-I$sdk",
+    "-I$src",
+    "-I$(Join-Path $src 'ntos')",          # ke/, mm/, ob/, io/, ps/, cm/, ex/, lpc/, ldr/
+    "-I$(Join-Path $src 'ntos\inc')",      # headers privados (io.h)
+    "-I$(Join-Path $src 'drivers')",       # input/, video/, serial/, filesystems/
+    "-I$(Join-Path $src 'subsystems')",    # win32/
+    "-I$sdk",
     '-std=c11','-Wall','-Wextra','-O2','-c'
 )
 foreach ($f in (Get-ChildItem -Path $src -Recurse -Filter *.c)) {

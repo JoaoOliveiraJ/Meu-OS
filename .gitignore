@@ -10,3 +10,4 @@ build/
 Pinball/
 *.exe
 *.sys
+.claude/

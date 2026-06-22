@@ -2,6 +2,7 @@
 #include "ke/amd64/isr.h"
 #include "ke/amd64/pic.h"
 #include "input/keyboard.h"
+#include "input/mouse/mouse.h"     // FASE 11: IRQ12 (mouse PS/2)
 #include "ke/amd64/syscall.h"
 #include "mm/paging.h"   // FASE 7.9: mm_map_zero_page para recuperacao de PF
 
@@ -258,6 +259,8 @@ void isr_handler(struct regs* r) {
         g_ticks++;               // timer (IRQ0)
     } else if (irq == 1) {
         keyboard_irq();          // teclado (IRQ1)
+    } else if (irq == 12) {
+        mouse_irq();             // FASE 11: mouse PS/2 (IRQ12)
     }
     pic_eoi((int)irq);           // avisa o PIC que tratamos a interrupcao
 }

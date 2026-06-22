@@ -169,9 +169,19 @@ $d3d12Src    = Join-Path $dll 'win32\d3d12\d3d12.c'
 $d2d1Src     = Join-Path $dll 'win32\d2d1\d2d1.c'
 $dwriteSrc   = Join-Path $dll 'win32\dwrite\dwrite.c'
 $dxcoreSrc   = Join-Path $dll 'win32\dxcore\dxcore.c'
+# FASE 11 (audio stack) — DLLs novas: mmdevapi/Audioses/dsound/winmm.
+$mmdevapiSrc = Join-Path $dll 'win32\mmdevapi\mmdevapi.c'
+$audiosesSrc = Join-Path $dll 'win32\audioses\audioses.c'
+$dsoundSrc   = Join-Path $dll 'win32\dsound\dsound.c'
+$winmmSrc    = Join-Path $dll 'win32\winmm\winmm.c'
+# FASE 12 (network stack) — Winsock 2.2 ring 3 (ws2_32).
+$ws232Src    = Join-Path $dll 'win32\ws2_32\ws2_32.c'
+# RODADA FINAL — secur32 (SSPI + LSA Logon API) + credui (Credential UI).
+$secur32Src  = Join-Path $dll 'win32\secur32\secur32.c'
+$creduiSrc   = Join-Path $dll 'win32\credui\credui.c'
 if (Test-Path $ntdllSrc) {
     $dc = @('-target','x86_64-windows-gnu','-shared','-nostdlib','-e','DllMain')
-    Write-Host "[dll] ntdll.dll + kernel32.dll + user32.dll + gdi32.dll + advapi32.dll + ddraw.dll + d3d9.dll + dxgi.dll + d3d11.dll + d3d12.dll + d2d1.dll + dwrite.dll + dxcore.dll"
+    Write-Host "[dll] ntdll.dll + kernel32.dll + user32.dll + gdi32.dll + advapi32.dll + ddraw.dll + d3d9.dll + dxgi.dll + d3d11.dll + d3d12.dll + d2d1.dll + dwrite.dll + dxcore.dll + mmdevapi.dll + Audioses.dll + dsound.dll + winmm.dll + ws2_32.dll"
     & $zig cc @dc '-Wl,--image-base=0xA00000' "-Wl,--out-implib,$(Join-Path $out 'libntdll.a')" `
         -o (Join-Path $out 'ntdll.dll') $ntdllSrc
     if ($LASTEXITCODE) { throw "ntdll.dll falhou." }
@@ -192,31 +202,11 @@ if (Test-Path $ntdllSrc) {
     & $zig cc @dc '-Wl,--image-base=0x3200000' "-Wl,--out-implib,$(Join-Path $out 'libadvapi32.a')" `
         -o (Join-Path $out 'advapi32.dll') $advapi32Src (Join-Path $out 'libntdll.a')
     if ($LASTEXITCODE) { throw "advapi32.dll falhou." }
-    # ddraw.dll (FASE 9.3 + 9.10 shim): DirectDraw 7 stub. Cria objetos COM falsos
-    #   (IDirectDraw7 e IDirectDrawSurface7) que devolvem DD_OK em quase tudo,
-    #   apoiados num pool estatico de superficies.
-    #   FASE 9.10 — DELEGACAO PARA D3D11 (compat Windows 10+): ddraw agora importa
-    #   D3D11CreateDevice() para refletir o comportamento real do Windows moderno
-    #   (a ddraw.dll ainda existe mas internamente usa Direct3D 11). Por isso,
-    #   precisa LINKAR contra libd3d11.a — entao deve ser construida APOS d3d11.
-    #   ImageBase 0x3E00000 (livre; entre calller.sys 0x3A00000 e PMM >=0x4000000).
-    if (Test-Path $ddrawSrc) {
-        # NOTE: d3d11.dll precisa estar disponivel; e construida algumas linhas abaixo.
-        # A ordem original colocava ddraw ANTES de d3d11. Reorganizamos abaixo: d3d11
-        # e construido primeiro, depois ddraw faz link contra libd3d11.a. Aqui ainda
-        # construimos um stub de ddraw caso libd3d11.a ainda nao exista (1a passada).
-        $libd3d11 = Join-Path $out 'libd3d11.a'
-        if (Test-Path $libd3d11) {
-            & $zig cc @dc '-Wl,--image-base=0x3E00000' '-Wl,--dynamicbase' `
-                "-Wl,--out-implib,$(Join-Path $out 'libddraw.a')" `
-                -o (Join-Path $out 'ddraw.dll') $ddrawSrc $libd3d11
-        } else {
-            & $zig cc @dc '-Wl,--image-base=0x3E00000' '-Wl,--dynamicbase' `
-                "-Wl,--out-implib,$(Join-Path $out 'libddraw.a')" `
-                -o (Join-Path $out 'ddraw.dll') $ddrawSrc
-        }
-        if ($LASTEXITCODE) { throw "ddraw.dll falhou." }
-    }
+    # ddraw.dll: pulado na 1a passada — sera construido APOS d3d11.dll (que
+    # produz libd3d11.a). Antes esta secao tentava construir ddraw aqui mesmo;
+    # em -Clean builds o link falhava porque D3D11CreateDevice e dllimport.
+    # Reorganizado: d3d11 primeiro, ddraw depois.
+
     # d3d9.dll (FASE 9.4): Direct3D 7/8/9 stub. Acoplado a ddraw.dll: cria objetos
     #   COM falsos (IDirect3D7 e IDirect3DDevice7) que devolvem D3D_OK em quase
     #   tudo. Sem rasterizador real (o win32k ja e dono do FB). Nao depende de
@@ -307,6 +297,71 @@ if (Test-Path $ntdllSrc) {
             "-Wl,--out-implib,$(Join-Path $out 'libdxcore.a')" `
             -o (Join-Path $out 'dxcore.dll') $dxcoreSrc
         if ($LASTEXITCODE) { throw "dxcore.dll falhou." }
+    }
+    # FASE 11 (audio stack) — mmdevapi.dll (Multimedia Device API; Win Vista+).
+    #   IMMDeviceEnumerator + IMMDevice + IMMDeviceCollection (apenas ABI COM
+    #   completo; sem PCM real). ImageBase 0x4A00000 (zona livre apos dxcore).
+    if (Test-Path $mmdevapiSrc) {
+        & $zig cc @dc '-Wl,--image-base=0x4A00000' '-Wl,--dynamicbase' `
+            "-Wl,--out-implib,$(Join-Path $out 'libmmdevapi.a')" `
+            -o (Join-Path $out 'mmdevapi.dll') $mmdevapiSrc
+        if ($LASTEXITCODE) { throw "mmdevapi.dll falhou." }
+    }
+    # FASE 11 — Audioses.dll (Audio Session API / WASAPI; Win Vista+).
+    #   IAudioClient + IAudioRenderClient + IAudioCaptureClient + IAudioClock
+    #   + IAudioStreamVolume + ISimpleAudioVolume. ImageBase 0x4B00000.
+    if (Test-Path $audiosesSrc) {
+        & $zig cc @dc '-Wl,--image-base=0x4B00000' '-Wl,--dynamicbase' `
+            "-Wl,--out-implib,$(Join-Path $out 'libaudioses.a')" `
+            -o (Join-Path $out 'Audioses.dll') $audiosesSrc
+        if ($LASTEXITCODE) { throw "Audioses.dll falhou." }
+    }
+    # FASE 11 — dsound.dll (DirectSound; DX1+). IDirectSound8 + IDirectSoundBuffer8.
+    #   ImageBase 0x4C00000.
+    if (Test-Path $dsoundSrc) {
+        & $zig cc @dc '-Wl,--image-base=0x4C00000' '-Wl,--dynamicbase' `
+            "-Wl,--out-implib,$(Join-Path $out 'libdsound.a')" `
+            -o (Join-Path $out 'dsound.dll') $dsoundSrc
+        if ($LASTEXITCODE) { throw "dsound.dll falhou." }
+    }
+    # FASE 11 — winmm.dll (Windows Multimedia API legada). PlaySoundA/W,
+    #   waveOut*, timeGetTime, mciSendString. ImageBase 0x4D00000. Nao linka
+    #   contra ntdll (autocontido — para evitar imports circulares).
+    if (Test-Path $winmmSrc) {
+        & $zig cc @dc '-Wl,--image-base=0x4D00000' '-Wl,--dynamicbase' `
+            "-Wl,--out-implib,$(Join-Path $out 'libwinmm.a')" `
+            -o (Join-Path $out 'winmm.dll') $winmmSrc
+        if ($LASTEXITCODE) { throw "winmm.dll falhou." }
+    }
+    # FASE 12 (network stack) — ws2_32.dll (Winsock 2.2). socket/bind/listen/
+    #   accept/connect/send/recv/select + DNS stubs. ImageBase 0x4E00000 (zona
+    #   livre apos winmm 0x4D00000). Autocontido (sem ntdll para evitar imports
+    #   circulares). --dynamicbase + .reloc (mesma estrategia das outras DLLs
+    #   >= PMM_BASE 0x4000000).
+    if (Test-Path $ws232Src) {
+        & $zig cc @dc '-Wl,--image-base=0x4E00000' '-Wl,--dynamicbase' `
+            "-Wl,--out-implib,$(Join-Path $out 'libws2_32.a')" `
+            -o (Join-Path $out 'ws2_32.dll') $ws232Src
+        if ($LASTEXITCODE) { throw "ws2_32.dll falhou." }
+    }
+    # RODADA FINAL — secur32.dll (SSPI + LSA Logon API). Stubs AcquireCredentials/
+    #   InitializeSecurityContext/AcceptSecurityContext/Encrypt/DecryptMessage +
+    #   LsaConnectUntrusted/LsaLookupAuthenticationPackage/LsaCallAuthenticationPackage.
+    #   ImageBase 0x4F00000 (zona livre apos ws2_32). Autocontido (sem ntdll).
+    if (Test-Path $secur32Src) {
+        & $zig cc @dc '-Wl,--image-base=0x4F00000' '-Wl,--dynamicbase' `
+            "-Wl,--out-implib,$(Join-Path $out 'libsecur32.a')" `
+            -o (Join-Path $out 'secur32.dll') $secur32Src
+        if ($LASTEXITCODE) { throw "secur32.dll falhou." }
+    }
+    # RODADA FINAL — credui.dll (Credential UI helper). Stubs
+    #   CredUIPromptForCredentialsA/W + CredRead/CredWrite/CredEnumerate.
+    #   ImageBase 0x5000000 (zona livre apos secur32). Autocontido (sem ntdll).
+    if (Test-Path $creduiSrc) {
+        & $zig cc @dc '-Wl,--image-base=0x5000000' '-Wl,--dynamicbase' `
+            "-Wl,--out-implib,$(Join-Path $out 'libcredui.a')" `
+            -o (Join-Path $out 'credui.dll') $creduiSrc
+        if ($LASTEXITCODE) { throw "credui.dll falhou." }
     }
 }
 
@@ -399,6 +454,52 @@ if ((Test-Path $desktop) -and (Test-Path (Join-Path $out 'libgdi32.a'))) {
     if ($LASTEXITCODE) { throw "Compilacao do desktop.c falhou." }
 }
 
+# RODADA FINAL — csrss.exe (Client/Server Runtime Subsystem stub).
+# Apenas loga init/exit. ImageBase 0x5200000 (entre winlogon e win10ui).
+$csrss = Join-Path $ex 'csrss\csrss.c'
+if ((Test-Path $csrss) -and (Test-Path (Join-Path $out 'libkernel32.a'))) {
+    Write-Host "[exemplo] apps\csrss\csrss.c -> build\csrss.exe (RODADA FINAL)"
+    & $zig cc -target x86_64-windows-gnu -nostdlib -e _start `
+        '-Wl,--image-base=0x5200000' '-Wl,--dynamicbase' '-Wl,--subsystem,console' "-I$sdk", "-I$ddk" `
+        -o (Join-Path $out 'csrss.exe') $csrss `
+        (Join-Path $out 'libkernel32.a') (Join-Path $out 'libntdll.a')
+    if ($LASTEXITCODE) { throw "Compilacao do csrss.c falhou." }
+}
+
+# RODADA FINAL — winlogon.exe (Logon Process: renderiza tela de logon).
+# Importa kernel32 + user32 + gdi32 + ntdll + secur32 + credui.
+# ImageBase 0x5100000 (zona livre apos credui 0x5000000).
+$winlogon = Join-Path $ex 'winlogon\winlogon.c'
+if ((Test-Path $winlogon) -and (Test-Path (Join-Path $out 'libsecur32.a')) -and `
+    (Test-Path (Join-Path $out 'libcredui.a'))) {
+    Write-Host "[exemplo] apps\winlogon\winlogon.c -> build\winlogon.exe (RODADA FINAL)"
+    & $zig cc -target x86_64-windows-gnu -nostdlib -e _start `
+        '-Wl,--image-base=0x5100000' '-Wl,--dynamicbase' '-Wl,--subsystem,console' "-I$sdk", "-I$ddk" `
+        -o (Join-Path $out 'winlogon.exe') $winlogon `
+        (Join-Path $out 'libkernel32.a') (Join-Path $out 'libuser32.a') `
+        (Join-Path $out 'libgdi32.a')    (Join-Path $out 'libntdll.a') `
+        (Join-Path $out 'libsecur32.a')  (Join-Path $out 'libcredui.a')
+    if ($LASTEXITCODE) { throw "Compilacao do winlogon.c falhou." }
+}
+
+# RODADA FINAL — win10ui.exe (app de teste final): janela Windows 10 mock
+# com Audio/Network/Security/CredUI/FltMgr status. ImageBase 0x5300000.
+$win10ui = Join-Path $ex 'win10ui\win10ui.c'
+if ((Test-Path $win10ui) -and (Test-Path (Join-Path $out 'libdsound.a')) -and `
+    (Test-Path (Join-Path $out 'libws2_32.a')) -and `
+    (Test-Path (Join-Path $out 'libsecur32.a')) -and `
+    (Test-Path (Join-Path $out 'libcredui.a'))) {
+    Write-Host "[exemplo] apps\win10ui\win10ui.c -> build\win10ui.exe (RODADA FINAL teste final)"
+    & $zig cc -target x86_64-windows-gnu -nostdlib -e _start `
+        '-Wl,--image-base=0x5300000' '-Wl,--dynamicbase' '-Wl,--subsystem,console' "-I$sdk", "-I$ddk" `
+        -o (Join-Path $out 'win10ui.exe') $win10ui `
+        (Join-Path $out 'libkernel32.a') (Join-Path $out 'libuser32.a') `
+        (Join-Path $out 'libgdi32.a')    (Join-Path $out 'libntdll.a') `
+        (Join-Path $out 'libdsound.a')   (Join-Path $out 'libws2_32.a') `
+        (Join-Path $out 'libsecur32.a')  (Join-Path $out 'libcredui.a')
+    if ($LASTEXITCODE) { throw "Compilacao do win10ui.c falhou." }
+}
+
 # 1) Assembly do kernel (NASM -> elf64)
 foreach ($a in Get-ChildItem -Path $src -Recurse -Filter *.asm) {
     $o = Get-ObjName $a
@@ -429,7 +530,7 @@ foreach ($f in (Get-ChildItem -Path $src -Recurse -Filter *.c)) {
     # compilado; ele faz #include dos outros dois para formar UM unico TU
     # (mesmo modelo Reactos quando precisa preservar nomes de simbolos com
     # storage 'static'). Pular os parciais aqui evita duplicidade.
-    if ($f.Name -eq 'win32kbase.c' -or $f.Name -eq 'win32kfull.c') { continue }
+    if ($f.Name -eq 'win32kbase.c' -or $f.Name -eq 'win32kfull.c' -or $f.Name -eq 'win32kshell.c') { continue }
     $o = Get-ObjName $f
     Write-Host "[cc ] $($f.FullName.Substring($src.Length+1))"
     & $zig cc @cflags $f.FullName -o $o

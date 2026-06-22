@@ -1,0 +1,7 @@
+; audioses.def — exports informativos da Audioses.dll do MeuOS
+; (Audio Session API / WASAPI stub - FASE 11 audio stack).
+LIBRARY Audioses.dll
+EXPORTS
+AudiosesCreateAudioClient
+DllGetClassObject
+DllCanUnloadNow

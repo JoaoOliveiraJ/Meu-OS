@@ -22,3 +22,5 @@ SetFocus
 PostKeyToWindow
 CreateDesktopWindowA
 CreateConsoleWindowA
+GetCursorPos
+SetCursorPos

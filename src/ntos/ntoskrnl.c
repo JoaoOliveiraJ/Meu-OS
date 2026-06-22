@@ -44,6 +44,39 @@
 #include "dx/dxgkrnl/dxgkrnl.h"
 #include "dx/dxgmms/dxgmms.h"
 
+// FASE 12 (network stack) — NDIS APIs ms_abi expostas como exports do ntoskrnl.
+// Os simbolos vivem em src/drivers/network/ndis/ndis.c.
+typedef int NDIS_STATUS_t;
+typedef void* NDIS_HANDLE_t;
+typedef void* PNET_BUFFER_LIST_t;
+__attribute__((ms_abi)) void          ndis_NdisInitializeWrapper(void**, void*, void*, void*);
+__attribute__((ms_abi)) NDIS_STATUS_t ndis_NdisMRegisterMiniportDriver(void*, void*, void*, void*, void**);
+__attribute__((ms_abi)) NDIS_STATUS_t ndis_NdisRegisterProtocolDriver(void*, void*, void**);
+__attribute__((ms_abi)) PNET_BUFFER_LIST_t ndis_NdisAllocateNetBufferList(void*, uint16_t, uint16_t);
+__attribute__((ms_abi)) void          ndis_NdisFreeNetBufferList(PNET_BUFFER_LIST_t);
+__attribute__((ms_abi)) void          ndis_NdisMSendNetBufferListsComplete(void*, PNET_BUFFER_LIST_t, uint32_t);
+__attribute__((ms_abi)) void          ndis_NdisFreeMemory(void*, uint32_t, uint32_t);
+__attribute__((ms_abi)) NDIS_STATUS_t ndis_NdisAllocateMemoryWithTag(void**, uint32_t, uint32_t);
+__attribute__((ms_abi)) void          ndis_NdisMResetComplete(void*, NDIS_STATUS_t, int);
+__attribute__((ms_abi)) uint32_t      ndis_NdisGetVersion(void);
+
+// FASE 13 — PnP Manager + Filter Manager APIs ms_abi (exports).
+// Sao implementadas em src/ntos/io/pnp.c e src/drivers/fltmgr/fltmgr.c. Forwards
+// aqui evitam puxar os headers (que arrastariam ntddk -> ciclos de include).
+typedef void* PFLT_FILTER_t;
+typedef void* PFLT_PORT_t;
+typedef void* PFLT_CALLBACK_DATA_t;
+__attribute__((ms_abi)) void     pnp_IoInvalidateDeviceState(void*);
+__attribute__((ms_abi)) NTSTATUS pnp_IoReportDeviceObject(void*, const char*);
+__attribute__((ms_abi)) NTSTATUS fltmgr_FltRegisterFilter(void*, void*, PFLT_FILTER_t*);
+__attribute__((ms_abi)) NTSTATUS fltmgr_FltStartFiltering(PFLT_FILTER_t);
+__attribute__((ms_abi)) void     fltmgr_FltUnregisterFilter(PFLT_FILTER_t);
+__attribute__((ms_abi)) NTSTATUS fltmgr_FltCreateCommunicationPort(PFLT_FILTER_t, PFLT_PORT_t*,
+                                                                   void*, void*, void*, void*, void*, int);
+__attribute__((ms_abi)) NTSTATUS fltmgr_FltSendMessage(PFLT_FILTER_t, PFLT_PORT_t*,
+                                                       void*, uint32_t, void*, uint32_t*, void*);
+__attribute__((ms_abi)) void     fltmgr_FltSetCallbackDataDirty(PFLT_CALLBACK_DATA_t);
+
 // Forwards das funcoes implementadas em ke/kpcr.c (NTAPI / ms_abi).
 __attribute__((ms_abi)) ULONG KeGetCurrentProcessorNumber_k(void);
 __attribute__((ms_abi)) ULONG KeGetCurrentProcessorNumberEx_k(void* ProcNumber);
@@ -905,6 +938,39 @@ static const struct { const char* name; void* fn; } g_ntexports[] = {
     EX("DxgMmsFree",                   DxgMmsFree),
     EX("DxgMmsLock",                   DxgMmsLock),
     EX("DxgMmsUnlock",                 DxgMmsUnlock),
+
+    // ======== FASE 12 — NDIS framework (network stack) ========
+    // Exports do ndis.sys do Windows. Drivers de NIC (miniport) e protocolo
+    // (tcpip, nbf) importam por nome — pe_bind_imports resolve aqui. Sem
+    // sufixo "_k" para casar com o NDK do Windows. Implementacoes em
+    // src/drivers/network/ndis/ndis.c.
+    EX("NdisInitializeWrapper",            ndis_NdisInitializeWrapper),
+    EX("NdisMRegisterMiniportDriver",      ndis_NdisMRegisterMiniportDriver),
+    EX("NdisRegisterProtocolDriver",       ndis_NdisRegisterProtocolDriver),
+    EX("NdisAllocateNetBufferList",        ndis_NdisAllocateNetBufferList),
+    EX("NdisFreeNetBufferList",            ndis_NdisFreeNetBufferList),
+    EX("NdisMSendNetBufferListsComplete",  ndis_NdisMSendNetBufferListsComplete),
+    EX("NdisFreeMemory",                   ndis_NdisFreeMemory),
+    EX("NdisAllocateMemoryWithTag",        ndis_NdisAllocateMemoryWithTag),
+    EX("NdisMResetComplete",               ndis_NdisMResetComplete),
+    EX("NdisGetVersion",                   ndis_NdisGetVersion),
+
+    // ======== FASE 13 — PnP Manager (I/O Manager) =====================
+    // Drivers de bus enumerator (e.g. PCI/USB) chamam IoReportDeviceObject
+    // para anunciar PDOs novos; IoInvalidateDeviceState pede ao PnP que
+    // re-pergunte QUERY_* depois de mudanca de estado/resources.
+    EX("IoInvalidateDeviceState",          pnp_IoInvalidateDeviceState),
+    EX("IoReportDeviceObject",             pnp_IoReportDeviceObject),
+
+    // ======== FASE 13 — Filter Manager (fltmgr.sys) ===================
+    // Exports do fltmgr.sys consumidos por minifilters (antivirus, encrypt,
+    // ProcMon-style). Sem callbacks reais sendo invocadas — apenas ABI.
+    EX("FltRegisterFilter",                fltmgr_FltRegisterFilter),
+    EX("FltStartFiltering",                fltmgr_FltStartFiltering),
+    EX("FltUnregisterFilter",              fltmgr_FltUnregisterFilter),
+    EX("FltCreateCommunicationPort",       fltmgr_FltCreateCommunicationPort),
+    EX("FltSendMessage",                   fltmgr_FltSendMessage),
+    EX("FltSetCallbackDataDirty",          fltmgr_FltSetCallbackDataDirty),
 
     { 0, 0 }
 };

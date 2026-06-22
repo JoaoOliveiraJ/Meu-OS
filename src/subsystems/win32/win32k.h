@@ -17,6 +17,7 @@
 #define WM_CREATE      0x0001
 #define WM_DESTROY     0x0002
 #define WM_PAINT       0x000F
+#define WM_CLOSE       0x0010
 #define WM_QUIT        0x0012
 #define WM_KEYDOWN     0x0100
 #define WM_KEYUP       0x0101
@@ -24,6 +25,11 @@
 #define WM_LBUTTONDOWN 0x0201
 #define WM_LBUTTONUP   0x0202
 #define WM_MOUSEMOVE   0x0200
+// FASE 11 — botoes direito/meio (postados pelo win32k_on_mouse_event).
+#define WM_RBUTTONDOWN 0x0204
+#define WM_RBUTTONUP   0x0205
+#define WM_MBUTTONDOWN 0x0207
+#define WM_MBUTTONUP   0x0208
 
 // Stock objects (GetStockObject).
 #define WHITE_BRUSH    0
@@ -123,6 +129,21 @@ uintptr_t NtUserPostKey_k(void* hwnd, char ascii, uint8_t scancode);
 void      win32k_on_key(char ascii, uint8_t scancode);
 // Injeta teclas sinteticas + WM_QUIT na janela com foco (teste headless).
 void      win32k_inject_demo_input(const char* s);
+// FASE 11 — Roteia um evento de mouse (vindo da IRQ12 do PS/2): aplica o delta
+// ao cursor (com clamp a tela), faz hit-test e posta WM_MOUSEMOVE +
+// WM_LBUTTONDOWN/UP / WM_RBUTTONDOWN/UP para a janela que esta debaixo do
+// cursor. 'buttons' = bitmask MOUSE_BTN_LEFT/RIGHT/MIDDLE (ver mouse.h).
+void      win32k_on_mouse_event(int32_t dx, int32_t dy, uint32_t buttons);
+// FASE 11 — Posicao atual do cursor (em pixels da tela), atualizada pelo
+// roteamento de eventos do mouse. Usados pelas syscalls NtUserGet/SetCursorPos.
+int32_t   win32k_cursor_x(void);
+int32_t   win32k_cursor_y(void);
+// FASE 11 — Move o cursor para (x,y), com clamp a tela. Recompoe pra atualizar
+// o sprite no lugar novo. Usado por NtUserSetCursorPos.
+void      win32k_set_cursor(int32_t x, int32_t y);
+// FASE 11 — Resolucao do backend grafico ativo (LFB 32 bpp ou mode13h 8 bpp).
+int       win32k_screen_width(void);
+int       win32k_screen_height(void);
 // Pinta o desktop + todas as janelas (z-order) + a barra de tarefas no
 // framebuffer. Loga na serial cada janela e a barra de tarefas.
 void      win32k_compose(void);
@@ -133,3 +154,18 @@ int       win32k_has_windows(void);
 int       win32k_was_active(void);
 // FASE 6: libera todas as janelas de um EPROCESS quando ele encerra (estilo NT).
 void      win32k_reap_process_windows(void* eproc);
+
+// ============================================================================
+//  FASE 12 — SHELL desktop estilo Windows 10 (win32kshell.c).
+//
+//  A shell senta em cima do win32kbase: o BASE pinta o framebuffer (wallpaper,
+//  chrome simples, taskbar pequena) e a SHELL repinta por cima com a aparencia
+//  do Win10 (taskbar 40px, start button, app tray, clock, popup do start menu,
+//  window chrome com [_][[]][X] + drag de janelas).
+// ============================================================================
+void      win32k_shell_init(void);
+// Chamado pelo BASE no fim de win32k_compose: redesenha a UI Win10 por cima.
+void      win32k_shell_compose(void);
+// Chamado pelo BASE no inicio de win32k_on_mouse_event. Retorna 1 se a shell
+// consumiu o evento (e o BASE pula a postagem normal de WM_MOUSE*).
+int       win32k_shell_on_mouse(int x, int y, uint32_t buttons, uint32_t prev_buttons);

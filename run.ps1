@@ -49,10 +49,15 @@ if (-not $Modules -or $Modules.Count -eq 0) {
                     'dxgi.dll', 'd3d11.dll', 'd3d12.dll',
                     'd2d1.dll', 'dwrite.dll', 'dxcore.dll',
                     'ddraw.dll', 'd3d9.dll',
+                    'mmdevapi.dll', 'Audioses.dll', 'dsound.dll', 'winmm.dll',
+                    'ws2_32.dll',
+                    'secur32.dll', 'credui.dll',
                     'ioctldriver.sys', 'mydriver.sys', 'calller.sys',
                     'test.exe', 'ioctlapp.exe',
                     'conhello.exe', 'test32.exe', 'sysinfo.exe', 'pipeserver.exe', 'pipeclient.exe',
-                    'cmd.exe', 'guiapp.exe', 'dxdemo.exe', 'd3d11demo.exe', 'desktop.exe') {
+                    'cmd.exe', 'guiapp.exe', 'dxdemo.exe', 'd3d11demo.exe',
+                    'csrss.exe', 'winlogon.exe', 'win10ui.exe',
+                    'desktop.exe') {
         $p = Join-Path $build $d
         if (Test-Path $p) { $Modules += $p }
     }
@@ -82,7 +87,23 @@ $initrd = $names -join ','
 # desktop renderizado via virtio-gpu).
 $qargs = @('-kernel', 'kernel.bin', '-m', '256', '-no-reboot', '-serial', 'stdio',
            '-cpu', 'qemu64,-hypervisor,vendor=GenuineIntel',
-           '-device', 'virtio-gpu-pci,id=vgpu0')
+           '-device', 'virtio-gpu-pci,id=vgpu0',
+           # FASE 11 (audio stack): expoe um controlador HD Audio Intel ICH9
+           # no PCI. O driver hda_init() detecta vendor=0x8086 class=0x04
+           # subclass=0x03 e loga BAR0. Sem '-audiodev' o stream e silencioso —
+           # suficiente para a deteccao do KMD.
+           '-device', 'intel-hda', '-device', 'hda-output',
+           # FASE 12 (network stack): expoe um Intel 82540EM-A (NIC E1000) no
+           # PCI. e1000_init() detecta vendor=0x8086 device=0x100E class=0x02
+           # subclass=0x00 e loga BAR0. -netdev user fornece NAT user-mode (sem
+           # acesso externo, mas o controller fica visivel no PCI).
+           '-netdev', 'user,id=net0', '-device', 'e1000,netdev=net0',
+           # FASE 13 (USB stack): expoe um xHCI USB 3.0 controller no PCI.
+           # xhci_init() detecta class=0x0C subclass=0x03 prog_if=0x30
+           # (vendor=0x1B36 device=0x000D no QEMU). Sem dispositivos USB
+           # ligados (-usbdevice ... seria opcional); o controller em si
+           # ja basta para o stub registrar 1 HCD via usbport.
+           '-device', 'qemu-xhci,id=xhci0')
 if ($initrd)   { $qargs += @('-initrd', $initrd) }
 if ($Headless) { $qargs += @('-display', 'none') }
 # FASE GPU: -Screendump abre QMP via TCP e, apos o boot, manda 'screendump' p/

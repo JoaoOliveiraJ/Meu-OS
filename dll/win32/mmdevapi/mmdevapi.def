@@ -1,0 +1,7 @@
+; mmdevapi.def — exports informativos da mmdevapi.dll do MeuOS
+; (Multimedia Device API stub - FASE 11 audio stack).
+LIBRARY mmdevapi.dll
+EXPORTS
+CoCreateInstance
+MMDevApiCreateEnumerator
+ActivateAudioInterfaceAsync

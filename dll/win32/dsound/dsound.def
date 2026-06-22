@@ -1,0 +1,9 @@
+; dsound.def — exports informativos da dsound.dll do MeuOS (DirectSound stub).
+LIBRARY dsound.dll
+EXPORTS
+DirectSoundCreate
+DirectSoundCreate8
+DirectSoundCaptureCreate8
+DirectSoundEnumerateA
+DllGetClassObject
+DllCanUnloadNow

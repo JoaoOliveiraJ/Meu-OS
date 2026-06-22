@@ -1,0 +1,33 @@
+; winmm.def — exports informativos da winmm.dll do MeuOS
+; (Windows Multimedia API legada - FASE 11 audio stack).
+LIBRARY winmm.dll
+EXPORTS
+PlaySoundA
+PlaySoundW
+sndPlaySoundA
+sndPlaySoundW
+waveOutGetNumDevs
+waveOutOpen
+waveOutClose
+waveOutPrepareHeader
+waveOutUnprepareHeader
+waveOutWrite
+waveOutReset
+waveOutPause
+waveOutRestart
+waveOutSetVolume
+waveOutGetVolume
+waveOutGetDevCapsA
+timeGetTime
+timeGetDevCaps
+timeBeginPeriod
+timeEndPeriod
+mciSendStringA
+mciSendStringW
+mciGetErrorStringA
+midiOutOpen
+midiOutClose
+midiOutShortMsg
+midiOutGetNumDevs
+joyGetNumDevs
+joyGetPos

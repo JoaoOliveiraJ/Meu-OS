@@ -32,6 +32,9 @@ enum {
     SYS_QUERYDIRECTORYFILE = 44,
     // --- FASE 5: info de volume (rotulo/serial/tamanho/fs name) ---
     SYS_QUERYVOLUMEINFORMATION = 45,
+    // --- FASE 11: cursor do mouse (le/ajusta posicao) ---
+    SYS_USERGETCURSORPOS = 46,
+    SYS_USERSETCURSORPOS = 47,
 };
 
 // long long = 64-bit no Windows (LLP64), para nao truncar ponteiros.
@@ -284,6 +287,16 @@ __declspec(dllexport) long NtGdiTextOutEx(void* hdc, int x, int y, const char* s
                                           int len, unsigned fg) {
     return (long)sc6(SYS_GDITEXTOUTEX, IP(hdc), (long long)x, (long long)y,
                      IP(str), (long long)len, (long long)fg);
+}
+
+// ---- FASE 11: cursor do mouse ----
+// NtUserGetCursorPos(out POINT*) -> 1/0. *out recebe x,y do cursor (pixels).
+__declspec(dllexport) long NtUserGetCursorPos(void* out_point) {
+    return (long)sc1(SYS_USERGETCURSORPOS, IP(out_point));
+}
+// NtUserSetCursorPos(int x, int y) -> 1. Move o cursor (com clamp ao tamanho).
+__declspec(dllexport) long NtUserSetCursorPos(int x, int y) {
+    return (long)sc2(SYS_USERSETCURSORPOS, (long long)x, (long long)y);
 }
 
 int DllMain(void* h, unsigned reason, void* reserved) {

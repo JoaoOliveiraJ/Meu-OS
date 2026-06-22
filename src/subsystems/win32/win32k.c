@@ -41,6 +41,7 @@ extern volatile uint64_t g_ticks;   // timer (IRQ0) — usado como "hora" da MSG
 // ============================================================================
 #include "win32kbase.c"   // FASE 9.10 — parte BASE (HWND + msg queue + GDI minimo)
 #include "win32kfull.c"   // FASE 9.10 — parte FULL (TextOut/FillRect/DIB)
+#include "win32kshell.c"  // FASE 12   — SHELL desktop estilo Windows 10
 
 // ============================================================================
 //  Inicializacao do subsistema. Apenas amarra o init do BASE e adiciona o log
@@ -48,5 +49,6 @@ extern volatile uint64_t g_ticks;   // timer (IRQ0) — usado como "hora" da MSG
 // ============================================================================
 void win32k_init(void) {
     win32kbase_init();
-    kputs("[win32k] base + full carregados (Windows 8.1+ split model)\n");
+    win32k_shell_init();   // FASE 12: estado da shell (start menu, drag, ...)
+    kputs("[win32k] base + full + shell carregados (Windows 8.1+ split + Win10 shell)\n");
 }

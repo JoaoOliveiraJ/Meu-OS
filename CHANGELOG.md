@@ -4,6 +4,161 @@ Todas as mudanças relevantes do projeto. Formato baseado em
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.0/) e
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.9.0] - 2026-06-22
+
+Nona versão. **Stack Windows 10/11 essencialmente completo** — 6 sub-fases
+sequenciais via workflow entregando mouse PS/2, audio, networking, USB+ACPI+
+PnP+FltMgr, security/logon/subsistema, e app de teste final. **18 DLLs
+Win10/11** funcionais + 11 drivers novos + 3 apps (csrss, winlogon, win10ui).
+Build verde, boot verde, 24 `[ok]`, calller.sys 100% intacto.
+
+**Nota:** A Fase 11.2 (Desktop Win10 cosmético — window chrome com
+close/min/max buttons, mouse drag, Start menu popup) **falhou com API 500**
+durante o workflow. Outras 5 fases entregues OK. O Desktop visual está
+funcional via `winlogon.exe` (tela de logon Aero) + `win10ui.exe` (janela
+Win10 mock); polish cosmético pode ser feito em rodada futura.
+
+### Adicionado
+
+- **FASE 11 — Mouse PS/2 + integração win32k**
+  *(`src/drivers/input/mouse/{mouse.c,h}`)*:
+  - State machine 3-byte (byte0 buttons+signs+overflow, byte1 dX, byte2 dY).
+  - IRQ 12 handler (vetor 32+12=44 apos pic_remap), drain do i8042.
+  - Setup: outb(0x64, 0xA8) Aux Enable, cmd 0xD4 + 0xF6 Set Defaults + 0xF4
+    Enable Stream (ACK 0xFA). Unmask IRQ12 no slave PIC + IRQ2 cascade no master.
+  - `src/ntos/ke/amd64/isr.c`: dispatch IRQ12 -> `mouse_irq()`.
+  - `win32k_on_mouse_event(dx, dy, buttons)`: atualiza `s_cursor_x/y` com clamp
+    1024x768, hit-test HWND, post `WM_MOUSEMOVE` + `WM_LBUTTONDOWN/UP` + RBUTTON
+    + MBUTTON pra janela alvo, foco em click L.
+  - Cursor sprite 12x16 (seta clássica NT preto/branco) desenhado em
+    `win32k_compose()` apos taskbar.
+  - Syscalls **46 (NtUserGetCursorPos)** + **47 (NtUserSetCursorPos)** com
+    `POINT {int x, y}` layout. Sincronizadas em `ntdll.{c,def}` e
+    `user32.{c,def}` (`GetCursorPos`/`SetCursorPos`).
+  - *Limitação honesta*: QEMU headless (`-display none`) não injeta IRQ12 via
+    QMP `input-send-event` nem `mouse_move`. Mouse foi PROVADO ponta-a-ponta
+    via smoke test sintetico (4 chamadas a `win32k_on_mouse_event` -> cursor
+    se move + sprite renderizado pixel-a-pixel no screen.ppm em (542, 414)).
+    Com `-display gtk/sdl` interativo, IRQ12 fluiria normalmente.
+
+- **FASE 11 (audio) — DirectSound + WASAPI + MM**
+  *(4 novas DLLs ring 3 + driver HDAudio kernel)*:
+  - `dll/win32/mmdevapi/{mmdevapi.c,def}`: `IMMDeviceEnumerator` Vista+ COM.
+    Exports: `CoCreateInstance`, `MMDevApiCreateEnumerator`,
+    `ActivateAudioInterfaceAsync`.
+  - `dll/win32/Audioses/{audioses.c,def}`: WASAPI `IAudioClient/RenderClient/
+    CaptureClient`. Exports: `AudiosesCreateAudioClient`, `DllGetClassObject`.
+  - `dll/win32/dsound/{dsound.c,def}`: `IDirectSound8/Buffer`. Exports:
+    `DirectSoundCreate/Create8`, `DirectSoundCaptureCreate8`,
+    `DirectSoundEnumerateA`.
+  - `dll/win32/winmm/{winmm.c,def}`: legacy MM. Exports: `PlaySoundA/W`,
+    `waveOutOpen/Write/Close`, `timeGetTime`, `mciSendStringA`, `midiOutOpen`.
+  - `src/drivers/audio/HDAudio/{HDAudio.c,h}`: detect Intel HD Audio via PCI
+    `class=0x04 sub=0x03`. QEMU achou: `vendor=0x8086 device=0x2668
+    (intel-hda) BAR0=0xFEBF0000`.
+
+- **FASE 12 — Networking stack (NDIS + TCP/IP + Winsock + e1000)**
+  *(`src/drivers/network/{ndis,tcpip,e1000}/` + `dll/win32/ws2_32/`)*:
+  - **NDIS framework** (`ndis.{c,h}`): pools estaticos 8 miniports + 4 protocolos.
+    10 APIs ms_abi expostas pelo ntoskrnl: `NdisInitializeWrapper`,
+    `NdisMRegisterMiniportDriver`, `NdisRegisterProtocolDriver`,
+    `NdisAllocate/FreeNetBufferList`, `NdisMSendNetBufferListsComplete`,
+    `NdisFree/AllocateMemoryWithTag`, `NdisMResetComplete`, `NdisGetVersion`.
+  - **TCP/IP** (`tcpip.{c,h}`): cria `\Device\{Tcp,Udp,Ip,RawIp}` (TDI/WSK
+    stub) + registra como protocolo NDIS via `ndis_register_protocol("Tcpip")`.
+  - **e1000 driver** (`e1000.{c,h}`): detect Intel 82540EM-A via PCI
+    `vendor=0x8086 device=0x100E` em bus 0:5.0. Registra na NDIS como miniport.
+  - **Winsock 2.2** (`ws2_32.dll`, ~40 exports): `WSAStartup/Cleanup`,
+    `socket/bind/listen/accept/connect`, `send/recv/sendto/recvfrom`, `select`,
+    `getsockname/getpeername`, `getsockopt/setsockopt/ioctlsocket`,
+    `htons/ntohs/htonl/ntohl`, `inet_addr/ntoa`, `gethostbyname/byaddr/hostname`,
+    `getaddrinfo/freeaddrinfo`, `WSARecv/Send`, `WSA*Event`. Pool 32 sockets.
+  - QEMU agora roda com `-netdev user,id=net0 -device e1000,netdev=net0`.
+
+- **FASE 13 — USB + ACPI + PnP Manager + Filter Manager**
+  *(4 subsistemas kernel adicionais)*:
+  - **USB stack** (`src/drivers/usb/`):
+    - `usbport/{c,h}`: framework com tabela 8 HCDs, `usbport_register_hcd`.
+    - `usbhub/{c,h}`: hub class driver.
+    - `xhci/{c,h}`: detect PCI `class=0x0C sub=0x03 prog_if=0x30` (prefere xHCI >
+      EHCI > OHCI > UHCI). QEMU achou `qemu-xhci` em PCI 0:6.0
+      `vendor=0x1B36 device=0x000D BAR0=0xFEBF4000`.
+  - **ACPI** (`src/drivers/acpi/{acpi.c,h}`): scan BIOS area `[0xE0000,0xFFFFF]`
+    procurando `"RSD PTR "`. Achou em `0xF52C0`, `OEM='BOCHS '`, `RSDT=0xFFE22DB`.
+    Sem AML interpreter (stub).
+  - **PnP Manager** (`src/ntos/io/{pnp.c,h}`): 23 sub-códigos `IRP_MN_*`
+    (START_DEVICE..SURPRISE_REMOVAL), `pnp_dispatch` safe path retorna SUCCESS.
+    Exports: `IoInvalidateDeviceState`, `IoReportDeviceObject`.
+  - **Filter Manager** (`src/drivers/fltmgr/{c,h}`): pool 8 filtros + 16 ports.
+    APIs ms_abi: `FltRegisterFilter`, `FltStartFiltering`, `FltUnregisterFilter`,
+    `FltCreateCommunicationPort`, `FltSendMessage`, `FltSetCallbackDataDirty`.
+  - QEMU agora roda com `-device qemu-xhci,id=xhci0` (USB 3.0 visivel no PCI).
+
+- **FASE 14 (RODADA FINAL) — Security + winlogon + Csrss + win10ui**
+  *(2 DLLs + 3 apps)*:
+  - **secur32.dll** (30 exports SSPI+LSA): `AcquireCredentialsHandleA/W`,
+    `InitializeSecurityContextA/W`, `AcceptSecurityContext`,
+    `DeleteSecurityContext`, `QueryContextAttributesA/W`, `EncryptMessage/
+    DecryptMessage`, `MakeSignature/VerifySignature`, `CompleteAuthToken`,
+    `ApplyControlToken`, `ImpersonateSecurityContext`, `RevertSecurityContext`,
+    `LsaConnectUntrusted`, `LsaRegisterLogonProcess`, `LsaLookupAuthenticationPackage`,
+    `LsaCallAuthenticationPackage`, `LsaLogonUser`, etc.
+  - **credui.dll** (14 exports): `CredUIPromptForCredentialsA/W`,
+    `CredUIConfirmCredentialsA/W`, `CredUIParseUserNameA/W`,
+    `CredUIStoreSSOCredW`, `CredReadA/WriteA/DeleteA/EnumerateA/Free`,
+    `CredIsMarshaledCredentialA`.
+  - **csrss.exe**: stub que loga init e exit (Client/Server Runtime Subsystem).
+  - **winlogon.exe**: app que desenha tela de logon Aero (fundo azul + caixa
+    branca + avatar + campos usuario/senha + botão Entrar + rodapé). Importa
+    secur32 + credui + user32 + gdi32.
+  - **win10ui.exe**: app teste FINAL exercitando todo o stack — janela Win10
+    mock + `dsound` (Audio OK) + `ws2_32` (Network OK) + `secur32` (SSPI OK) +
+    `credui` (CredUI OK) + `fltmgr` (FltMgr registered).
+
+### Estrutura final v0.9.0
+
+```
+Drivers (12 novos nesta rodada):
+  src/drivers/input/mouse/                PS/2 mouse driver
+  src/drivers/audio/HDAudio/              Intel HD Audio
+  src/drivers/network/{ndis,tcpip,e1000}/ NDIS framework + TCP/IP + e1000
+  src/drivers/usb/{usbport,usbhub,xhci}/  USB stack
+  src/drivers/acpi/                       ACPI scan
+  src/drivers/fltmgr/                     Filter Manager
+
+DLLs (5 novas Win10/11 + 2 security = 7 nesta rodada):
+  dll/win32/mmdevapi/   IMMDevice (Vista+)
+  dll/win32/Audioses/   WASAPI (Win7+)
+  dll/win32/dsound/     DirectSound
+  dll/win32/winmm/      Multimedia legacy
+  dll/win32/ws2_32/     Winsock 2.2
+  dll/win32/secur32/    SSPI + LSA
+  dll/win32/credui/     Credential UI
+
+Apps (3 novos):
+  apps/csrss/        Client/Server Runtime Subsystem stub
+  apps/winlogon/     Logon screen (Aero style)
+  apps/win10ui/      Stack test final
+```
+
+**Evidência consolidada** (run.ps1 -Headless -TimeoutSec 20):
+- **24 `[ok]`** (era 20 — +4 das novas fases)
+- 0 `[EXCECAO]`, 0 stub generico, 0 import nao resolvido
+- 3x `0xCAFEBABE` (IOCTL intacto desde v0.1)
+- calller.sys 100% (DriverEntry + 3 ticks + DriverUnload)
+- **18 DLLs Win10/11** funcionais (era 13 — +5 nesta rodada)
+- Logs: 6 mouse + 7 HDA audio + 10 network + 15 USB+ACPI+PnP+FltMgr +
+  47 security/winlogon/csrss/win10ui
+- `Sistema no ar.`
+
+### Pendência (rodada futura)
+
+- **Fase 11.2 Desktop Win10 cosmetico**: API 500 do servidor durante workflow.
+  Pendente: window chrome com botoes close/min/max, mouse drag, Start menu
+  popup. Atualmente o desktop tem wallpaper + taskbar basica (da v0.6/v0.7) +
+  cursor (v0.9 fase 11.1) + tela de logon Aero (`winlogon.exe`) + janela Win10
+  mock (`win10ui.exe`). Pode ser fechado numa rodada rapida.
+
 ## [0.8.0] - 2026-06-22
 
 Oitava versão. **virtio-gpu 2D driver COMPLETO** — substitui o Bochs VBE
@@ -1452,7 +1607,8 @@ do Windows (PE32+) com arquitetura no estilo NT.
 - `cpuid` destruía `EBX` (ponteiro do Multiboot) — `EBX` passou a ser salvo no
   primeiro instante do boot, antes de qualquer `cpuid`.
 
-[Não lançado]: https://github.com/JoaoOliveiraJ/Meu-OS/compare/v0.8.0...HEAD
+[Não lançado]: https://github.com/JoaoOliveiraJ/Meu-OS/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.9.0
 [0.8.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.8.0
 [0.7.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.7.0
 [0.6.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.6.0

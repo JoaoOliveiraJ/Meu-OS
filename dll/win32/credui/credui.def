@@ -1,0 +1,19 @@
+; credui.def — Credential UI exports do MeuOS (RODADA FINAL).
+LIBRARY credui.dll
+EXPORTS
+; --- CredUI: dialogo de credenciais ---
+CredUIPromptForCredentialsA
+CredUIPromptForCredentialsW
+CredUIConfirmCredentialsA
+CredUIConfirmCredentialsW
+CredUIParseUserNameA
+CredUIParseUserNameW
+CredUIStoreSSOCredW
+CredUIReadSSOCredW
+; --- Cred*: vault em memoria ---
+CredReadA
+CredWriteA
+CredDeleteA
+CredEnumerateA
+CredFree
+CredIsMarshaledCredentialA

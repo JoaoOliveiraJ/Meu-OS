@@ -1,0 +1,16 @@
+; advapi32.def — exports informativos da advapi32.dll do MeuOS.
+LIBRARY advapi32.dll
+EXPORTS
+; --- SCM stubs ---
+StartServiceCtrlDispatcherA
+RegisterServiceCtrlHandlerA
+SetServiceStatus
+OpenSCManagerA
+CreateServiceA
+OpenServiceA
+StartServiceA
+CloseServiceHandle
+; --- Registro ---
+RegOpenKeyExA
+RegQueryValueExA
+RegCloseKey

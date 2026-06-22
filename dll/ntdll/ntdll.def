@@ -1,0 +1,52 @@
+; ntdll.def — exports informativos da ntdll.dll do MeuOS.
+; O Zig cc gera os exports via __declspec(dllexport) no .c; este .def e
+; documentacao do contrato publico (estilo NT/WDK real). Sincronizar com
+; o array de exports do ntdll.c quando ele mudar.
+LIBRARY ntdll.dll
+EXPORTS
+; --- Native API (todos via int 0x80) ---
+NtWriteFile
+NtReadFile
+NtCreateFile
+NtDeviceIoControlFile
+NtClose
+NtOpenKey
+NtCreateKey
+NtQueryValueKey
+NtSetValueKey
+NtCreateSection
+NtMapViewOfSection
+NtUnmapViewOfSection
+NtCreateProcess
+NtCreateThread
+NtTerminateProcessEx
+NtWaitForSingleObject
+NtCreateNamedPipeFile
+NtConnectNamedPipe
+NtQuerySystemInformation
+NtQueryInformationProcess
+NtReadVirtualMemory
+NtWriteVirtualMemory
+NtQueryDirectoryFile
+NtQueryVolumeInformation
+; --- Ldr ---
+LdrGetModuleHandle
+LdrGetProcAddress
+; --- NtUser*/NtGdi* (win32k) ---
+NtUserRegisterClass
+NtUserCreateWindowEx
+NtUserDestroyWindow
+NtUserShowWindow
+NtUserGetMessage
+NtUserDispatchMessage
+NtUserPostMessage
+NtUserPostQuitMessage
+NtUserGetDC
+NtUserInvalidate
+NtUserSetFocus
+NtUserPostKey
+NtGdiGetStockObject
+NtGdiCreateSolidBrush
+NtGdiTextOut
+NtGdiTextOutEx
+NtGdiFillRect

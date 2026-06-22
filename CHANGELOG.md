@@ -4,6 +4,114 @@ Todas as mudanças relevantes do projeto. Formato baseado em
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.0/) e
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.8.0] - 2026-06-22
+
+Oitava versão. **virtio-gpu 2D driver COMPLETO** — substitui o Bochs VBE
+como backend primário do `gpu_*` API. Implementação real do protocolo
+virtio 1.1: PCI capabilities walking, MMIO mapping, status protocol,
+feature negotiation, virtqueue (descriptor table + avail/used rings),
+notification via MMIO, polling do used ring, e os 7 comandos 2D essenciais.
+Bochs VBE permanece como fallback. **Screendump prova rendering real via
+GPU virtual: 97.78% azul (desktop) + barra de tarefas cinza + janelas +
+texto branco — tudo apresentado pelo host via virtio-gpu.**
+
+### Adicionado
+
+- **FASE 10 — virtio-gpu 2D driver COMPLETO**
+  *(4 sub-fases via workflow; build verde, boot verde, screendump validando)*:
+
+  **10.1 — PCI + transport + status protocol**:
+  - `src/drivers/display/VirtioGpu/{VirtioGpu.h, VirtioGpu.c}` *(novos)*.
+  - `virtio_gpu_detect()` chamado em `kmain` apos `hal_init()`.
+  - Detecta PCI vendor=`0x1AF4` device=`0x1050` em bus `0:4.0` (modern virtio).
+  - Walk de PCI capabilities (offset `0x34` -> cap list): cada cap com
+    `vndr=0x09` (vendor-specific) decoded para `cfg_type 1..5`:
+    `COMMON_CFG bar=4 off=0x0`, `NOTIFY_CFG off=0x3000 mult=4`,
+    `ISR_CFG off=0x1000`, `DEVICE_CFG off=0x2000`, `PCI_CFG`.
+  - Mapeia 4 MMIO regions em `0xFFFFC100...` (phys=`0xFE000000`) via
+    `mm_map_phys_range` com flag PCD.
+  - Status protocol: `reset (0) -> ACK (1) -> DRIVER (3) -> FEATURES_OK (11)`.
+  - Feature negotiation: le `device_feature` em 2 selects (0=lo, 1=hi).
+    Aceita `VIRTIO_F_VERSION_1` (bit 32). Resultado:
+    `features lo=0x30000002 hi=0x101` -> `VERSION_1` negociado.
+  - run.ps1 ganhou `-device virtio-gpu-pci,id=vgpu0`.
+  - Logs `[vgpu]` x14 no boot.
+
+  **10.2 — Virtqueue + notify + DRIVER_OK**:
+  - Structs packed com `static_assert` de layout:
+    `vq_desc` (16B), `vq_avail` (4+VQ_SIZE*2+2), `vq_used` (4+VQ_SIZE*8+2).
+  - `VIRTIO_QUEUE` struct: ponteiros desc/avail/used + phys, size,
+    `last_used_idx`, `notify_off`, `notify_reg`, free-list
+    (`next_free_desc`, `num_free`).
+  - `virtio_queue_init(idx, q)`: queue_select, clamp size=`min(64, dev)`,
+    aloca 3 paginas via `pmm_alloc_contiguous(1)`, zera, monta free-list
+    (`desc[i].next = i+1`, ultimo `0xFFFF`), grava phys em
+    `queue_desc/driver/device`, `queue_enable=1`.
+  - Helpers: `virtio_queue_alloc_desc` (pop free-list), `free_desc_chain`
+    (segue `VIRTQ_DESC_F_NEXT`), `submit` (avail.ring[idx]=head, mb,
+    avail.idx++, mb, *notify_reg=queue_idx), `wait_response` (polling
+    de `used.idx` com PAUSE).
+  - 2 queues: `controlq idx=0 size=64`, `cursorq idx=1 size=16`.
+  - DRIVER_OK -> `status=0x0F` (ACK|DRIVER|FEATURES_OK|DRIVER_OK).
+
+  **10.3 — Os 7 comandos 2D essenciais**:
+  - `GET_DISPLAY_INFO (0x0100)` -> scanout 0: **1280x800 enabled=1** (default QEMU).
+  - `RESOURCE_CREATE_2D (0x0101)`: cria resource_id, formato `B8G8R8A8_UNORM`.
+  - `RESOURCE_UNREF (0x0102)`.
+  - `RESOURCE_ATTACH_BACKING (0x0106)`: associa lista de `mem_entry`
+    (phys+length) a um resource — usa o framebuffer DMA kmalloc'd.
+  - `SET_SCANOUT (0x0103)`: marca resource como display output (scanout_id=0).
+  - `TRANSFER_TO_HOST_2D (0x0105)`: host re-le o backing.
+  - `RESOURCE_FLUSH (0x0104)`: host re-apresenta o scanout.
+  - Cada comando: aloca 2 desc (header NEXT + response WRITE), submete via
+    controlq, polling em used, le resp_hdr.type, libera chain.
+  - Smoke test soft em main.c: 64x64 BGRA kmalloc'd, CREATE_2D +
+    ATTACH_BACKING + UNREF (sem SET_SCANOUT). Logs todos `OK_NODATA`.
+
+  **10.4 — Backend primario + screendump validando**:
+  - `virtio_gpu_init_display(1024, 768)`: aloca FB DMA contiguo
+    `1024*768*4 = 3 MiB` via `pmm_alloc_contiguous(768 pages)`,
+    `CREATE_2D resource_id=1`, `ATTACH_BACKING phys=framebuffer`,
+    `SET_SCANOUT scanout=0 resource_id=1`. AGORA virtio-gpu controla a tela.
+  - `virtio_gpu_present()`: envia `TRANSFER_TO_HOST_2D` (full rect) +
+    `RESOURCE_FLUSH` — host re-le o backing e re-apresenta.
+  - `gpu_init()` em `src/drivers/display/BasicDisplay/gpu.c` agora tenta
+    virtio-gpu PRIMEIRO; Bochs VBE so fallback. `gpu_pixel/fill_rect/
+    copy_rect/clear` escrevem direto no FB virtio quando ativo.
+  - `win32k_compose()` chama `gpu_present()` ao final pra commitar o frame.
+  - **Evidencia visual**: `build\screen.ppm` (P6 1024x768) capturado via
+    QMP screendump mostra **97.78% azul (desktop)** + **barra cinza**
+    (taskbar) + **janelas** (compose) + **texto branco**. Cada pixel veio
+    pelo caminho:
+    `win32k.compose -> gpu_* -> framebuffer DMA -> virtio_gpu_present
+    -> controlq virtqueue -> notify MMIO -> host QEMU -> screendump`.
+
+  ### Stack final pos-v0.8.0
+
+  ```
+  src/drivers/display/
+  ├── BasicDisplay/{BasicDisplay,gpu}.{c,h}    Bochs VBE (fallback)
+  └── VirtioGpu/{VirtioGpu}.{c,h}              virtio-gpu 2D (primario)
+
+  Arch GPU final:
+  APP ring 3 -> ddraw/d3d11/d3d12/d2d1 (DLLs Win10/11)
+              -> dxgkrnl + dxgmms (DirectX kernel)
+              -> gpu_* DDI (api unificada)
+              -> virtio-gpu (primario) ou Bochs VBE (fallback)
+              -> QEMU host
+  ```
+
+  **Evidencia consolidada** (run.ps1 -Headless -TimeoutSec 14):
+  - **20 `[ok]`** (era 18 — +1 dxgkrnl/dxgmms da v0.7, +1 virtio-gpu init)
+  - 0 `[EXCECAO]`, 0 import nao resolvido
+  - 3x `0xCAFEBABE` (IOCTL intacto)
+  - 65 linhas `[vgpu]` (detect + caps + features + virtqueue + 7 commands + present cycle)
+  - 2 linhas `[dxgk]` + `[dxgmms]`
+  - calller.sys 100% lifecycle
+  - guiapp/dxdemo/d3d11demo/desktop todos rodando
+  - screendump 1024x768 BGRA com 97.78% azul (desktop renderizado pelo host)
+  - `Sistema no ar.`
+
 ## [0.7.0] - 2026-06-22
 
 Sétima versão. **Migração arquitetural de XDDM para WDDM 2.x** — modelo
@@ -1344,7 +1452,8 @@ do Windows (PE32+) com arquitetura no estilo NT.
 - `cpuid` destruía `EBX` (ponteiro do Multiboot) — `EBX` passou a ser salvo no
   primeiro instante do boot, antes de qualquer `cpuid`.
 
-[Não lançado]: https://github.com/JoaoOliveiraJ/Meu-OS/compare/v0.7.0...HEAD
+[Não lançado]: https://github.com/JoaoOliveiraJ/Meu-OS/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.8.0
 [0.7.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.7.0
 [0.6.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.6.0
 [0.5.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.5.0

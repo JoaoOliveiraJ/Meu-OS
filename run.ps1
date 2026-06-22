@@ -42,12 +42,17 @@ if (-not $Modules -or $Modules.Count -eq 0) {
     # demanda quando dxdemo.exe importa). dxdemo.exe vem ENTRE guiapp e desktop
     # para nao quebrar a sequencia esperada (desktop fica por ultimo e o
     # framebuffer final exibe o desktop completo, igual antes).
+    # FASE 9.10 — DLLs do stack DX moderno (dxgi + d3d11 + d3d12) precisam ser
+    # registradas para o loader resolver as imports da ddraw.dll (que agora
+    # delega para d3d11 no compat mode Windows 10+) e do app d3d11demo.exe.
     foreach ($d in 'ntdll.dll', 'kernel32.dll', 'user32.dll', 'gdi32.dll', 'advapi32.dll',
+                    'dxgi.dll', 'd3d11.dll', 'd3d12.dll',
+                    'd2d1.dll', 'dwrite.dll', 'dxcore.dll',
                     'ddraw.dll', 'd3d9.dll',
                     'ioctldriver.sys', 'mydriver.sys', 'calller.sys',
                     'test.exe', 'ioctlapp.exe',
                     'conhello.exe', 'test32.exe', 'sysinfo.exe', 'pipeserver.exe', 'pipeclient.exe',
-                    'cmd.exe', 'guiapp.exe', 'dxdemo.exe', 'desktop.exe') {
+                    'cmd.exe', 'guiapp.exe', 'dxdemo.exe', 'd3d11demo.exe', 'desktop.exe') {
         $p = Join-Path $build $d
         if (Test-Path $p) { $Modules += $p }
     }

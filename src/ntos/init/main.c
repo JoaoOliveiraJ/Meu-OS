@@ -25,6 +25,8 @@
 #include "cm/registry.h"
 #include "ps/cid_table.h"   // FASE 7.5: PspCidTable
 #include "win32/win32k.h"
+#include "dx/dxgkrnl/dxgkrnl.h"   // dxgkrnl: dispatcher DirectX em kernel
+#include "dx/dxgmms/dxgmms.h"     // dxgmms : memory manager de video (residency)
 
 // FS layer (ntfs_fs.c): device de volume registrado no I/O Manager.
 PDEVICE_OBJECT ntfs_fs_volume_device(void);
@@ -660,6 +662,17 @@ void kmain(uint32_t mb_info) {
     } else {
         kputs("[ok] GPU: hardware Bochs/QEMU std-vga nao detectado; mode13h fallback ativo\n");
     }
+
+    // --- FASE DX: subsistema DirectX em kernel (dxgkrnl + dxgmms) ---
+    // Espelha o dxgkrnl.sys + dxgmms2.sys do Windows 10/11. DxgkInitialize le
+    // o estado da GPU (gpu_active/width/height/bpp/pitch) e prepara o adapter
+    // primario; DxgMmsInitialize zera o pool de descritores de residency. Sem
+    // GPU acelerada o adapter fica em modo "display-only" — exatamente o
+    // perfil do BasicDisplay/IDDDriver do Windows. Necessario ANTES de que
+    // qualquer DLL d3d/dxgi tente Dxgk*Create*.
+    DxgkInitialize();
+    DxgMmsInitialize();
+    kputs("[ok] DX: dxgkrnl + dxgmms inicializados (adapter primario pronto)\n");
 
     // --- FASE 2 (HAL disco): IDE ATA PIO + teste de leitura do MBR/NTFS ---
     // Identifica o disco (se anexado via -Disk), le o setor 0 (MBR) e o boot

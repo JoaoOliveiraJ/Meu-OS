@@ -1,0 +1,5 @@
+; dwrite.def — exports informativos da dwrite.dll do MeuOS
+; (DirectWrite stub — FASE 9.9).
+LIBRARY dwrite.dll
+EXPORTS
+DWriteCreateFactory

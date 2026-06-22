@@ -1,0 +1,22 @@
+; kernel32.def — exports informativos da kernel32.dll do MeuOS.
+LIBRARY kernel32.dll
+EXPORTS
+GetStdHandle
+WriteFile
+ReadFile
+CreateFileA
+DeviceIoControl
+CloseHandle
+GetModuleHandleA
+GetProcAddress
+CreateProcessA
+WaitForSingleObject
+ExitProcess
+CreateNamedPipeA
+ConnectNamedPipe
+EnumProcessesEx
+EnumDriversEx
+StartDriverServiceA
+StopDriverServiceA
+QueryDirectoryFileEx
+QueryVolumeInfoEx

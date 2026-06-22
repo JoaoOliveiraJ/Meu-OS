@@ -53,17 +53,18 @@ function Get-ObjName($file) {
 
 $objs = @()
 
-# Programas Windows de exemplo (em examples\) — compilados com o alvo Windows,
+# Programas Windows de exemplo (em apps\) — compilados com o alvo Windows,
 # NAO fazem parte do OS. Viram binarios PE soltos em build\, carregados no boot.
 $sdk = Join-Path $root 'sdk'
-$ex  = Join-Path $root 'examples'
+$ddk = Join-Path $sdk 'ddk'
+$ex  = Join-Path $root 'apps'
 
 # 0a) Exemplo: um .exe Windows (PE32+ x64).
 $hello = Join-Path $ex 'hello.c'
 if (Test-Path $hello) {
-    Write-Host "[exemplo] examples\hello.c -> build\test.exe (.exe Windows)"
+    Write-Host "[exemplo] apps\hello.c -> build\test.exe (.exe Windows)"
     & $zig cc -target x86_64-windows-gnu -nostdlib -e _start `
-        '-Wl,--image-base=0x800000' '-Wl,--subsystem,console' "-I$sdk" `
+        '-Wl,--image-base=0x800000' '-Wl,--subsystem,console' "-I$sdk", "-I$ddk" `
         -o (Join-Path $out 'test.exe') $hello -luser32 -lkernel32
     if ($LASTEXITCODE) { throw "Compilacao do exemplo hello.c falhou." }
 }
@@ -74,9 +75,9 @@ if (Test-Path $hello) {
 #      Mantemos a .reloc (--dynamicbase) para exercitar as relocacoes no loader.
 $hello32 = Join-Path $ex 'hello32.c'
 if (Test-Path $hello32) {
-    Write-Host "[exemplo] examples\hello32.c -> build\test32.exe (.exe Windows 32-bit / PE32)"
+    Write-Host "[exemplo] apps\hello32.c -> build\test32.exe (.exe Windows 32-bit / PE32)"
     & $zig cc -target x86-windows-gnu -nostdlib -e _start `
-        '-Wl,--image-base=0x1600000' '-Wl,--subsystem,console' '-Wl,--dynamicbase' "-I$sdk" `
+        '-Wl,--image-base=0x1600000' '-Wl,--subsystem,console' '-Wl,--dynamicbase' "-I$sdk", "-I$ddk" `
         -o (Join-Path $out 'test32.exe') $hello32
     if ($LASTEXITCODE) { throw "Compilacao do exemplo hello32.c falhou." }
 }
@@ -88,9 +89,9 @@ foreach ($drv in @(
         @{ src = 'calller.c';     out = 'calller.sys';     base = '0x3A00000' })) {
     $sp = Join-Path $ex $drv.src
     if (Test-Path $sp) {
-        Write-Host "[exemplo] examples\$($drv.src) -> build\$($drv.out) (.sys driver)"
+        Write-Host "[exemplo] apps\$($drv.src) -> build\$($drv.out) (.sys driver)"
         & $zig cc -target x86_64-windows-gnu -nostdlib -e DriverEntry `
-            '-Wl,--subsystem,native' "-Wl,--image-base=$($drv.base)" "-I$sdk" `
+            '-Wl,--subsystem,native' "-Wl,--image-base=$($drv.base)" "-I$sdk", "-I$ddk" `
             -o (Join-Path $out $drv.out) $sp -lntoskrnl
         if ($LASTEXITCODE) { throw "Compilacao de $($drv.src) falhou." }
     }
@@ -100,9 +101,9 @@ foreach ($drv in @(
 # GetModuleHandleA/GetProcAddress + MessageBoxA. ImageBase 0x1800000 (livre).
 $conhello = Join-Path $ex 'conhello.c'
 if (Test-Path $conhello) {
-    Write-Host "[exemplo] examples\conhello.c -> build\conhello.exe"
+    Write-Host "[exemplo] apps\conhello.c -> build\conhello.exe"
     & $zig cc -target x86_64-windows-gnu -nostdlib -e _start `
-        '-Wl,--image-base=0x1800000' '-Wl,--subsystem,console' "-I$sdk" `
+        '-Wl,--image-base=0x1800000' '-Wl,--subsystem,console' "-I$sdk", "-I$ddk" `
         -o (Join-Path $out 'conhello.exe') $conhello -lkernel32 -luser32
     if ($LASTEXITCODE) { throw "Compilacao do conhello.c falhou." }
 }
@@ -113,17 +114,17 @@ if (Test-Path $conhello) {
 # (>=0x4000000): servidor 0x1E00000; cliente 0x3000000 (zona morta 48-64 MiB).
 $pipesrv = Join-Path $ex 'pipeserver.c'
 if (Test-Path $pipesrv) {
-    Write-Host "[exemplo] examples\pipeserver.c -> build\pipeserver.exe (.exe Named Pipe servidor)"
+    Write-Host "[exemplo] apps\pipeserver.c -> build\pipeserver.exe (.exe Named Pipe servidor)"
     & $zig cc -target x86_64-windows-gnu -nostdlib -e _start `
-        '-Wl,--image-base=0x1E00000' '-Wl,--subsystem,console' "-I$sdk" `
+        '-Wl,--image-base=0x1E00000' '-Wl,--subsystem,console' "-I$sdk", "-I$ddk" `
         -o (Join-Path $out 'pipeserver.exe') $pipesrv -lkernel32 -luser32
     if ($LASTEXITCODE) { throw "Compilacao do pipeserver.c falhou." }
 }
 $pipecli = Join-Path $ex 'pipeclient.c'
 if (Test-Path $pipecli) {
-    Write-Host "[exemplo] examples\pipeclient.c -> build\pipeclient.exe (.exe Named Pipe cliente)"
+    Write-Host "[exemplo] apps\pipeclient.c -> build\pipeclient.exe (.exe Named Pipe cliente)"
     & $zig cc -target x86_64-windows-gnu -nostdlib -e _start `
-        '-Wl,--image-base=0x3000000' '-Wl,--subsystem,console' "-I$sdk" `
+        '-Wl,--image-base=0x3000000' '-Wl,--subsystem,console' "-I$sdk", "-I$ddk" `
         -o (Join-Path $out 'pipeclient.exe') $pipecli -lkernel32 -luser32
     if ($LASTEXITCODE) { throw "Compilacao do pipeclient.c falhou." }
 }
@@ -133,9 +134,9 @@ if (Test-Path $pipecli) {
 # ImageBase 0x1C00000 (livre). Sera carregado por ULTIMO (a janela fica na tela).
 $guiapp = Join-Path $ex 'guiapp.c'
 if (Test-Path $guiapp) {
-    Write-Host "[exemplo] examples\guiapp.c -> build\guiapp.exe (.exe GUI win32k)"
+    Write-Host "[exemplo] apps\guiapp.c -> build\guiapp.exe (.exe GUI win32k)"
     & $zig cc -target x86_64-windows-gnu -nostdlib -e _start `
-        '-Wl,--image-base=0x1C00000' '-Wl,--subsystem,console' "-I$sdk" `
+        '-Wl,--image-base=0x1C00000' '-Wl,--subsystem,console' "-I$sdk", "-I$ddk" `
         -o (Join-Path $out 'guiapp.exe') $guiapp -lkernel32 -luser32 -lgdi32
     if ($LASTEXITCODE) { throw "Compilacao do guiapp.c falhou." }
 }
@@ -143,9 +144,9 @@ if (Test-Path $guiapp) {
 # Aplicativo de IOCTL (.exe): abre o dispositivo e faz DeviceIoControl.
 $ioapp = Join-Path $ex 'ioctlapp.c'
 if (Test-Path $ioapp) {
-    Write-Host "[exemplo] examples\ioctlapp.c -> build\ioctlapp.exe"
+    Write-Host "[exemplo] apps\ioctlapp.c -> build\ioctlapp.exe"
     & $zig cc -target x86_64-windows-gnu -nostdlib -e _start `
-        '-Wl,--image-base=0x1000000' '-Wl,--subsystem,console' "-I$sdk" `
+        '-Wl,--image-base=0x1000000' '-Wl,--subsystem,console' "-I$sdk", "-I$ddk" `
         -o (Join-Path $out 'ioctlapp.exe') $ioapp -lkernel32 -luser32
     if ($LASTEXITCODE) { throw "Compilacao do ioctlapp.c falhou." }
 }
@@ -193,9 +194,9 @@ if (Test-Path $ntdllSrc) {
 # ImageBase 0x3400000 (zona morta 48-64 MiB; ao lado do advapi32, sem colidir).
 $sysinfo = Join-Path $ex 'sysinfo.c'
 if ((Test-Path $sysinfo) -and (Test-Path (Join-Path $out 'libadvapi32.a'))) {
-    Write-Host "[exemplo] examples\sysinfo.c -> build\sysinfo.exe (.exe NtQuery* + advapi32)"
+    Write-Host "[exemplo] apps\sysinfo.c -> build\sysinfo.exe (.exe NtQuery* + advapi32)"
     & $zig cc -target x86_64-windows-gnu -nostdlib -e _start `
-        '-Wl,--image-base=0x3400000' '-Wl,--subsystem,console' "-I$sdk" `
+        '-Wl,--image-base=0x3400000' '-Wl,--subsystem,console' "-I$sdk", "-I$ddk" `
         -o (Join-Path $out 'sysinfo.exe') $sysinfo `
         (Join-Path $out 'libkernel32.a') (Join-Path $out 'libntdll.a') (Join-Path $out 'libadvapi32.a')
     if ($LASTEXITCODE) { throw "Compilacao do sysinfo.c falhou." }
@@ -209,9 +210,9 @@ if ((Test-Path $sysinfo) -and (Test-Path (Join-Path $out 'libadvapi32.a'))) {
 # ImageBase 0x3600000 (zona morta 48-64 MiB; ao lado de advapi32/sysinfo, sem colidir).
 $cmd = Join-Path $ex 'cmd.c'
 if ((Test-Path $cmd) -and (Test-Path (Join-Path $out 'libkernel32.a'))) {
-    Write-Host "[exemplo] examples\cmd.c -> build\cmd.exe (.exe shell FASE 5)"
+    Write-Host "[exemplo] apps\cmd.c -> build\cmd.exe (.exe shell FASE 5)"
     & $zig cc -target x86_64-windows-gnu -nostdlib -e _start `
-        '-Wl,--image-base=0x3600000' '-Wl,--subsystem,console' "-I$sdk" `
+        '-Wl,--image-base=0x3600000' '-Wl,--subsystem,console' "-I$sdk", "-I$ddk" `
         -o (Join-Path $out 'cmd.exe') $cmd `
         (Join-Path $out 'libkernel32.a') (Join-Path $out 'libntdll.a')
     if ($LASTEXITCODE) { throw "Compilacao do cmd.c falhou." }
@@ -225,9 +226,9 @@ if ((Test-Path $cmd) -and (Test-Path (Join-Path $out 'libkernel32.a'))) {
 # runtime). ImageBase 0x3800000 (zona morta 48-64 MiB; ao lado de cmd, sem colidir).
 $desktop = Join-Path $ex 'desktop.c'
 if ((Test-Path $desktop) -and (Test-Path (Join-Path $out 'libgdi32.a'))) {
-    Write-Host "[exemplo] examples\desktop.c -> build\desktop.exe (.exe desktop FASE 6)"
+    Write-Host "[exemplo] apps\desktop.c -> build\desktop.exe (.exe desktop FASE 6)"
     & $zig cc -target x86_64-windows-gnu -nostdlib -e _start `
-        '-Wl,--image-base=0x3800000' '-Wl,--subsystem,console' "-I$sdk" `
+        '-Wl,--image-base=0x3800000' '-Wl,--subsystem,console' "-I$sdk", "-I$ddk" `
         -o (Join-Path $out 'desktop.exe') $desktop `
         (Join-Path $out 'libkernel32.a') (Join-Path $out 'libuser32.a') `
         (Join-Path $out 'libgdi32.a') (Join-Path $out 'libntdll.a')
@@ -255,7 +256,7 @@ $cflags = @(
     "-I$(Join-Path $src 'ntos\inc')",      # headers privados (io.h)
     "-I$(Join-Path $src 'drivers')",       # input/, video/, serial/, filesystems/
     "-I$(Join-Path $src 'subsystems')",    # win32/
-    "-I$sdk",
+    "-I$sdk", "-I$ddk",
     '-std=c11','-Wall','-Wextra','-O2','-c'
 )
 foreach ($f in (Get-ChildItem -Path $src -Recurse -Filter *.c)) {

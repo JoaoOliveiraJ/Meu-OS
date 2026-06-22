@@ -1,0 +1,5 @@
+# Placeholder para futura porta x86 32-bit.
+# Quando essa porta acontecer, espelhar a estrutura de ../amd64/:
+#   isr.asm, idt.c, isr.c, pic.c, pit.c, gdt.c, kpcr.c (32-bit KPCR),
+#   syscall.c (sysenter em 32-bit), syscall_entry.asm, usermode.c.
+# build.ps1 escolheria a pasta arch via target (-target x86-* -> i386/).

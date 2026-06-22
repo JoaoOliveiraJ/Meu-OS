@@ -4,6 +4,63 @@ Todas as mudanças relevantes do projeto. Formato baseado em
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.0/) e
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.5.0] - 2026-06-22
+
+Quinta versão. **Polish arquitetural** completando a reorganização v0.4.0:
+SDK dividido em `sdk/ddk/{wdm.h, ntddk.h, ntifs.h}` (estilo WDK real),
+`examples/` renomeado para `apps/`, placeholder `src/ntos/ke/i386/` para
+futura porta x86 32-bit, e arquivos `.def` informativos em cada DLL
+documentando o contrato de exports. Build verde, boot verde, zero
+regressão.
+
+### Alterado
+
+- **FASE 8.1 — Refinamento final estilo WDK/ReactOS**:
+  - **`sdk/ddk/{wdm.h, ntddk.h, ntifs.h}`**: o monolitico `sdk/ntddk.h`
+    foi movido para `sdk/ddk/ntddk.h` (preserva historico via `git mv`).
+    Criados `sdk/ddk/wdm.h` e `sdk/ddk/ntifs.h` como wrappers que fazem
+    `#include "ntddk.h"`. No WDK real, `wdm.h` contem o subconjunto base
+    (tipos primitivos, IRP, KEVENT/KSPIN_LOCK, basic Io/Rtl) que TODOS
+    os drivers usam, `ntddk.h` estende com APIs do executive (Cc/Cm/Ex/
+    Mm/Ob/Ps/Se), e `ntifs.h` estende com FILE_OBJECT internals para
+    drivers de filesystem. No MeuOS comecam como aliases — podem ser
+    divididos em conteudo nas rodadas futuras quando a separacao de
+    niveis importar. `build.ps1` ganhou `-I sdk/ddk` adicional para
+    resolver `<ntddk.h>` direto da nova localizacao.
+  - **`examples/` → `apps/`**: renomeado via `git mv` (15 arquivos),
+    `__pycache__` removido. Casa com a convencao Windows/ReactOS onde
+    "apps" sao binarios de teste/demo distintos do kernel. Atualizadas
+    referencias em `build.ps1` (variavel `$ex` aponta para `apps/`,
+    mensagens de log mostram `apps\<nome>.c`).
+  - **`src/ntos/ke/i386/`**: pasta criada com `.gitkeep` documentando o
+    plano de futura porta 32-bit. Estrutura espelharia
+    `src/ntos/ke/amd64/` (isr.asm/c, idt, pic, pit, gdt, kpcr 32-bit,
+    syscall via sysenter, syscall_entry.asm, usermode). `build.ps1`
+    selecionaria a pasta arch por target (`-target x86-*` -> `i386/`).
+  - **Arquivos `.def` informativos** em cada DLL:
+    - `dll/ntdll/ntdll.def` — lista os ~40 exports `Nt*` (NtCreateFile,
+      NtOpenKey, NtCreateSection, NtUserCreateWindowEx, etc.) +
+      `LdrGetModuleHandle`/`LdrGetProcAddress`.
+    - `dll/win32/kernel32/kernel32.def` — `GetStdHandle`, `WriteFile`,
+      `CreateProcessA`, `EnumProcessesEx`, `QueryDirectoryFileEx`, etc.
+    - `dll/win32/user32/user32.def` — `MessageBoxA`, `CreateWindowExA`,
+      loop de mensagens (`GetMessage`/`DispatchMessage`), `BeginPaint`,
+      `FillRect`, `SetFocus`, `CreateDesktopWindowA`,
+      `CreateConsoleWindowA`.
+    - `dll/win32/gdi32/gdi32.def` — `TextOutA`, `GetStockObject`,
+      `CreateSolidBrush`, `DeleteObject`, `SetTextColor`.
+    - `dll/win32/advapi32/advapi32.def` — SCM stubs
+      (`StartServiceCtrlDispatcherA`, `OpenSCManagerA`,
+      `CreateServiceA`, etc.) + registro (`RegOpenKeyExA`,
+      `RegQueryValueExA`, `RegCloseKey`).
+    Os `.def` sao **documentacionais** — o Zig cc gera os exports via
+    `__declspec(dllexport)` nos `.c`. Replicam o contrato publico no
+    estilo NT/WDK real (cada DLL tem um `.def` listando o contrato).
+
+  **Evidencia** (build + boot): 16 `[ok]`, 0 `[EXCECAO]`, 3x
+  `0xCAFEBABE`, `Sistema no ar`. Mesma evidencia da v0.4.0 — refinamento
+  arquitetural sem alterar comportamento.
+
 ## [0.4.0] - 2026-06-22
 
 Quarta versão. **Reorganização arquitetural total**: estrutura de pastas
@@ -984,7 +1041,8 @@ do Windows (PE32+) com arquitetura no estilo NT.
 - `cpuid` destruía `EBX` (ponteiro do Multiboot) — `EBX` passou a ser salvo no
   primeiro instante do boot, antes de qualquer `cpuid`.
 
-[Não lançado]: https://github.com/JoaoOliveiraJ/Meu-OS/compare/v0.4.0...HEAD
+[Não lançado]: https://github.com/JoaoOliveiraJ/Meu-OS/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.5.0
 [0.4.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.4.0
 [0.3.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.3.0
 [0.2.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.2.0

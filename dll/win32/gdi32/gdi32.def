@@ -1,0 +1,8 @@
+; gdi32.def — exports informativos da gdi32.dll do MeuOS.
+LIBRARY gdi32.dll
+EXPORTS
+TextOutA
+GetStockObject
+CreateSolidBrush
+DeleteObject
+SetTextColor

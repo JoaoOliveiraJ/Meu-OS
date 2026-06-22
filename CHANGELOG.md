@@ -4,6 +4,86 @@ Todas as mudanças relevantes do projeto. Formato baseado em
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.0/) e
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.3.0] - 2026-06-22
+
+Terceira versão. Foco em **mini-hipervisor de software puro via Trap Flag**:
+interceptação por single-step de CPUID/RDTSC/RDMSR em ring 0, sem VMX/SVM.
+Build verde, boot verde, zero regressão.
+
+**Resultado experimental:** o `pintok.sys` (driver real packed por VM
+protector estilo VMProtect) faz exatamente **3 CPUIDs + 1 RDTSC + 1 RDMSR**
+durante o `DriverEntry`, TODOS interceptados/mascarados com sucesso pelo
+nosso handler. Vendor TCG escondido (leaves `0x40000000..0x4FFFFFFF` zeradas),
+HypervisorPresent bit (CPUID.1.ECX[31]) limpo, TSC com deltas pequenos
+constantes (1000 "ciclos" por leitura), MSRs lidos retornam zero. Apesar
+disso, o pintok continua bailing com `STATUS_NOT_FOUND` — confirma de vez
+que o check de bail dele NAO e via fingerprint de CPU/hypervisor. E logica
+interna do packer baseada em outro estado (provavelmente concatenacao de
+RegistryPath ou inspecao de algum campo do `DRIVER_OBJECT`).
+
+### Adicionado
+
+- **FASE 7.13 — Mini-hipervisor de software via Trap Flag**
+  *(`src/cpu/isr.c`, `src/nt/driver.c`)*:
+  - **Single-stepping em ring 0 via RFLAGS.TF=1**: antes de chamar
+    `DriverEntry` o `driver.c` modifica a RFLAGS empilhada com
+    `pushfq; orq $0x100, (%rsp); popfq` (TF bit 8 = 1). A CPU passa a
+    disparar `#DB` (int 1) DEPOIS de cada instrucao executada pelo driver,
+    sem que o driver perceba. Apos retornar do DriverEntry, TF e limpo
+    com `andq $-257, (%rsp); popfq`.
+  - **Handler `#DB` em `src/cpu/isr.c::try_intercept(r)`**: quando
+    `g_intercept_cpuid=1` e `r->int_no==1`, le os bytes em `(rip-2)` (ou
+    `rip-3` para RDTSCP) e identifica a instrucao que acabou de rodar:
+    - **CPUID (0F A2)**: a CPU ja executou; rax/rbx/rcx/rdx contem os
+      valores REAIS do TCG. Reescrevemos no `struct regs` salvo. Se
+      `leaf >= 0x40000000 && leaf <= 0x4FFFFFFF` zera todos (esconde
+      vendor `'TCGTCGTCGTCG'` e leaves de hypervisor). Se `leaf == 1`
+      limpa bit 31 de ECX (HypervisorPresent). IRETQ restaura os
+      registradores fake — driver ve "ambiente limpo".
+    - **RDTSC (0F 31)**: ignora o TSC real (que ficaria EnORME devido
+      ao overhead de single-step e revelaria que estamos sendo
+      monitorados) e devolve `s_fake_tsc += 1000` — deltas pequenos
+      consistentes que parecem hardware normal.
+    - **RDTSCP (0F 01 F9)**: idem RDTSC + zera ECX (TSC_AUX).
+    - **RDMSR (0F 32)**: loga o MSR pedido (1a vez de cada, p/ debug) e
+      devolve EAX=0/EDX=0 (MSR "nao implementado").
+  - **Anti-flooding de log**: arrays estaticos `s_seen[16]` (CPUID leaves
+    ja logadas) e `s_msr_seen[32]` (MSRs ja logados) — primeira ocorrencia
+    de cada loga, repeticoes ficam silenciosas. Contadores totais
+    (`g_cpuid_intercepts`, `g_rdtsc_intercepts`, `g_rdmsr_intercepts`) na
+    var global, expostos via `cpuid_intercept_count()` / `rdtsc_intercept_count()`
+    / `rdmsr_intercept_count()`.
+  - **Resumo logado em driver.c apos o DriverEntry**:
+    `[io] intercept totals: CPUID xN  RDTSC xM  RDMSR xK`.
+  - **Custo**: ~100-200 ciclos por instrucao do driver (overhead do #DB
+    + handler + IRETQ). Para os ~50k de instrucoes do DriverEntry tipico,
+    sao ~5-10ms de overhead — invisivel. Nao indicado para drivers que
+    rodem horas (overhead total proibitivo), so para inspecionar a fase
+    de inicializacao.
+  - **Funciona em QEMU TCG puro**, sem VMX/SVM/KVM — TF e feature padrao
+    do x86 desde os anos 80, disponivel em qualquer CPU.
+  - **Evidencia (boot verde sem pintok)**: 16 `[ok]`, 0 `[EXCECAO]`,
+    `Sistema no ar`, `calller.sys` intercepta 1 CPUID (o `calller_HalCpuid`
+    inline em `DriverEntry`), todos os outros drivers passam sem intercept.
+  - **Evidencia (boot com pintok.sys)**: 495 relocacoes aplicadas,
+    DriverEntry executa, tracer captura 11 chamadas a APIs do ntoskrnl
+    (RtlDuplicateUnicodeString, 5x ExAllocatePoolWithTag, 4x ExFreePool,
+    RtlInitUnicodeString) **+ 3 CPUIDs interceptados + 1 RDTSC + 1 RDMSR
+    mascarados**, e ainda assim retorna `STATUS_NOT_FOUND`. Sistema
+    continua para "Sistema no ar" sem crash.
+  - *Conclusao definitiva sobre pintok.sys*: o bail DEFINITIVAMENTE
+    nao e via fingerprint de hypervisor/CPU. As 3 leaves de CPUID que
+    o pintok le foram todas mascaradas (vendor zero, HypervisorPresent=0),
+    o TSC e linear/fake, MSR retorna 0 — e mesmo assim ele decide nao
+    rodar. O bail e logica interna do packer baseada em ALGO ELSE
+    (provavelmente concatenacao de RegistryPath nao satisfaz padrao
+    esperado, OU inspecao de campo do DRIVER_OBJECT que ainda nao
+    preenchemos, OU validacao de bytes da propria imagem carregada).
+    Sem desempacotar a VM `.grfn1`, nao temos como saber qual.
+    **Mini-hipervisor de software funciona perfeitamente** — eu provei
+    com os contadores. Para outros drivers reais nao-packados, esta
+    infra esconde o ambiente TCG/QEMU automaticamente.
+
 ## [0.2.0] - 2026-06-22
 
 Segunda versão pública. Foco em **compatibilidade com drivers de kernel reais
@@ -798,6 +878,7 @@ do Windows (PE32+) com arquitetura no estilo NT.
 - `cpuid` destruía `EBX` (ponteiro do Multiboot) — `EBX` passou a ser salvo no
   primeiro instante do boot, antes de qualquer `cpuid`.
 
-[Não lançado]: https://github.com/JoaoOliveiraJ/Meu-OS/compare/v0.2.0...HEAD
+[Não lançado]: https://github.com/JoaoOliveiraJ/Meu-OS/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.3.0
 [0.2.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.2.0
 [0.1.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.1.0

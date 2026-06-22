@@ -12,7 +12,9 @@
 param(
     [switch]$Headless,
     [int]$TimeoutSec = 0,
-    [string[]]$Modules
+    [string[]]$Modules,
+    [switch]$Screendump,
+    [int]$QmpPort = 4444
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,11 +38,16 @@ if (-not $qemu) { throw "QEMU nao encontrado. Rode .\setup.ps1" }
 if (-not $Modules -or $Modules.Count -eq 0) {
     $Modules = @()
     # Ordem: DLLs (sob demanda), depois DRIVERS (criam dispositivos), depois APPS.
+    # FASE 9.4: ddraw.dll + d3d9.dll entram com as demais DLLs (carregadas sob
+    # demanda quando dxdemo.exe importa). dxdemo.exe vem ENTRE guiapp e desktop
+    # para nao quebrar a sequencia esperada (desktop fica por ultimo e o
+    # framebuffer final exibe o desktop completo, igual antes).
     foreach ($d in 'ntdll.dll', 'kernel32.dll', 'user32.dll', 'gdi32.dll', 'advapi32.dll',
+                    'ddraw.dll', 'd3d9.dll',
                     'ioctldriver.sys', 'mydriver.sys', 'calller.sys',
                     'test.exe', 'ioctlapp.exe',
                     'conhello.exe', 'test32.exe', 'sysinfo.exe', 'pipeserver.exe', 'pipeclient.exe',
-                    'cmd.exe', 'guiapp.exe', 'desktop.exe') {
+                    'cmd.exe', 'guiapp.exe', 'dxdemo.exe', 'desktop.exe') {
         $p = Join-Path $build $d
         if (Test-Path $p) { $Modules += $p }
     }
@@ -65,6 +72,13 @@ $qargs = @('-kernel', 'kernel.bin', '-m', '256', '-no-reboot', '-serial', 'stdio
            '-cpu', 'qemu64,-hypervisor,vendor=GenuineIntel')
 if ($initrd)   { $qargs += @('-initrd', $initrd) }
 if ($Headless) { $qargs += @('-display', 'none') }
+# FASE GPU: -Screendump abre QMP via TCP e, apos o boot, manda 'screendump' p/
+# capturar o framebuffer em build\screen.ppm (prova visual). Exige -Headless +
+# -TimeoutSec; o screendump roda em paralelo, aguarda alguns segundos de boot
+# antes do snapshot. NAO toca no caminho normal sem o switch.
+if ($Screendump) {
+    $qargs += @('-qmp', "tcp:127.0.0.1:$QmpPort,server,nowait")
+}
 
 Write-Host "QEMU   : $qemu"
 Write-Host "Modulos: $initrd"
@@ -76,7 +90,37 @@ if ($TimeoutSec -gt 0) {
     $argStr = ($qargs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
     $p = Start-Process -FilePath $qemu -ArgumentList $argStr -WorkingDirectory $build `
             -NoNewWindow -PassThru -RedirectStandardOutput $log -RedirectStandardError $errlog
-    Start-Sleep -Seconds $TimeoutSec
+
+    if ($Screendump) {
+        # Aguarda o boot subir; depois faz o handshake QMP (qmp_capabilities) +
+        # 'screendump' p/ build\screen.ppm. Prova visual sem -display.
+        $snapAt = [int]([Math]::Max(2, $TimeoutSec - 2))
+        Start-Sleep -Seconds $snapAt
+        try {
+            $client = New-Object System.Net.Sockets.TcpClient
+            $client.Connect('127.0.0.1', $QmpPort)
+            $stream = $client.GetStream()
+            $reader = New-Object System.IO.StreamReader($stream)
+            $writer = New-Object System.IO.StreamWriter($stream)
+            $writer.NewLine = "`r`n"; $writer.AutoFlush = $true
+            [void]$reader.ReadLine()    # greeting QMP
+            $writer.WriteLine('{"execute":"qmp_capabilities"}')
+            [void]$reader.ReadLine()
+            $ppm = Join-Path $build 'screen.ppm'
+            if (Test-Path $ppm) { Remove-Item $ppm -Force -ErrorAction SilentlyContinue }
+            $cmd = '{"execute":"screendump","arguments":{"filename":"' +
+                   ($ppm -replace '\\','\\') + '"}}'
+            $writer.WriteLine($cmd)
+            [void]$reader.ReadLine()
+            $client.Close()
+            Write-Host "--- screendump -> $ppm ---"
+        } catch {
+            Write-Host "--- screendump falhou: $($_.Exception.Message) ---"
+        }
+        Start-Sleep -Seconds ([Math]::Max(1, $TimeoutSec - $snapAt))
+    } else {
+        Start-Sleep -Seconds $TimeoutSec
+    }
     if (-not $p.HasExited) { $p.Kill() }
     Start-Sleep -Milliseconds 300
     Write-Host "--- saida serial (stdout) ---"

@@ -216,3 +216,23 @@ void fb_draw_text(int x, int y, const char* s, uint8_t fg, uint8_t bg) {
         if (cx + 8 > FB_WIDTH) { cx = x; cy += 8; }
     }
 }
+
+// ============================================================================
+//  FASE 9.2 — palette_8_to_32: converte um indice de paleta de 8 bits (mode
+//  13h) para XRGB888 (formato 32 bpp do LFB do Bochs VBE). Mantemos as MESMAS
+//  cores nominais da paleta padrao do mode 13h (PAL16[]) para que codigo que
+//  hoje passa FB_BLUE/FB_RED continue produzindo o azul/vermelho do DOS no
+//  novo backend, sem precisar reescrever cada chamada.
+//  Indices 16..255 viram uma rampa de cinza linear (mesma ideia do load_palette).
+// ============================================================================
+uint32_t palette_8_to_32(uint8_t idx) {
+    if (idx < 16) {
+        uint8_t r = PAL16[idx][0];
+        uint8_t g = PAL16[idx][1];
+        uint8_t b = PAL16[idx][2];
+        return RGB32(r, g, b);
+    }
+    // Rampa de cinza para 16..255 (0..255 linear).
+    uint8_t g = (uint8_t)idx;     // simples e suficiente para depuracao visual
+    return RGB32(g, g, g);
+}

@@ -4,6 +4,126 @@ Todas as mudanças relevantes do projeto. Formato baseado em
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.0/) e
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.6.0] - 2026-06-22
+
+Sexta versão. **GPU stack XDDM completo** (modelo Windows XP/2000):
+driver Bochs VBE no kernel + GDI 32-bit no win32k + DirectDraw 7 + Direct3D 7
+stubs + `dxdemo.exe` exercitando o stack ponta-a-ponta. Build verde, boot
+verde, **screendump 1024x768x32** validando os pixels. Próxima rodada
+(v0.7.0) migra para **WDDM 2.x (Windows 10+)** adicionando `dxgkrnl.sys`,
+`dxgmms.sys`, `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `d2d1.dll`, `dwrite.dll`.
+
+### Adicionado
+
+- **FASE 9 — GPU + GDI 32-bit + DirectX 7 stubs (XDDM)**
+  *(5 sub-fases via workflow; 17 arquivos novos/modificados; build verde, boot verde)*:
+
+  **9.1 — `mm_map_phys_range` + driver Bochs VBE**:
+  - `src/ntos/mm/paging.{c,h}`: nova `mm_map_phys_range(virt, phys, size, flags)`
+    walk PML4→PDPT→PD→PT com `ensure_table`, instala um PTE por pagina 4 KiB,
+    flush TLB; recusa ranges sobre huge pages. `mm_map_zero_page` refatorada
+    para reusar `mm_map_phys_range` (com fast-path sem vazar frame).
+  - `src/drivers/display/BasicDisplay/BasicDisplay.{c,h}` (renomeado de
+    `src/drivers/video/bochsvbe.{c,h}` pra padrão Windows real
+    `BasicDisplay.sys`): detecta PCI vendor=0x1234 device=0x1111
+    (QEMU std-vga = Bochs Display Interface), le BAR0=0xFD000000, habilita
+    Memory+BusMaster, mapeia 3072 KiB do LFB em virt=0xFFFFC000FD000000 com
+    PCD via mm_map_phys_range, valida `VBE_DISPI_INDEX_ID=0xB0C5` via portas
+    0x1CE/0x1CF, programa 1024x768x32 (disable -> set XRES/YRES/BPP -> enable
+    com VBE_DISPI_ENABLED|VBE_DISPI_LFB_ENABLED|VBE_DISPI_8BIT_DAC).
+  - `src/drivers/display/BasicDisplay/gpu.{c,h}` (renomeado de
+    `src/drivers/video/gpu.{c,h}`): API DDI-like exposta pro kernel:
+    `gpu_init/active/width/height/pitch/bpp/clear/pixel/fill_rect/copy_rect/present`
+    sobre o LFB 32 bpp (RGBA `0xAARRGGBB`).
+  - `kmain` chama `gpu_init(1024, 768)` apos `hal_init()`.
+  - Log: `[bvbe] PCI 1234:1111 BAR0=phys=0xFD000000 virt=0xFFFFC000FD000000 id=0xB0C5 mode=1024x768x32`
+    e `[gpu] init OK WxHxBPP, LFB=...`.
+
+  **9.2 — GDI 32-bit no win32k**:
+  - `src/drivers/video/video.h` ganhou `RGB32(r,g,b)` macro + constantes
+    XRGB888 (`RGB32_BLACK/WHITE/BLUE/...`) + `palette_8_to_32(idx)`.
+  - `src/subsystems/win32/win32k.c`: helpers internos
+    `w32k_clear/fill_rect/hline/vline/rect/draw_char/draw_text + scr_width/height`
+    escolhem o backend em runtime: gpu_* (32 bpp XRGB888) se `gpu_active()`,
+    fallback fb_* (mode 13h 8 bpp). `draw_window_chrome/draw_taskbar/
+    win32k_compose/NtGdiTextOut_k/NtGdiFillRect_k` migrados.
+  - `ensure_fb()` pula mode13h se a GPU ja esta ativa.
+  - **SSDT (NtUser*/NtGdi*) intacta** — aplicacoes ring 3 nao mudam.
+  - DIB minimo: `NtGdiCreateDIBSection_k` aloca buffer XRGB888 no heap do
+    kernel. Wallpaper agora ocupa 1024x768 (era 320x200).
+
+  **9.3 — DirectDraw 7 stubs (DLL ring 3)**:
+  - `dll/win32/ddraw/{ddraw.c, ddraw.def}` (PE32+ x64, ImageBase 0x3E00000):
+    `IDirectDraw7` e `IDirectDrawSurface7` com vtables COM-ABI completas.
+  - Metodos IDD7: `QueryInterface/AddRef/Release/SetCooperativeLevel/
+    SetDisplayMode/CreateSurface/GetDisplayMode/CreatePalette/CreateClipper/
+    WaitForVerticalBlank/GetCaps/RestoreDisplayMode/FlipToGDISurface/Compact`.
+  - Metodos IDDS7: `Blt/Flip/Lock/Unlock/GetDC/ReleaseDC/Restore/IsLost/
+    SetClipper/SetPalette/GetSurfaceDesc`.
+  - Todos devolvem `DD_OK`. Pool estatico (4 IDD7 + 16 surfaces).
+  - DLL autocontida (sem dependencia de ntdll).
+  - Exports: `DirectDrawCreate`, `DirectDrawCreateEx`, `DirectDrawEnumerateA`,
+    `DirectDrawEnumerateExA`.
+  - `DDSURFACEDESC2` com `#pragma pack(1)` para ABI binario.
+
+  **9.4 — Direct3D 7 stubs (`d3d9.dll`)**:
+  - `dll/win32/d3d9/{d3d9.c, d3d9.def}` (renomeado de `dll/win32/d3d/`,
+    ImageBase 0x3C00000 — `0x4000000` evitado pq e `PMM_BASE`):
+    `IDirect3D7` e `IDirect3DDevice7` com vtables COM-ABI completas.
+  - Metodos ID3D7: `EnumDevices/CreateDevice/CreateVertexBuffer/
+    EnumZBufferFormats/EvictManagedTextures`.
+  - Metodos ID3DD7: `GetCaps/BeginScene/EndScene/Clear/SetTransform/
+    GetTransform/SetViewport/SetMaterial/SetLight/LightEnable/
+    SetRenderState/GetRenderState/DrawPrimitive/DrawIndexedPrimitive/
+    SetTexture/SetTextureStageState/SetRenderTarget` + state-blocks.
+  - Todos devolvem `D3D_OK`. Pools estaticos (4 IDirect3D7 + 4 devices).
+  - Exports: `Direct3DCreate7`, `Direct3DCreate8`, `Direct3DCreate9`.
+
+  **9.5 — `apps/dxdemo/dxdemo.c` (renomeado de `gpuapp.c`)**:
+  - PE32+ x64, ImageBase `0x400000` (4 MiB, slot pd[2] livre entre kernel e
+    USTACK 0x600000; 0x4200000 sugerido evitado pq >= PMM_BASE colide com
+    frames gerenciados).
+  - Importa kernel32/user32/gdi32/ntdll/ddraw/d3d9.
+  - WinMain: `RegisterClassA -> CreateWindowExA -> DirectDrawCreateEx ->
+    SetCooperativeLevel -> SetDisplayMode -> CreateSurface(primary) ->
+    Direct3DCreate7 -> CreateDevice -> WindowProc WM_PAINT (FillRect
+    vermelho/amarelo + TextOut + ciclo BeginScene/Clear/SetViewport/
+    SetRenderState/DrawPrimitive/EndScene) -> PostQuitMessage ->
+    Release dos 4 objetos COM -> ExitProcess(0)`.
+  - `run.ps1` ganhou `-Screendump`/`-QmpPort` (estavam documentados mas
+    faltavam o handshake QMP). Screendump valida `build\screen.ppm`
+    (P6 1024x768) com a janela + retangulos coloridos renderizados.
+  - **Bug colateral corrigido**: `say_hex` em `ntoskrnl.c` usava buffer
+    local de 64 bytes que estourava com prefixos longos do dxdemo
+    (53+ chars + "0x" + 16 digitos + "\\n\\0" = 73 bytes), causando #UD
+    (vector 6). Buffer expandido para 160 bytes.
+
+  ### Polish — padronizacao de nomenclatura Windows real:
+
+  | Workflow gerou | Renomeado para |
+  |----------------|----------------|
+  | `src/drivers/video/bochsvbe.{c,h}` | `src/drivers/display/BasicDisplay/BasicDisplay.{c,h}` |
+  | `src/drivers/video/gpu.{c,h}`      | `src/drivers/display/BasicDisplay/gpu.{c,h}` |
+  | `dll/win32/d3d/d3d.{c,def}`        | `dll/win32/d3d9/d3d9.{c,def}` (no Win10 real, D3D7 vem dentro do ddraw.dll; D3D9 e que tem DLL propria) |
+  | `apps/gpuapp.c`                    | `apps/dxdemo/dxdemo.c` (estilo `dxdiag` do Windows — subpasta por app) |
+  | binario `d3d.dll` / `libd3d.a`     | `d3d9.dll` / `libd3d9.a` |
+  | binario `gpuapp.exe`               | `dxdemo.exe` |
+
+  `src/drivers/video/` mantido com `vga.c/video.c/font8x8.c` como **legado
+  XDDM** (modelo Windows XP), enquanto `src/drivers/display/BasicDisplay/`
+  e o caminho **moderno WDDM-style** (Windows 8+).
+
+  **Evidencia consolidada** (run.ps1 -Headless -TimeoutSec 14):
+  - 17 `[ok]` (era 16 — +1 da GPU)
+  - 0 `[EXCECAO]`, 0 Page Fault, 0 stub generico, 0 import nao resolvido
+  - 3x `0xCAFEBABE` (IOCTL anterior intacto)
+  - calller.sys 100% (Ps/Ob/Cm callbacks + KEVENT + ExAllocate + thread ticks + DriverUnload)
+  - 7 linhas `[bvbe]` + `[gpu]` (Bochs VBE detect/map/programa + gpu_init OK)
+  - dxdemo.exe roda DirectDrawCreate7 + Direct3DCreate7 + WM_PAINT
+  - **screendump 1024x768x32** captura pixels: janela "MeuOS GPU App"
+    com FillRect vermelho/amarelo + TextOut "GDI + DirectDraw + D3D"
+  - `Sistema no ar.` x1
+
 ## [0.5.0] - 2026-06-22
 
 Quinta versão. **Polish arquitetural** completando a reorganização v0.4.0:
@@ -1041,7 +1161,8 @@ do Windows (PE32+) com arquitetura no estilo NT.
 - `cpuid` destruía `EBX` (ponteiro do Multiboot) — `EBX` passou a ser salvo no
   primeiro instante do boot, antes de qualquer `cpuid`.
 
-[Não lançado]: https://github.com/JoaoOliveiraJ/Meu-OS/compare/v0.5.0...HEAD
+[Não lançado]: https://github.com/JoaoOliveiraJ/Meu-OS/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.6.0
 [0.5.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.5.0
 [0.4.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.4.0
 [0.3.0]: https://github.com/JoaoOliveiraJ/Meu-OS/releases/tag/v0.3.0

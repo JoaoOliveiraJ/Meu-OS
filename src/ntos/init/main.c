@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include "video/vga.h"
 #include "video/video.h"
+#include "display/BasicDisplay/gpu.h"
 #include "serial/serial.h"
 #include "input/keyboard.h"
 #include "ke/amd64/gdt.h"
@@ -650,6 +651,16 @@ void kmain(uint32_t mb_info) {
     syscall_msr_init();
     kputs("[ok] HAL: portas de I/O + MMIO + enumeracao PCI + CPU info (CPUID) + KUSER_SHARED_DATA + KPCR/GS_BASE + SYSCALL\n");
 
+    // --- FASE GPU: inicializa Bochs VBE (LFB grafico de alta resolucao) ---
+    // Tenta achar o PCI 1234:1111 (QEMU std-vga / Bochs Display Interface) e
+    // mapear o LFB via mm_map_phys_range. Sucesso = temos modo 1024x768x32
+    // disponivel via gpu_*; falha silenciosa = fb_demo continua em mode13h.
+    if (gpu_init(1024, 768)) {
+        kputs("[ok] GPU: Bochs VBE 1024x768x32 (LFB mapeado fora da identidade)\n");
+    } else {
+        kputs("[ok] GPU: hardware Bochs/QEMU std-vga nao detectado; mode13h fallback ativo\n");
+    }
+
     // --- FASE 2 (HAL disco): IDE ATA PIO + teste de leitura do MBR/NTFS ---
     // Identifica o disco (se anexado via -Disk), le o setor 0 (MBR) e o boot
     // sector da particao NTFS, confirmando a assinatura "NTFS    " (regra 4).
@@ -733,6 +744,26 @@ void kmain(uint32_t mb_info) {
         // o framebuffer COMO ESTA para o screendump mostrar o ambiente completo.
         kputs("\n--- FASE 2/6: GUI ativa; desktop/janelas permanecem no framebuffer ---\n");
         kputs("[win32k] estado final: desktop + barra de tarefas + janela(s) de cmd.\n");
+    } else if (gpu_active()) {
+        // --- FASE GPU: teste minimo no LFB Bochs VBE (32 bpp) ---
+        // Sem mexer no win32k. Pinta fundo azul, 3 retangulos coloridos, um
+        // pequeno marcador no canto, e mantem a tela parada p/ screendump.
+        kputs("\n--- FASE GPU: teste minimo no LFB (Bochs VBE 32 bpp) ---\n");
+        kputs("[gpu] gpu_clear(azul fundo)\n");
+        gpu_clear(0x00103060);
+        kputs("[gpu] gpu_fill_rect 3x cores (RGB)\n");
+        gpu_fill_rect(40,  40, 200, 120, 0x00C03030);   // vermelho
+        gpu_fill_rect(280, 40, 200, 120, 0x0030C030);   // verde
+        gpu_fill_rect(520, 40, 200, 120, 0x003030C0);   // azul claro
+        kputs("[gpu] gpu_fill_rect barra no rodape\n");
+        gpu_fill_rect(0, (int)gpu_height() - 32, (int)gpu_width(), 32, 0x00202020);
+        // Marcadores de canto para confirmar coords (1 px cada).
+        gpu_pixel(0, 0, 0x00FFFFFF);
+        gpu_pixel((int)gpu_width() - 1, 0, 0x00FFFF00);
+        gpu_pixel(0, (int)gpu_height() - 1, 0x0000FFFF);
+        gpu_pixel((int)gpu_width() - 1, (int)gpu_height() - 1, 0x00FF00FF);
+        gpu_present();
+        kputs("[gpu] frame desenhado; use screendump para confirmar pixels.\n");
     } else {
         // --- FASE 1: modo grafico (framebuffer) + GDI de baixo nivel ---
         // Demo do driver de video; loga cada operacao na serial (canal de log).

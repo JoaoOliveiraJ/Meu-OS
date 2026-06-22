@@ -105,6 +105,10 @@ uintptr_t NtGdiTextOutEx_k(void* hdc, int x, int y, const char* str, int len,
                            uint32_t fg, uint32_t bg);
 // FillRect(hdc, x, y, w, h, hbrush): preenche um retangulo na area cliente.
 uintptr_t NtGdiFillRect_k(void* hdc, int x, int y, int w, int h, void* hbrush);
+// FASE 9.2: DIB minimo. Aloca um buffer de width*height*4 bytes (XRGB888) e
+// devolve um HBITMAP (ponteiro p/ um objeto W32_DIB). Sem CreateDC/BitBlt;
+// existe p/ apps que usam DIBs como back-buffer fora da tela.
+uintptr_t NtGdiCreateDIBSection_k(int width, int height, void** ppBits);
 
 // ---- FASE 6: foco / multiplas janelas / desktop ----
 // Da o foco a uma janela (clique simulado / Alt+Tab). Recompoe (a barra de

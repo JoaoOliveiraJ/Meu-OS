@@ -59,3 +59,33 @@ void fb_draw_text(int x, int y, const char* s, uint8_t fg, uint8_t bg);
 
 // Ponteiro do framebuffer (0xA0000) — uso interno/avancado.
 volatile uint8_t* fb_ptr(void);
+
+// ============================================================================
+//  FASE 9.2 — Cores 32 bits (XRGB888) p/ o backend gpu_* (LFB 32 bpp).
+//
+//  O LFB do Bochs VBE e BGRX em little-endian: armazenar 0x00RRGGBB num
+//  uint32_t coloca B no byte 0, G no byte 1, R no byte 2 — exatamente o que a
+//  VRAM espera. Ou seja, RGB32(r,g,b) = (r<<16)|(g<<8)|b serve direto.
+//  O canal alpha do RGBA e ignorado por gpu_* (alpha = 0).
+//
+//  palette_8_to_32(idx) mapeia os 16 indices nomeados do mode 13h (FB_BLACK ..
+//  FB_WHITE) para o equivalente em XRGB888. Indices >=16 (rampa de cinza)
+//  ficam mapeados para uma rampa correspondente. Isto deixa o win32k usar UM
+//  unico caminho de cores (uint8_t/uint32_t) e escolher o backend em runtime.
+// ============================================================================
+#define RGB32(r,g,b) (((uint32_t)(r) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(b))
+#define RGB32_BLACK         0x00000000u
+#define RGB32_WHITE         0x00FFFFFFu
+#define RGB32_BLUE          0x000000FFu
+#define RGB32_GREEN         0x0000FF00u
+#define RGB32_RED           0x00FF0000u
+#define RGB32_GRAY          0x00C0C0C0u
+#define RGB32_DARK_GRAY     0x00555555u
+#define RGB32_LIGHT_GRAY    0x00AAAAAAu
+#define RGB32_DESKTOP_BLUE  0x00103060u
+#define RGB32_TITLE_BLUE    0x000A246Au
+#define RGB32_TRANSPARENT   0xFF000000u   // alpha=0xFF => "transparente" (sentinela)
+
+// Converte um indice de paleta (mode 13h) -> XRGB888 (mesmas cores nominais
+// da paleta padrao do mode13h). Indices >=16 viram rampa de cinza linear.
+uint32_t palette_8_to_32(uint8_t idx);

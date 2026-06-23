@@ -87,6 +87,14 @@ $initrd = $names -join ','
 # desktop renderizado via virtio-gpu).
 $qargs = @('-kernel', 'kernel.bin', '-m', '256', '-no-reboot', '-serial', 'stdio',
            '-cpu', 'qemu64,-hypervisor,vendor=GenuineIntel',
+           # Pilar 3 (NT foundation): roda com 2 cores para o SMP (MADT mostra
+           # 2 Local APICs e INIT-SIPI-SIPI levanta o segundo). Pilar 4 usa
+           # ambos para preempcao MP.
+           '-smp', '2',
+           # TCG multi-thread (1 host thread por vCPU). Sem isso o TCG e' single-
+           # threaded round-robin: um vCPU em loop tight faz o outro starvado.
+           # Necessario para SMP em qualquer host sem KVM (Windows headless).
+           '-accel', 'tcg,thread=multi',
            # v0.9.0+ fix: -vga none remove o std-vga (Bochs) primario para que
            # o virtio-gpu seja o UNICO display PCI — assim a janela do QEMU
            # mostra o desktop renderizado via virtio-gpu (era invisivel antes

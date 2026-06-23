@@ -231,25 +231,32 @@ void ioapic_set_irq(uint8_t gsi, uint8_t vector, uint8_t apic_id) {
 //                                          10=all, 11=all-but-self)
 //  Para INIT-SIPI-SIPI: o sequencia classica do AP startup.
 // ============================================================================
+// Espera bit 12 (Delivery Status) do ICR_LOW limpar. Bounded para nao
+// enroscar quando o TCG/hw nunca completa (caminho seguro).
 void apic_wait_ipi(void) {
     if (!s_lapic) return;
-    while (lapic_read(LAPIC_REG_ICR_LOW) & (1u << 12)) {
+    for (uint32_t i = 0; i < 100000u; i++) {
+        if (!(lapic_read(LAPIC_REG_ICR_LOW) & (1u << 12))) return;
         __asm__ volatile ("pause");
     }
+    // Timeout silencioso — caminho do Linux: confia que a entrega aconteceu
+    // mesmo se a flag nao limpou no tempo esperado (alguns chips xAPIC tem
+    // race entre write e leitura subsequente).
 }
 
 void apic_send_ipi(uint8_t dest_apic_id, apic_ipi_kind_t kind, uint8_t vector_or_page) {
     if (!s_lapic) return;
+    // SO espera ANTES do write — assim a flag de delivery do PROXIMO write
+    // espelha realmente este IPI. Linux/ReactOS fazem o mesmo.
     apic_wait_ipi();
     lapic_write(LAPIC_REG_ICR_HIGH, ((uint32_t)dest_apic_id) << 24);
 
-    // Monta o ICR_LOW:
     uint32_t cmd = (uint32_t)vector_or_page;
-    cmd |= ((uint32_t)kind & 0x7u) << 8;     // delivery mode
-    // Para INIT/SIPI level-triggered classic: level=1 (assert).
-    if (kind == APIC_IPI_INIT || kind == APIC_IPI_STARTUP) {
-        cmd |= (1u << 14);                    // level = assert
+    cmd |= ((uint32_t)kind & 0x7u) << 8;         // delivery mode bits 10..8
+    // Level: 1 (assert) so para INIT classico. STARTUP, SDM diz: tratada
+    // sempre como deassert pelo hw. Fixed/NMI: level irrelevante.
+    if (kind == APIC_IPI_INIT) {
+        cmd |= (1u << 14);
     }
     lapic_write(LAPIC_REG_ICR_LOW, cmd);
-    apic_wait_ipi();
 }

@@ -278,6 +278,135 @@ int mm_map_zero_page(uint64_t va) {
     return mm_map_phys_range(addr, frame, 0x1000ULL, PG_PRESENT | PG_RW | PG_USER);
 }
 
+// ============================================================================
+//  Pilar 1 (NT foundation) — paginacao dinamica.
+//
+//  mm_unmap_range: tira [virt, virt+size) do mapa de paginas. Caminha PML4 ->
+//  PDPT -> PD -> PT, zera os PTEs cobertos e roda INVLPG em cada VA para tirar
+//  do TLB (single-CPU; em SMP precisa de TLB shootdown via IPI, fase futura).
+//  Recusa silenciosamente entradas ja nao-presentes (NOP). Recusa hard (return
+//  0) se cair sobre huge page de 2 MiB ja mapeada — caminho NT e' o mesmo: nao
+//  fragmenta huge page implicitamente. Tabelas intermediarias NAO sao
+//  liberadas (algumas outras paginas no mesmo PT podem continuar mapeadas).
+// ============================================================================
+int mm_unmap_range(uint64_t virt, uint64_t size) {
+    if (size == 0) return 0;
+    uint64_t v0  = virt & ~0xFFFULL;
+    uint64_t end = (virt + size + 0xFFFULL) & ~0xFFFULL;
+
+    uint64_t* pml4 = (uint64_t*)(mm_get_cr3() & PT_MASK);
+
+    for (uint64_t v = v0; v < end; v += 0x1000ULL) {
+        uint64_t pml4_idx = (v >> 39) & 0x1FF;
+        uint64_t pdpt_idx = (v >> 30) & 0x1FF;
+        uint64_t pd_idx   = (v >> 21) & 0x1FF;
+        uint64_t pt_idx   = (v >> 12) & 0x1FF;
+
+        if (!(pml4[pml4_idx] & PG_PRESENT)) continue;
+        uint64_t* pdpt = pt_addr(pml4[pml4_idx]);
+        if (!(pdpt[pdpt_idx] & PG_PRESENT)) continue;
+        uint64_t* pd = pt_addr(pdpt[pdpt_idx]);
+        if (pd[pd_idx] & 0x80ULL) return 0;   // huge page: recusa
+        if (!(pd[pd_idx] & PG_PRESENT)) continue;
+        uint64_t* pt = pt_addr(pd[pd_idx]);
+
+        pt[pt_idx] = 0;
+        __asm__ volatile ("invlpg (%0)" : : "r"(v) : "memory");
+    }
+    return 1;
+}
+
+// ============================================================================
+//  MMIO arena: faixa virtual reservada no half KERNEL para mapeamentos de
+//  dispositivos cuja BAR esta acima da identidade de 1 GiB (Local APIC em
+//  0xFEE00000, IO-APIC em 0xFEC00000, BARs de PCI Express em > 4 GiB, etc.).
+//
+//  Range escolhido: [0xFFFFE10000000000, 0xFFFFE20000000000) — 1 TiB.
+//   - bit 47 = 1 (kernel half canonico)
+//   - PML4 idx = 450 (livre: nada do kernel ate aqui usa essa entrada)
+//   - NAO colide com KUSER_SHARED_DATA (PML4 482 @ 0xFFFFF78000000000)
+//
+//  Por que pre-alocar o PDPT no boot? mm_create_address_space copia o PML4
+//  POR VALOR. Se a primeira chamada a hal_map_mmio acontecer DEPOIS de um
+//  processo criar sua PML4 propria, a entrada PML4[450] que criamos no kernel
+//  CR3 nao aparecera na PML4 do processo — drivers cairam em #PF. Solucao
+//  canonical do NT (PsInitSystemPhase) e a mesma: as entradas kernel-half do
+//  PML4 sao alocadas EARLY e ficam fixas para o resto do boot — assim toda
+//  PML4 nova herda ponteiros para os mesmos PDPTs.
+// ============================================================================
+#define MMIO_ARENA_BASE  0xFFFFE10000000000ULL
+#define MMIO_ARENA_END   0xFFFFE20000000000ULL
+#define MMIO_ARENA_PML4  450u                  // (MMIO_ARENA_BASE >> 39) & 0x1FF
+
+static uint64_t s_mmio_next     = MMIO_ARENA_BASE;
+static int      s_mmio_inited   = 0;
+
+void mm_mmio_init(void) {
+    if (s_mmio_inited) return;
+    uint64_t* pml4 = (uint64_t*)(mm_get_cr3() & PT_MASK);
+
+    // Aloca PDPT do arena se ainda nao existir e fixa em PML4[450].
+    if (!(pml4[MMIO_ARENA_PML4] & PG_PRESENT)) {
+        uint64_t f = pmm_alloc_frame();
+        if (!f) { kputs("[mm] mmio_init: PMM sem frame p/ PDPT do arena\n"); return; }
+        uint64_t* pdpt = (uint64_t*)f;
+        for (int i = 0; i < 512; i++) pdpt[i] = 0;
+        // Bits do kernel: P + RW (sem U — somente ring 0 acessa MMIO).
+        pml4[MMIO_ARENA_PML4] = f | PG_PRESENT | PG_RW;
+        kputs("[mm] MMIO arena PDPT em PML4["); kput_hex(MMIO_ARENA_PML4);
+        kputs("] phys="); kput_hex(f); kputs(" (kernel-only)\n");
+    }
+    s_mmio_inited = 1;
+    kputs("[mm] MMIO arena pronto: ["); kput_hex(MMIO_ARENA_BASE);
+    kputs(", "); kput_hex(MMIO_ARENA_END); kputs(")\n");
+}
+
+uint64_t mm_mmio_reserve(uint64_t size) {
+    if (!s_mmio_inited) mm_mmio_init();
+    if (size == 0) return 0;
+    uint64_t bytes = (size + 0xFFFULL) & ~0xFFFULL;
+    if (s_mmio_next + bytes > MMIO_ARENA_END) {
+        kputs("[mm] MMIO arena cheio\n");
+        return 0;
+    }
+    uint64_t va = s_mmio_next;
+    s_mmio_next += bytes;
+    return va;
+}
+
+// ============================================================================
+//  PF probe (prova): captura #PF esperado no handler em isr.c.
+//
+//  Antes do load: setamos g_mm_pf_resume_rip pro label apos a instrucao, depois
+//  ligamos g_mm_pf_expect=1, depois executamos a instrucao alvo. Se a CPU
+//  faltar #PF, isr_handler le g_mm_pf_expect, marca g_mm_pf_caught=1, sobrescreve
+//  r->rip com g_mm_pf_resume_rip e retorna. IRETQ leva a CPU para o label.
+//  Se nao houver fault, caimos no proprio label, escrevemos g_mm_pf_expect=0
+//  e seguimos. Idiomatico ao __ex_table do Linux / fixup-em-load do BSD.
+// ============================================================================
+volatile int      g_mm_pf_expect    = 0;
+volatile int      g_mm_pf_caught    = 0;
+volatile uint64_t g_mm_pf_resume_rip = 0;
+
+int mm_probe_read_u32(volatile uint32_t* va, uint32_t* out_value) {
+    g_mm_pf_caught = 0;
+    uint32_t v = 0;
+    // Sequencia em asm: instala resume rip, liga expect, executa load, label.
+    // "=&r"(v) com early-clobber para nao colidir com o ponteiro de entrada.
+    __asm__ volatile (
+        "leaq 1f(%%rip), %%rax\n"
+        "movq %%rax, %1\n"
+        "movl $1, %2\n"
+        "movl (%3), %0\n"
+        "1:\n"
+        "movl $0, %2\n"
+        : "=&r"(v), "+m"(g_mm_pf_resume_rip), "+m"(g_mm_pf_expect)
+        : "r"(va)
+        : "rax", "memory");
+    if (out_value) *out_value = v;
+    return !g_mm_pf_caught;
+}
+
 // Atualiza campos voláteis (TickCount, SystemTime, InterruptTime). Chamado
 // periodicamente — pode ser do handler do PIT (IRQ0). Sem isso o tick fica fixo.
 void mm_kuser_tick(void) {

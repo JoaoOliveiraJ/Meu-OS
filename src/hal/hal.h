@@ -35,12 +35,24 @@ MS_ABI void     HalWritePortUshort(uint16_t port, uint16_t value);
 MS_ABI void     HalWritePortUlong(uint16_t port, uint32_t value);
 
 // ---------------------------------------------------------------------------
-//  Acesso MMIO. A identidade de 1 GiB ja cobre [0, 0x40000000); para faixas
-//  fisicas dentro dela, hal_map_mmio devolve o proprio ponteiro identidade
-//  (acesso direto). Para faixas acima de 1 GiB nao mapeadas, devolve 0 (o
-//  chamador deve tratar — nao mexemos nas page tables aqui, caminho seguro).
+//  Acesso MMIO (Pilar 1: paginacao dinamica).
+//
+//  Identidade de 1 GiB cobre [0, 0x40000000): para faixas fisicas DENTRO dela
+//  hal_map_mmio devolve o proprio ponteiro identidade (acesso direto, zero
+//  custo, sem PTE novo).
+//
+//  Para faixas ACIMA de 1 GiB (Local APIC 0xFEE00000, IO-APIC 0xFEC00000,
+//  BARs altas de PCIe), reserva VA no arena MMIO do kernel (PML4[450]) via
+//  mm_mmio_reserve e chama mm_map_phys_range com flags MMIO (PCD/PWT — cache
+//  write-through DESLIGADO; ordem das escritas/leituras preservada como em
+//  qualquer NT-side MmMapIoSpace(MmNonCached)). Devolve o VA + offset da
+//  pagina.  Retorna 0 em falha (arena cheio, sem RAM p/ as tabelas).
+//
+//  hal_unmap_mmio: tira as paginas mapeadas; nao reaproveita VA (NT tambem
+//  faz isso para MmMapIoSpace simples). Identity range e' NOP.
 // ---------------------------------------------------------------------------
 volatile void* hal_map_mmio(uint64_t phys, uint64_t size);
+void           hal_unmap_mmio(volatile void* va, uint64_t size);
 
 MS_ABI uint8_t  HalReadMmioUchar(volatile void* addr);
 MS_ABI uint16_t HalReadMmioUshort(volatile void* addr);

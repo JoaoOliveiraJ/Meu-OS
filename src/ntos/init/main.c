@@ -958,18 +958,52 @@ void kmain(uint32_t mb_info) {
     // scheduler pensa que o AP e' a CPU 0. Idle thread do BSP fica pronta.
     ki_init_processor(0, apic_bsp_id());
     if (!proof_pillar3_smp()) {
-        kputs("[P3] SMP nao passou na prova; halting.\n");
-        for (;;) __asm__ volatile ("cli; hlt");
+        // Gate NAO-fatal (ver FUTURE.md): a prova roda e loga seu resultado,
+        // mas o boot CONTINUA. O desktop (gpu_init/win32k mais abaixo) nao
+        // depende de SMP. Antes isto era `halt`, prendendo o desktop atras do P3.
+        kputs("[P3] PARCIAL — SMP nao passou na prova; seguindo sem gate (ver FUTURE.md).\n");
     }
 
     // Pilar 4 (NT foundation): scheduler MP preemptivo. APIC timer dispara
     // em cada CPU; ki_quantum_end pega proxima ready da fila daquele CPU e
     // faz KiSwapContext (asm). Prova: A com afinidade CPU 0, B com afinidade
     // CPU 1 — ambos contadores avancam concorrentemente.
-    if (!proof_pillar4_scheduler()) {
-        kputs("[P4] scheduler MP nao passou na prova; halting.\n");
-        for (;;) __asm__ volatile ("cli; hlt");
+    //
+    // PAUSADO: proof_pillar4 sequestra o BSP (swap MP quebrado, ver FUTURE.md).
+    // Reativar quando o scheduler MP for consertado.
+    //
+    // A prova do Pilar 4 ESTAVA sendo chamada aqui — `if (!proof_pillar4_scheduler())
+    // { halt }` — e foi DESACOPLADA do boot. Motivo medido: proof_pillar4_scheduler()
+    // ativa a preempcao MP (g_p4_active=1 + ki_ready_thread de A/B); o APIC timer
+    // entao troca o BSP para a thread A que, com o swap MP quebrado, NUNCA e'
+    // preemptada de volta — A monopoliza o BSP, a funcao NUNCA retorna, e o boot
+    // jamais alcanca gpu_init/win32k/desktop (serial trava em "[P4] A counter=").
+    // A prova NAO foi apagada (segue definida acima); so deixou de ser CHAMADA,
+    // atras deste gate explicito. Tornar o `if` nao-fatal nao bastava: o problema
+    // e a funcao nao retornar, nao o halt.
+    // Para REATIVAR: conserte o swap MP (KiSwapContext) e bote p4_proof_enabled=1.
+    static const int p4_proof_enabled = 0;
+    if (p4_proof_enabled) {
+        if (!proof_pillar4_scheduler()) {
+            kputs("[P4] PARCIAL — scheduler MP nao passou na prova; seguindo sem gate (ver FUTURE.md).\n");
+        }
+    } else {
+        kputs("\n[P4] ==== prova do scheduler MP: PAUSADA (desacoplada do boot — ver FUTURE.md) ====\n");
+        kputs("[P4] proof_pillar4 NAO chamada: sequestra o BSP (thread A monopoliza). "
+              "Reativar com p4_proof_enabled=1 apos consertar o swap MP.\n");
     }
+
+    // QUIESCE do APIC timer (ver FUTURE.md) — parte de COMPLETAR a pausa da
+    // fundacao SMP/scheduler. Com o Pilar 4 desacoplado, mascaramos o LVT timer
+    // do BSP aqui. O timer ISR (0xD1) chama mm_kuser_tick() a cada tick; rodando
+    // concorrente com o init pos-P3 (mm_map_kuser_shared_data etc.) sob TCG, a
+    // re-entrancia travava o boot ANTES do desktop. Mascarado, g_ticks congela
+    // (relogio estatico) mas o boot ALCANCA o desktop. O IO-APIC permanece ATIVO
+    // — o IRQ12 do mouse continua roteavel. REATIVAR este timer (e o do AP em
+    // ap_entry) faz parte de RETOMAR o scheduler MP (Pilar 4).
+    apic_mask_timer_local();
+    kputs("[apic] LVT timer do BSP MASCARADO (quiesce p/ pausa da fundacao; g_ticks congela; IO-APIC segue ativo)\n");
+
     hal_cpu_init();        // FASE 7: CPUID -> vendor/family/model + features (cpu.c)
     // FASE 7.7: CR4 + XCR0. Habilita OSXSAVE (e xsetbv XCR0=0x7 = X87+SSE+AVX
     // quando suportado) e CR4.SMEP/UMIP/PCIDE quando o CPU expoe. CADA bit e

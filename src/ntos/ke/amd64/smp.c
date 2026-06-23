@@ -158,7 +158,13 @@ void ap_entry(void) {
     idt_load();
     apic_enable_local();
     ki_init_processor(my_id, my_id);
-    apic_unmask_timer_local();
+    // QUIESCE (ver FUTURE.md): NAO desmascarar o LVT timer do AP. Com o Pilar 4
+    // (scheduler MP) PAUSADO/desacoplado, o AP nao recebe threads (g_p4_active=0)
+    // e nao precisa de tick. Deixar o timer do AP MASCARADO (como apic_enable_local
+    // ja o deixou) mantem o AP DORMENTE em hlt — sem timer ISR no AP e sem a
+    // contencao de LAPIC timers concorrentes do TCG. Reativar (apic_unmask_timer_
+    // local) faz parte de RETOMAR o Pilar 4.
+    // apic_unmask_timer_local();
     __asm__ volatile ("sti");
     ki_idle_loop();
 }

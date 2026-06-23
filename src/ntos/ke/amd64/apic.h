@@ -95,3 +95,10 @@ void apic_enable_local(void);
 // AP no FINAL do ap_entry, com o KPRCB ja completo. A partir daqui o AP
 // recebe vetor 0xD1 a 100 Hz.
 void apic_unmask_timer_local(void);
+
+// QUIESCE: mascara o LVT Timer da CPU corrente (bit 16). Usado para PAUSAR o
+// APIC timer do BSP apos as provas P1-P3 enquanto o scheduler MP (Pilar 4)
+// esta pausado — o timer ISR (0xD1 -> mm_kuser_tick) re-entra no init pos-P3
+// e trava o boot antes do desktop sob TCG (ver FUTURE.md). Reativar faz parte
+// de retomar o Pilar 4.
+void apic_mask_timer_local(void);

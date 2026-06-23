@@ -248,6 +248,8 @@ static int parse_madt(uint64_t rsdt_phys) {
             default:
                 // 2 = ISO (Interrupt Source Override), 4 = NMI Source, 5 = LAPIC
                 // Address Override, 9 = LAPIC x2 etc. Ignoramos por enquanto.
+                // (Confirmado nesta rodada: QEMU nao tem ISO p/ IRQ12 — GSI 12
+                // direto, edge/active-high. So IRQ0->GSI2 e os PCI 5/9/10/11.)
                 break;
         }
         p += len;

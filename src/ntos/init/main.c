@@ -1262,5 +1262,10 @@ void kmain(uint32_t mb_info) {
     vga_set_color(0x0F, 0x00);
     kputs("> ");
 
-    for (;;) __asm__ volatile ("hlt");   // ocioso: tudo acontece via interrupcoes
+    // Idle loop: STI antes do HLT. As IRQs do mouse (IRQ12) e do teclado (IRQ1)
+    // chegam pelo IO-APIC e so sao servidas com IF=1. Medimos que o boot chegava
+    // aqui com IF=0 — por isso o `hlt` puro CONGELAVA tudo (mouse/teclado mortos
+    // apesar do desktop ja composto na tela). `sti; hlt` garante IF=1 e acorda a
+    // CPU a cada IRQ pra servir o handler. (Padrao canonico de idle loop NT/x86.)
+    for (;;) __asm__ volatile ("sti; hlt");   // ocioso: tudo acontece via interrupcoes
 }

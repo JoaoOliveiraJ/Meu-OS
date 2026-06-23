@@ -500,6 +500,19 @@ if ((Test-Path $win10ui) -and (Test-Path (Join-Path $out 'libdsound.a')) -and `
     if ($LASTEXITCODE) { throw "Compilacao do win10ui.c falhou." }
 }
 
+# explorer.exe — SHELL ring-3 PERSISTENTE (1o incremento do explorer.exe real:
+# janela viva que nao e' reaped). ImageBase 0x5400000. Importa user32+gdi32.
+$explorer = Join-Path $ex 'explorer\explorer.c'
+if ((Test-Path $explorer) -and (Test-Path (Join-Path $out 'libuser32.a'))) {
+    Write-Host "[exemplo] apps\explorer\explorer.c -> build\explorer.exe (shell ring-3)"
+    & $zig cc -target x86_64-windows-gnu -nostdlib -e _start `
+        '-Wl,--image-base=0x5400000' '-Wl,--dynamicbase' '-Wl,--subsystem,console' "-I$sdk", "-I$ddk" `
+        -o (Join-Path $out 'explorer.exe') $explorer `
+        (Join-Path $out 'libkernel32.a') (Join-Path $out 'libuser32.a') `
+        (Join-Path $out 'libgdi32.a')    (Join-Path $out 'libntdll.a')
+    if ($LASTEXITCODE) { throw "Compilacao do explorer.c falhou." }
+}
+
 # 1) Assembly do kernel (NASM -> elf64)
 foreach ($a in Get-ChildItem -Path $src -Recurse -Filter *.asm) {
     $o = Get-ObjName $a

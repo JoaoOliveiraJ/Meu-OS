@@ -57,7 +57,9 @@ if (-not $Modules -or $Modules.Count -eq 0) {
                     'conhello.exe', 'test32.exe', 'sysinfo.exe', 'pipeserver.exe', 'pipeclient.exe',
                     'cmd.exe', 'guiapp.exe', 'dxdemo.exe', 'd3d11demo.exe',
                     'csrss.exe', 'winlogon.exe', 'win10ui.exe',
-                    'desktop.exe') {
+                    'desktop.exe',
+                    'explorer.exe') {   # POR ULTIMO: shell ring-3 persistente
+                                        # (nao sai; segura o boot no seu loop)
         $p = Join-Path $build $d
         if (Test-Path $p) { $Modules += $p }
     }

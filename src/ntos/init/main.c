@@ -13,6 +13,7 @@
 #include "ke/amd64/pit.h"
 #include "ke/amd64/isr.h"
 #include "ke/amd64/apic.h"   // Pilar 2 (NT foundation): Local APIC + IO-APIC
+#include "ke/amd64/smp.h"    // Pilar 3 (NT foundation): MADT + INIT-SIPI-SIPI
 #include "io.h"               // inb/outb para leitura direta de portas (proof P2)
 #include "mm/pmm.h"
 #include "mm/heap.h"
@@ -703,6 +704,57 @@ static int proof_pillar2_apic(void) {
     return ok;
 }
 
+// ============================================================================
+//  Pilar 3 (NT foundation) — PROVA de SMP.
+//
+//  Sequencia:
+//   (a) acpi_init() — varre BIOS area, acha RSDP, le RSDT phys.
+//   (b) smp_init() — parseia MADT, monta tabela de APIC IDs, lanca cada AP
+//       via trampoline em phys 0x8000 + INIT-SIPI-SIPI.
+//   (c) Espera AP sinalizar alive (atomic increment de s_ap_alive_count e
+//       marcacao por APIC ID). BSP polls com timeout.
+//   (d) A prova passa se: MADT achou >= 2 CPUs, lancamos >= 1 AP, e ao menos
+//       1 AP sinalizou alive com o APIC ID esperado.
+// ============================================================================
+static int proof_pillar3_smp(void) {
+    kputs("\n[P3] ==== prova de SMP (Pilar 3) ====\n");
+
+    // (a) ACPI: idempotente — pode ja ter rodado, mas garantimos AGORA.
+    extern int acpi_init(void);
+    extern uint64_t acpi_rsdt_phys(void);
+    acpi_init();
+    uint64_t rsdt = acpi_rsdt_phys();
+    kputs("[P3] RSDT phys="); kput_hex(rsdt); kputc('\n');
+
+    // (b) SMP init: parseia MADT, lanca APs.
+    smp_init();
+
+    // (c) Resultados.
+    int cpus = smp_cpu_count();
+    uint32_t alive = smp_ap_alive_count();
+    kputs("[P3] CPUs MADT="); kput_dec((uint64_t)cpus);
+    kputs("  APs_alive="); kput_dec((uint64_t)alive); kputc('\n');
+
+    int ok = 1;
+    if (cpus < 2) {
+        kputs("[P3] FAIL: MADT relatou < 2 CPUs (esperava >= 2 com -smp 2)\n");
+        ok = 0;
+    }
+    if (alive < 1) {
+        kputs("[P3] FAIL: nenhum AP sinalizou alive\n");
+        ok = 0;
+    }
+    // Confirma que o AP com APIC ID 1 esta vivo (BSP=0 no QEMU).
+    if (cpus >= 2 && !smp_ap_seen(1)) {
+        kputs("[P3] FAIL: AP com APIC_ID=1 nao sinalizou\n");
+        ok = 0;
+    }
+
+    if (ok) kputs("[P3] ==== PROVA PASSOU ====\n\n");
+    else    kputs("[P3] ==== PROVA FALHOU ====\n\n");
+    return ok;
+}
+
 void kmain(uint32_t mb_info) {
     vga_init();
     serial_init();
@@ -789,6 +841,15 @@ void kmain(uint32_t mb_info) {
     // continua avancando — via APIC timer, nao mais PIT.
     if (!proof_pillar2_apic()) {
         kputs("[P2] APIC nao passou na prova; halting.\n");
+        for (;;) __asm__ volatile ("cli; hlt");
+    }
+
+    // Pilar 3 (NT foundation): SMP. Parseia MADT (RSDT -> "APIC"), lanca AP
+    // via INIT-SIPI-SIPI usando trampoline em phys 0x8000. AP corre ap_entry
+    // em C, le seu APIC ID e sinaliza. Prova: o segundo core executou codigo
+    // no nosso KPCR/GS_BASE e o BSP confirmou.
+    if (!proof_pillar3_smp()) {
+        kputs("[P3] SMP nao passou na prova; halting.\n");
         for (;;) __asm__ volatile ("cli; hlt");
     }
     hal_cpu_init();        // FASE 7: CPUID -> vendor/family/model + features (cpu.c)

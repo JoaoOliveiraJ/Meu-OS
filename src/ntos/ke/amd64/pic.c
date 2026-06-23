@@ -26,3 +26,12 @@ void pic_eoi(int irq) {
     if (irq >= 8) outb(PIC2_CMD, 0x20);
     outb(PIC1_CMD, 0x20);
 }
+
+// Pilar 2 (APIC): desliga o 8259 mascarando 100% dos pinos no master+slave.
+// Os vetores REMAPEADOS (0x20..0x2F) permanecem na IDT, mas como nenhum pino
+// esta habilitado, nenhuma IRQ pode subir pelo 8259. A partir daqui SOMENTE o
+// IO-APIC dispara IRQs (e o LAPIC timer / IPI). Idempotente.
+void pic_disable(void) {
+    outb(PIC1_DATA, 0xFF);
+    outb(PIC2_DATA, 0xFF);
+}

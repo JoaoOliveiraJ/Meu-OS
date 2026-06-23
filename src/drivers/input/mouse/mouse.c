@@ -33,6 +33,7 @@
 #include "mouse.h"
 #include "io.h"
 #include "ke/amd64/pic.h"
+#include "ke/amd64/apic.h"
 #include "win32/win32k.h"
 
 extern void kputs(const char* s);
@@ -121,11 +122,24 @@ static uint8_t mouse_send(uint8_t cmd) {
 }
 
 // ============================================================================
-//  PIC: desmascarar IRQ12 (slave PIC) + IRQ2 (cascade no master).
-//  IRQ12 esta no slave (bit 4 de 0xA1 = IRQ12). Para o slave funcionar, o
-//  master precisa ter IRQ2 desmascarada (bit 2 de 0x21).
+//  Desmascarar o IRQ12 — REGIME-AWARE (APIC vs PIC legado).
+//
+//  Regime APIC (o nosso, apos apic_init): o 8259 esta DESLIGADO (pic_disable
+//  escreveu 0xFF/0xFF). Cutucar 0x21/0xA1 seria no vazio — era O BUG: o IRQ12
+//  nunca chegava a CPU. No IO-APIC, o "unmask" e o mask bit (bit 16) da
+//  redirection entry do IRQ12 — e essa entry JA foi programada UNMASKED por
+//  apic_init (ioapic_set_irq(12, APIC_VECTOR_MOUSE, ...)). Logo, no regime APIC
+//  nao ha nada a desmascarar aqui: o roteamento+unmask sao donos do HAL/apic_init
+//  (modelo NT: o driver "conecta" a IRQ; o HAL programa o IO-APIC).
+//
+//  Regime PIC (legado, sem APIC ativo): mantem o caminho antigo — desmascara
+//  IRQ12 no slave (bit 4 de 0xA1) + IRQ2 cascade no master (bit 2 de 0x21).
 // ============================================================================
 static void unmask_irq12(void) {
+    if (apic_active()) {
+        // IO-APIC ja roteia+desmascara o IRQ12 (apic_init). 8259 morto: nada a fazer.
+        return;
+    }
     // Master (0x21): mantem o que estava e LIMPA bit 2 (IRQ2 = cascade slave).
     uint8_t m = inb(0x21);
     m &= ~(uint8_t)(1 << 2);   // habilita IRQ2 (cascade)

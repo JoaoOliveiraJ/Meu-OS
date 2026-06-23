@@ -36,6 +36,13 @@ uint32_t kbd_stdin_read(char* dst, uint32_t max) {
 }
 
 void keyboard_irq(void) {
+    // i8042 compartilha o data port 0x60 entre teclado (IRQ1) e mouse (IRQ12).
+    // O bit 5 (AUX) do status 0x64 diz de quem e o byte em 0x60. Se for do mouse,
+    // NAO consumimos aqui — deixamos o mouse_irq (IRQ12) ler. Sem este check, com
+    // a IRQ12 ligada, o handler do teclado comeria bytes do mouse (cursor travado/
+    // erratico + scancodes-fantasma). Espelha o mouse_irq, que ja checa o AUX no
+    // sentido oposto (so consome se AUX=1). i8042 real distingue os dois assim.
+    if (inb(0x64) & 0x20) return;    // bit5 AUX=1 -> byte e do mouse; cede p/ IRQ12
     uint8_t sc = inb(0x60);          // le o scancode
     if (sc & 0x80) return;           // ignora "key release"
     char c = (sc < 128) ? map[sc] : 0;

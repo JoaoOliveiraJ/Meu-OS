@@ -24,6 +24,7 @@
 #define APIC_VECTOR_IPI       0xE1u   // NT IPI vector
 #define APIC_VECTOR_SPURIOUS  0xFFu   // NT/Intel: low 4 bits = 1111b
 #define APIC_VECTOR_KBD       0x21u   // mantem compatibilidade com keyboard_irq
+#define APIC_VECTOR_MOUSE     0x2Cu   // IRQ12 (mouse PS/2) = vetor 0x20+12; isr.c despacha irq==12 -> mouse_irq
 
 // Inicializa o subsistema APIC:
 //  1) Mapeia Local APIC (0xFEE00000) e IO-APIC (0xFEC00000) via hal_map_mmio

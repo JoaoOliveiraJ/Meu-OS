@@ -174,6 +174,14 @@ void apic_init(void) {
     // 7) IO-APIC: redireciona IRQ1 (teclado) -> vetor 0x21, destino BSP fisico.
     ioapic_set_irq(1, APIC_VECTOR_KBD, (uint8_t)s_bsp_id);
 
+    // 7b) IO-APIC: redireciona IRQ12 (mouse PS/2) -> vetor 0x2C, destino BSP.
+    //     ISA IRQ => active-high + edge (defaults de ioapic_set_irq, corretos p/
+    //     o IRQ12 ISA). Mesmo padrao do teclado. A entry nasce UNMASKED; o mouse
+    //     so dispara IRQ depois que mouse_init habilitar o stream (aux+cfg+0xF4),
+    //     entao nao ha IRQ12 espuria entre aqui e o init do driver. Sem este
+    //     redirect, o IRQ12 nunca chega a CPU no regime APIC (o 8259 esta morto).
+    ioapic_set_irq(12, APIC_VECTOR_MOUSE, (uint8_t)s_bsp_id);
+
     // 8) Agora SIM mascara LINT0/LINT1/Error: o PIT nao precisa mais entregar
     //    via LINT0 (APIC timer ja esta rodando), e o PIC esta prestes a sair.
     lapic_write(LAPIC_REG_LVT_LINT0, 0x00010000u);
@@ -186,7 +194,7 @@ void apic_init(void) {
     pic_disable();
 
     s_apic_active = 1;
-    kputs("[apic] PIC 8259 desligado; APIC ativo (timer 0xD1, kbd via IO-APIC 0x21)\n");
+    kputs("[apic] PIC 8259 desligado; APIC ativo (timer 0xD1, kbd IO-APIC 0x21, mouse IRQ12 IO-APIC 0x2C)\n");
 }
 
 void ioapic_set_irq(uint8_t gsi, uint8_t vector, uint8_t apic_id) {

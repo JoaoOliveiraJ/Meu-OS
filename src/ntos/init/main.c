@@ -774,20 +774,30 @@ static int proof_pillar3_smp(void) {
 static volatile uint64_t g_counter_a = 0;
 static volatile uint64_t g_counter_b = 0;
 static volatile int      g_threads_stop = 0;
-int g_p4_active = 0;   // ligado dentro de proof_pillar4 — gate do scheduler no timer
+volatile int g_p4_active = 0;   // ligado dentro de proof_pillar4 — gate do scheduler no timer
 
+// As threads imprimem o contador a cada N iteracoes para que o BSP possa
+// OBSERVAR o progresso sem precisar de idle time — caso contrario a thread
+// rodando no BSP monopoliza a CPU e o spin loop do BSP nunca progride.
 static void p4_thread_a(void* arg) {
     (void)arg;
+    kputs("[P4] thread A: vivo no seu core\n");
     while (!g_threads_stop) {
         g_counter_a++;
-        // Memoria barrier para forcar visibilidade do contador em outro CPU.
+        if ((g_counter_a & 0xFFFFF) == 0) {     // ~1M iter
+            kputs("[P4] A counter="); kput_dec(g_counter_a); kputc('\n');
+        }
         __asm__ volatile ("" ::: "memory");
     }
 }
 static void p4_thread_b(void* arg) {
     (void)arg;
+    kputs("[P4] thread B: vivo no seu core\n");
     while (!g_threads_stop) {
         g_counter_b++;
+        if ((g_counter_b & 0xFFFFF) == 0) {
+            kputs("[P4] B counter="); kput_dec(g_counter_b); kputc('\n');
+        }
         __asm__ volatile ("" ::: "memory");
     }
 }
@@ -805,15 +815,14 @@ static int proof_pillar4_scheduler(void) {
         return 0;
     }
 
-    // Cria threads: afinidade fixa a cada CPU para garantir paralelismo.
+    // Cria threads NT-style: A afinidade CPU 0 (BSP), B afinidade CPU 1 (AP).
     ki_thread_t* ta = ki_create_thread(p4_thread_a, 0, /*prio*/ 8, /*affinity*/ 0);
     ki_thread_t* tb = ki_create_thread(p4_thread_b, 0, /*prio*/ 8, /*affinity*/ 1);
     if (!ta || !tb) { kputs("[P4] FAIL: create_thread\n"); return 0; }
     kputs("[P4] threads criadas: A tid="); kput_dec(ta->tid);
     kputs(" (CPU 0)  B tid="); kput_dec(tb->tid); kputs(" (CPU 1)\n");
 
-    // Enfilera. B em outra CPU -> ki_ready_thread envia IPI reschedule (0xE1).
-    g_p4_active = 1;   // a partir daqui, APIC timer chama ki_quantum_end
+    g_p4_active = 1;
     ki_ready_thread(ta);
     ki_ready_thread(tb);
 
@@ -953,16 +962,14 @@ void kmain(uint32_t mb_info) {
         for (;;) __asm__ volatile ("cli; hlt");
     }
 
-    // Pilar 4 (NT foundation, PARCIAL): scheduler MP preemptivo construido
-    // mas a prova de execucao concorrente em 2 cores nao roda nesta sessao —
-    // hang do BSP quando AP roda ki_init_processor (causa sob investigacao,
-    // ver relatorio). Sched.c + sched_asm.asm + apic_enable_local + idt_load
-    // ja existem; falta apenas o AP entrar no scheduler sem destabilizar BSP.
-    kputs("\n[P4] ==== PARCIAL — ver relatorio ====\n");
-    kputs("[P4] sched.c/sched_asm.asm/apic_enable_local/idt_load implementados\n");
-    kputs("[P4] BSP scheduler registrado: g_ki_cpu_count="); kput_dec((uint64_t)g_ki_cpu_count); kputs("\n");
-    kputs("[P4] PROVA NAO RODADA (proof_pillar4 desativado para boot estabilizar)\n\n");
-    (void)proof_pillar4_scheduler;   // mantem o link, evita warning
+    // Pilar 4 (NT foundation): scheduler MP preemptivo. APIC timer dispara
+    // em cada CPU; ki_quantum_end pega proxima ready da fila daquele CPU e
+    // faz KiSwapContext (asm). Prova: A com afinidade CPU 0, B com afinidade
+    // CPU 1 — ambos contadores avancam concorrentemente.
+    if (!proof_pillar4_scheduler()) {
+        kputs("[P4] scheduler MP nao passou na prova; halting.\n");
+        for (;;) __asm__ volatile ("cli; hlt");
+    }
     hal_cpu_init();        // FASE 7: CPUID -> vendor/family/model + features (cpu.c)
     // FASE 7.7: CR4 + XCR0. Habilita OSXSAVE (e xsetbv XCR0=0x7 = X87+SSE+AVX
     // quando suportado) e CR4.SMEP/UMIP/PCIDE quando o CPU expoe. CADA bit e

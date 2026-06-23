@@ -293,7 +293,7 @@ void isr_handler(struct regs* r) {
     // e KUSER_SHARED_DATA. APs apenas EOI e chamam ki_quantum_end (sob gate
     // g_p4_active).
     if (r->int_no == APIC_VECTOR_TIMER) {
-        extern int g_p4_active;
+        extern volatile int g_p4_active;
         if (ki_current_cpu_index() == 0) {
             g_ticks++;
             mm_kuser_tick();

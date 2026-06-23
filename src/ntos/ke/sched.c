@@ -258,11 +258,10 @@ void ki_ready_thread(ki_thread_t* t) {
     list_insert_tail(&g_ki_prcb[target_cpu].ready_head, &t->ready_link);
     disp_unlock();
 
-    // Se o CPU alvo nao e' o atual, manda IPI reschedule (vetor 0xE1).
-    if ((uint32_t)target_cpu != ki_current_cpu_index()) {
-        apic_send_ipi((uint8_t)g_ki_prcb[target_cpu].apic_id,
-                      APIC_IPI_FIXED, APIC_VECTOR_IPI);
-    }
+    // IPI cross-CPU 0xE1 cria hang determinístico sob TCG (apic_send_ipi
+    // de BSP para AP durante a fase de criacao das threads). Desligado por
+    // enquanto — o AP pega B no proximo tick do seu LAPIC local.
+    (void)target_cpu;
 }
 
 // --- ki_pick_next_locked: dispatcher lock must be held -----------------
@@ -278,6 +277,7 @@ void ki_quantum_end(void) {
     uint32_t cpu = ki_current_cpu_index();
     ki_prcb_t* p = &g_ki_prcb[cpu];
     if (!p->online) return;
+
 
     ki_thread_t* cur = p->current_thread;
     if (!cur) cur = p->idle_thread;
@@ -334,8 +334,12 @@ void ki_yield_processor(void) {
 }
 
 void ki_idle_loop(void) {
+    // Loop ATIVO sti+pause em vez de sti+hlt. Sob QEMU TCG, vCPU em HLT
+    // pode nao receber interrupts pendentes em tempo razoavel quando o outro
+    // vCPU esta ocupado (BSP corre A 100%). Pause mantem o vCPU "rodando"
+    // do ponto de vista do TCG. Em hw real / KVM, voltariamos a hlt.
     for (;;) {
-        __asm__ volatile ("sti; hlt");
+        __asm__ volatile ("sti; pause");
     }
 }
 

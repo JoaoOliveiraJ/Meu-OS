@@ -87,6 +87,13 @@ $initrd = $names -join ','
 # desktop renderizado via virtio-gpu).
 $qargs = @('-kernel', 'kernel.bin', '-m', '256', '-no-reboot', '-serial', 'stdio',
            '-cpu', 'qemu64,-hypervisor,vendor=GenuineIntel',
+           # v0.9.0+ fix: -vga none remove o std-vga (Bochs) primario para que
+           # o virtio-gpu seja o UNICO display PCI — assim a janela do QEMU
+           # mostra o desktop renderizado via virtio-gpu (era invisivel antes
+           # porque QEMU mostrava o std-vga primario que ficou em modo texto).
+           # Bochs VBE permanece disponivel como classe (em hardware real); aqui
+           # so removemos a instancia QEMU duplicada.
+           '-vga', 'none',
            '-device', 'virtio-gpu-pci,id=vgpu0',
            # FASE 11 (audio stack): expoe um controlador HD Audio Intel ICH9
            # no PCI. O driver hda_init() detecta vendor=0x8086 class=0x04

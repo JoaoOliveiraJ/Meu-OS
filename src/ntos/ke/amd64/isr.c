@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "ke/amd64/isr.h"
 #include "ke/amd64/pic.h"
+#include "ke/amd64/apic.h"        // Pilar 2: dispatch de vetores APIC + EOI
 #include "input/keyboard.h"
 #include "input/mouse/mouse.h"     // FASE 11: IRQ12 (mouse PS/2)
 #include "ke/amd64/syscall.h"
@@ -270,14 +271,37 @@ void isr_handler(struct regs* r) {
         for (;;) __asm__ volatile ("cli; hlt");
     }
 
-    // IRQs (vetores 32..47)
+    // ====================================================================
+    //  Vetores APIC (Pilar 2): rota propria, EOI ao Local APIC.
+    // ====================================================================
+    // Spurious: SDM Vol 3 11.9 — NAO emitir EOI. So retorna.
+    if (r->int_no == APIC_VECTOR_SPURIOUS) {
+        return;
+    }
+    // APIC timer (NT CLOCK_VECTOR = 0xD1): tick periodico do kernel.
+    if (r->int_no == APIC_VECTOR_TIMER) {
+        g_ticks++;
+        mm_kuser_tick();
+        apic_eoi();
+        return;
+    }
+    // IPI (Pilar 3/4 vai usar): log low ruido. Adiciona handler real depois.
+    if (r->int_no == APIC_VECTOR_IPI) {
+        apic_eoi();
+        return;
+    }
+
+    // IRQs PIC ou IO-APIC redirects (vetores 0x20..0x2F).
     uint64_t irq = r->int_no - 32;
     if (irq == 0) {
-        g_ticks++;               // timer (IRQ0)
+        g_ticks++;               // timer (IRQ0 do PIT, antes do APIC)
     } else if (irq == 1) {
-        keyboard_irq();          // teclado (IRQ1)
+        keyboard_irq();          // teclado (IRQ1 — PIC ou IO-APIC redirect)
     } else if (irq == 12) {
         mouse_irq();             // FASE 11: mouse PS/2 (IRQ12)
     }
-    pic_eoi((int)irq);           // avisa o PIC que tratamos a interrupcao
+    // Pilar 2: se APIC estiver ativo, EOI vai pelo Local APIC (registro 0xB0).
+    // Sob PIC, vai pelos OCWs do 8259. Roteamento decidido em runtime.
+    if (apic_active()) apic_eoi();
+    else               pic_eoi((int)irq);
 }

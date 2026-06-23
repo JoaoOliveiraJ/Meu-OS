@@ -12,6 +12,8 @@
 #include "ke/amd64/pic.h"
 #include "ke/amd64/pit.h"
 #include "ke/amd64/isr.h"
+#include "ke/amd64/apic.h"   // Pilar 2 (NT foundation): Local APIC + IO-APIC
+#include "io.h"               // inb/outb para leitura direta de portas (proof P2)
 #include "mm/pmm.h"
 #include "mm/heap.h"
 #include "mm/paging.h"   // Pilar 1 (NT foundation): mmio arena + probe
@@ -651,6 +653,56 @@ static int proof_pillar1_paging(void) {
     return ok;
 }
 
+// ============================================================================
+//  Pilar 2 (NT foundation) — PROVA de APIC (Local APIC timer + IO-APIC).
+//
+//  Sequencia:
+//   (a) Antes do APIC: confere que g_ticks avanca pelo PIT (linha de base).
+//   (b) Roda apic_init() — mapeia LAPIC + IO-APIC, calibra timer contra PIT,
+//       programa LVT Timer periodico em 0xD1, redireciona IRQ1 do IO-APIC
+//       para 0x21, MASCARA o PIC inteiro (pic_disable).
+//   (c) Confirma que PIC esta mascarado (OCW1: PIC1=0xFF, PIC2=0xFF) — IRQ0
+//       do PIT esta SILENCIADA. Nenhum vetor 0x20 (IRQ0) pode mais subir.
+//   (d) g_ticks precisa CONTINUAR avancando — agora pelo vetor 0xD1 (APIC).
+//       Espera 20 ticks (200 ms a 100 Hz). Se chegou, a prova passou.
+// ============================================================================
+static int proof_pillar2_apic(void) {
+    int ok = 1;
+    kputs("\n[P2] ==== prova de APIC (Pilar 2) ====\n");
+
+    // (a) PIT vivo: g_ticks avanca.
+    uint64_t base = g_ticks;
+    while (g_ticks < base + 5) __asm__ volatile ("hlt");
+    kputs("[P2] PIT base: g_ticks "); kput_dec(base);
+    kputs(" -> "); kput_dec(g_ticks); kputs(" (PIT alimentando)\n");
+
+    // (b) Liga APIC. apic_init faz pic_disable() ao final.
+    apic_init();
+    if (!apic_active()) { kputs("[P2] FAIL: apic_init nao ativou\n"); return 0; }
+
+    // (c) PIC silenciado.
+    uint8_t pm1 = inb(0x21);
+    uint8_t pm2 = inb(0xA1);
+    kputs("[P2] PIC mask: PIC1=0x"); kput_hex(pm1);
+    kputs(" PIC2=0x"); kput_hex(pm2);
+    if (pm1 == 0xFFu && pm2 == 0xFFu) kputs(" OK (8259 silente)\n");
+    else { kputs(" FAIL\n"); ok = 0; }
+
+    // (d) g_ticks avanca pelo APIC timer agora.
+    uint64_t t0 = g_ticks;
+    while (g_ticks < t0 + 20) __asm__ volatile ("hlt");
+    uint64_t t1 = g_ticks;
+    kputs("[P2] APIC timer: g_ticks "); kput_dec(t0);
+    kputs(" -> "); kput_dec(t1);
+    kputs(" delta="); kput_dec(t1 - t0);
+    if (t1 - t0 >= 20) kputs(" OK (APIC alimentando com PIT desligado)\n");
+    else { kputs(" FAIL\n"); ok = 0; }
+
+    if (ok) kputs("[P2] ==== PROVA PASSOU ====\n\n");
+    else    kputs("[P2] ==== PROVA FALHOU ====\n\n");
+    return ok;
+}
+
 void kmain(uint32_t mb_info) {
     vga_init();
     serial_init();
@@ -727,6 +779,16 @@ void kmain(uint32_t mb_info) {
     // que vem depois.
     if (!proof_pillar1_paging()) {
         kputs("[P1] paginacao dinamica nao passou na prova; halting.\n");
+        for (;;) __asm__ volatile ("cli; hlt");
+    }
+
+    // Pilar 2 (NT foundation): APIC (Local APIC + IO-APIC) substituindo o
+    // 8259/PIT. apic_init calibra contra o PIT (que ainda esta vivo neste
+    // ponto), programa LVT Timer periodico em 0xD1, redireciona IRQ1 do
+    // teclado pelo IO-APIC, e MASCARA o PIC. A prova confirma que g_ticks
+    // continua avancando — via APIC timer, nao mais PIT.
+    if (!proof_pillar2_apic()) {
+        kputs("[P2] APIC nao passou na prova; halting.\n");
         for (;;) __asm__ volatile ("cli; hlt");
     }
     hal_cpu_init();        // FASE 7: CPUID -> vendor/family/model + features (cpu.c)

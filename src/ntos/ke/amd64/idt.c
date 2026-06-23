@@ -37,7 +37,13 @@ void idt_init(void) {
     idtp.limit = sizeof(idt) - 1;
     idtp.base  = (uint64_t)&idt;
 
-    for (int i = 0; i < 48; i++) set_gate(i, isr_stub_table[i], 0x8E);
+    // Pilar 2 (APIC): preenche os 256 vetores. APIC timer, IPI, IO-APIC redirects,
+    // spurious cabem em [0x30, 0xFF] e precisam de stubs no IDT mesmo que ainda
+    // nao sejam roteados pelo dispatcher do isr_handler.
+    for (int i = 0; i < 256; i++) {
+        if (i == 0x80) continue;                    // syscall: tratado abaixo (DPL=3)
+        set_gate(i, isr_stub_table[i], 0x8E);
+    }
 
     extern void isr_stub_128(void);                 // entrada de syscall (int 0x80)
     set_gate(0x80, (void*)isr_stub_128, 0xEE);      // DPL=3: ring 3 pode invocar

@@ -99,9 +99,16 @@ ISR_NOERR 29
 ISR_NOERR 30
 ISR_NOERR 31
 
-; ---- IRQs 32..47 ----
+; ---- IRQs 32..47 (vetores PIC remapeados) ----
 %assign irqn 32
 %rep 16
+    ISR_NOERR irqn
+%assign irqn irqn+1
+%endrep
+
+; ---- Vetores 48..127 (sera usado por IO-APIC redirects, APIC timer etc.) ----
+%assign irqn 48
+%rep 80
     ISR_NOERR irqn
 %assign irqn irqn+1
 %endrep
@@ -109,12 +116,19 @@ ISR_NOERR 31
 ; ---- Syscall: vetor 0x80 (128), invocavel do ring 3 (gate DPL=3) ----
 ISR_NOERR 128
 
-; ---- Tabela com os 48 enderecos (usada pela idt.c) ----
+; ---- Vetores 129..255 (APIC timer 0xD1, IPI 0xE1, spurious 0xFF, etc.) ----
+%assign irqn 129
+%rep 127
+    ISR_NOERR irqn
+%assign irqn irqn+1
+%endrep
+
+; ---- Tabela com os 256 enderecos (usada pela idt.c) ----
 section .rodata
 global isr_stub_table
 isr_stub_table:
 %assign i 0
-%rep 48
+%rep 256
     dq isr_stub_%+i
 %assign i i+1
 %endrep

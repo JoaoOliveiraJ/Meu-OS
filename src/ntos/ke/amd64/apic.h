@@ -81,10 +81,17 @@ void apic_send_ipi(uint8_t dest_apic_id, apic_ipi_kind_t kind, uint8_t vector_or
 void apic_wait_ipi(void);
 
 // Pilar 4: chamado pelo AP em ap_entry. Habilita o Local APIC corrente
-// (SVR.Software_Enable + spurious vector 0xFF) e mascara LINT0/LINT1/Error
-// — espelha o caminho do BSP em apic_init, mas SEM calibracao (a janela do
-// PIT ja se foi, e o BSP ja salvou a frequencia em s_apic_freq_per_sec).
-// Usa esse valor para programar o LVT Timer local em 100 Hz periodico,
-// igualzinho ao BSP. Necessario p/ AP receber APIC timer (vetor 0xD1) e
-// IPIs (0xE1).
+// (SVR.Software_Enable + spurious vector 0xFF) e mascara LINT0/LINT1/Error.
+// IMPORTANTE: o LVT Timer e' configurado MASCARADO (bit 16=1) — a contagem
+// nao comeca aqui. Isto e' deliberado: enquanto o KPRCB do AP estiver sendo
+// construido por ki_init_processor, NAO podemos aceitar tick algum, mesmo
+// com IF=0 do lado do CPU — o LAPIC armazenando IRR ja conta como side
+// effect, e sob QEMU TCG multi-thread isso correlaciona com hang determi-
+// nistico do BSP. Caminho do NT: SVR ON cedo, mas LVT_TMR programado em
+// HalpInitializeClock SO depois do PRCB estar montado.
 void apic_enable_local(void);
+
+// Pilar 4: desmascara o LVT Timer local + escreve TMR_INIT. Chamado pelo
+// AP no FINAL do ap_entry, com o KPRCB ja completo. A partir daqui o AP
+// recebe vetor 0xD1 a 100 Hz.
+void apic_unmask_timer_local(void);

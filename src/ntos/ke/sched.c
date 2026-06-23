@@ -108,24 +108,70 @@ void ki_thread_startup(void) {
 // --- ki_init_processor: chamado pelo BSP em kmain e pelo AP em ap_entry --
 static int  s_quantum_default = 4;     // ~40 ms @ 100 Hz
 
+// ----------------------------------------------------------------------------
+//  CAUSA RAIZ confirmada e contornada:
+//
+//  O compilador (Zig/clang) combinava stores ZERO adjacentes em PRCB (e.g.
+//  current_thread=0 + idle_thread=0) numa unica instrucao SIMD `movdqu xmm`
+//  de 16 bytes (com `xorps xmm0,xmm0`). Sob QEMU TCG -accel tcg,thread=multi,
+//  emular esse SIMD store gera STALL DETERMINISTICO no outro vCPU quando ha
+//  contencao na mesma cache line (BSP em crude_delay loop simples congela
+//  apos uma iteracao).
+//
+//  Hipoteses anteriores REFUTADAS via bisect:
+//    (a) interrupt do timer AP -> testei com LVT_TMR mascarado E sem sti,
+//        hang persiste. Refutada.
+//    (b) BSP em apic_wait_ipi sem ACK -> nao aplica, hang esta em crude_delay
+//        simples (volatile for + pause), nao em wait_ipi.
+//    (c) atomic_add no g_ki_cpu_count -> testei substituindo por write
+//        non-atomic, hang persiste. Refutada.
+//    (d) list_init, kputs serial cross-CPU, heap kmalloc race -> todos
+//        descartados pelo bisect.
+//
+//  Bisect convergiu: trocar apenas o store `p->idle_thread = 0` por um valor
+//  != 0 (ex.: 0xDEAD) faz o hang sumir. Trocar para `__atomic_store_n(..., 0)`
+//  tambem faz o hang sumir. O sintoma so aparece quando o COMPILADOR consegue
+//  fundir multiplos zero-stores adjacentes num SIMD move.
+//
+//  Workaround robusto: usar __atomic_store_n para CADA store discreto. O
+//  compilador e' proibido de combinar atomic stores em SIMD por construcao
+//  (cada um precisa de sua propria ordem de visibilidade). Em hw real isso
+//  vira `mov [mem], 0` normal — custo zero. Aplicamos so onde necessario.
+// ----------------------------------------------------------------------------
+
 void ki_init_processor(uint32_t cpu_index, uint32_t apic_id) {
     if (cpu_index >= MAX_CPUS) return;
     ki_prcb_t* p = &g_ki_prcb[cpu_index];
-    p->apic_id      = apic_id;
-    p->cpu_index    = cpu_index;
-    p->current_thread = 0;
-    p->idle_thread  = 0;
-    list_init(&p->ready_head);
-    p->online       = 1;
+
+    // Campos escalares: stores comuns funcionam (sao 4 bytes, nao adjacentes
+    // a outros 8-byte pointers em modo a serem fundidos em SIMD).
+    p->apic_id   = apic_id;
+    p->cpu_index = cpu_index;
+    p->online    = 1;
     s_apic_to_cpu[apic_id & 0xFF] = (uint8_t)cpu_index;
+
+    // Ponteiros que serao zerados: DISCRETOS para nao virarem movdqu.
+    __atomic_store_n((void**)&p->current_thread, (void*)0, __ATOMIC_RELEASE);
+    __atomic_store_n((void**)&p->idle_thread,    (void*)0, __ATOMIC_RELEASE);
+
+    // ready_head: list_init faz head->next = head->prev = head. Sao DOIS
+    // pointer stores que poderiam ser fundidos. Faz manual com atomic.
+    __atomic_store_n((void**)&p->ready_head.next, &p->ready_head, __ATOMIC_RELEASE);
+    __atomic_store_n((void**)&p->ready_head.prev, &p->ready_head, __ATOMIC_RELEASE);
+
     __atomic_add_fetch(&g_ki_cpu_count, 1, __ATOMIC_SEQ_CST);
 
-    // Cria a idle thread deste CPU. Usa array estatico per-CPU para evitar
-    // race no heap (kmalloc nao e' SMP-safe; concorrencia com BSP ainda em
-    // smp_init causa BSP starvation observada via bisect).
+    // Cria a idle thread deste CPU usando o pool estatico (heap nao e' MP-safe).
     static ki_thread_t s_idle_pool[MAX_CPUS];
     ki_thread_t* idle = &s_idle_pool[cpu_index];
-    memset(idle, 0, sizeof(*idle));
+
+    // O memset zera ~100 bytes -> compilador pode usar rep stosq ou SIMD
+    // largo. Substituido por loop discreto: cada __atomic_store_n e' um
+    // store individual, nunca SIMD.
+    {
+        volatile uint8_t* b = (volatile uint8_t*)idle;
+        for (uint64_t i = 0; i < sizeof(*idle); i++) b[i] = 0;
+    }
     idle->state        = KI_THREAD_RUNNING;
     idle->priority     = 0;
     idle->cpu_affinity = (int)cpu_index;
@@ -134,15 +180,10 @@ void ki_init_processor(uint32_t cpu_index, uint32_t apic_id) {
     idle->arg          = 0;
     idle->quantum      = s_quantum_default;
     idle->tid          = 0;
-    // Idle nao precisa de stack alocada — vai usar o stack atual do CPU.
-    p->idle_thread     = idle;
-    p->current_thread  = idle;
 
-    // NAO loga aqui: ki_init_processor pode ser chamado de AP enquanto BSP
-    // tambem escreve na serial — UART e' compartilhado e a serializacao
-    // entre CPUs sob TCG nao e' garantida. BSP loga depois quando o boot
-    // estabilizar.
-    (void)apic_id;   // silenciar warning
+    // Publica o idle E current_thread atomicamente (DEPOIS do struct populado).
+    __atomic_store_n((void**)&p->idle_thread,    idle, __ATOMIC_RELEASE);
+    __atomic_store_n((void**)&p->current_thread, idle, __ATOMIC_RELEASE);
 }
 
 // --- ki_create_thread ---------------------------------------------------

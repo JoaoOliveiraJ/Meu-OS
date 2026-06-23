@@ -280,13 +280,24 @@ void isr_handler(struct regs* r) {
         return;
     }
     // APIC timer (NT CLOCK_VECTOR = 0xD1): tick periodico do kernel.
-    // Pilar 4 (parcial): gate por flag global g_p4_active — antes da prova
-    // P4, comportamento e' o mesmo do P3 (apenas g_ticks++ + EOI). Depois,
-    // chama ki_quantum_end para swap MP.
+    //
+    // Caminho NT: HalpClockTick (BSP-owned). Apenas a CPU dona-do-clock
+    // atualiza g_ticks e KUSER_SHARED_DATA — APs sao quiescentes nesse front.
+    // Aqui usamos CPU 0 como BSP. APs apenas dao EOI e (se P4 ligado) caem em
+    // ki_quantum_end. Isto previne escritas concorrentes a mesma cache line
+    // do KUSER_SHARED_DATA — alem de bater com NT real, e' diagnostico-importante:
+    // descobrimos que escritas SIMD-fundidas (movdqu xmm) cross-CPU sob QEMU
+    // TCG multi-thread geram stall determinístico.
+    // APIC timer (NT CLOCK_VECTOR = 0xD1). Caminho NT: HalpClockTick e'
+    // BSP-owned — apenas a CPU dona do clock (CPU 0 aqui) atualiza g_ticks
+    // e KUSER_SHARED_DATA. APs apenas EOI e chamam ki_quantum_end (sob gate
+    // g_p4_active).
     if (r->int_no == APIC_VECTOR_TIMER) {
         extern int g_p4_active;
-        g_ticks++;
-        mm_kuser_tick();
+        if (ki_current_cpu_index() == 0) {
+            g_ticks++;
+            mm_kuser_tick();
+        }
         apic_eoi();
         if (g_p4_active) ki_quantum_end();
         return;

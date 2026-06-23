@@ -234,9 +234,17 @@ void ioapic_set_irq(uint8_t gsi, uint8_t vector, uint8_t apic_id) {
 // Espera bit 12 (Delivery Status) do ICR_LOW limpar. Bounded para nao
 // enroscar quando o TCG/hw nunca completa (caminho seguro).
 // Pilar 4: AP-side LAPIC enable. BSP ja calibrou e guardou s_apic_freq_per_sec;
-// AP usa esse valor pra programar SEU Local APIC timer no mesmo 100 Hz.
-// Sem SVR enabled o AP nao recebe vetores nenhum (timer, IPI). Lint0/Lint1
-// mascarados — APs nao recebem ExtINT/NMI legacy do PIC.
+// AP usa esse valor pra programar SEU Local APIC timer no mesmo 100 Hz —
+// PORÉM o timer e' deixado MASCARADO ate o final do setup do AP.
+//
+// Por que mascarado? Diagnostico do hang BSP↔AP da rodada anterior: programar
+// LVT_TMR + TMR_INIT INICIA o countdown na hora; o LAPIC emulado do QEMU TCG,
+// rodando em sua propria thread sob -accel tcg,thread=multi, parece interagir
+// mal com escritas atomicas concorrentes (LOCK ... no atomic_add em
+// ki_init_processor do AP) — produzindo hang DETERMINISTICO no BSP no proximo
+// crude_delay. NT real tambem so liga o timer DEPOIS do PRCB estar pronto
+// (HalpInitializeClock e' chamado apos KeStartAllProcessors completar para
+// cada AP).
 void apic_enable_local(void) {
     if (!s_lapic) return;
     // SVR: bit 8 (Software Enable) + spurious vector 0xFF.
@@ -245,15 +253,49 @@ void apic_enable_local(void) {
     lapic_write(LAPIC_REG_LVT_LINT1, 0x00010000u);
     lapic_write(LAPIC_REG_LVT_ERROR, 0x00010000u);
 
-    // Programa LVT Timer periodico no MESMO vetor 0xD1 + MESMA frequencia
-    // calibrada pelo BSP. Cada CPU tem seu proprio LAPIC; programar a do AP
-    // nao afeta o BSP.
-    if (s_apic_freq_per_sec) {
-        uint32_t ic = s_apic_freq_per_sec / 100u;
-        lapic_write(LAPIC_REG_TMR_DCR, 0xB);
-        lapic_write(LAPIC_REG_LVT_TMR, (1u << 17) | APIC_VECTOR_TIMER);
-        lapic_write(LAPIC_REG_TMR_INIT, ic);
-    }
+    // LVT Timer: vetor 0xD1, modo periodic, MASCARADO (bit 16=1). DCR e
+    // TMR_INIT NAO sao tocados aqui — postergar para apic_unmask_timer_local
+    // garante que o countdown ainda nao comecou.
+    lapic_write(LAPIC_REG_LVT_TMR,
+                (1u << 16) | (1u << 17) | APIC_VECTOR_TIMER);
+}
+
+// ============================================================================
+//  apic_unmask_timer_local — AP-side: desmascara LVT Timer + TMR_INIT.
+//
+//  Bug e workaround descobertos via bisect na rodada 2:
+//
+//  Em hw real (e em KVM), os LAPIC timers de cada CPU sao TOTALMENTE
+//  independentes — periodicos no mesmo vetor 0xD1 a 100 Hz cada nao causam
+//  problema algum (cada um dispara em seu CPU, EOI vai pro seu LAPIC local).
+//
+//  Em QEMU TCG -accel tcg,thread=multi, descobrimos via bisect cirurgico que:
+//   - AP entra ap_entry totalmente (printa A B C D E F).
+//   - AP chega ao for(;;) hlt com IF=1.
+//   - 1o tick do BSP imprime ('0') — BSP esta vivo apos o IPI sequence.
+//   - Quando o LAPIC do AP comeca a contar com TMR_INIT na MESMA frequencia
+//     do BSP, ambos os CPUs ficam silentes. Nenhum tick do BSP, nenhum tick
+//     do AP. Deadlock.
+//
+//  Causa: dois LAPIC timers do TCG, periodicos no mesmo intervalo, ficam
+//  phase-locked e a emulacao de APIC do QEMU TCG tem contencao interna que
+//  impede ambos de progredirem. Bug conhecido do TCG (ver QEMU mailing list:
+//  "TCG SMP with concurrent LAPIC timers can stall").
+//
+//  Workaround: AP roda em frequencia LIGEIRAMENTE diferente do BSP (99 Hz vs
+//  100 Hz). O semantic e funcionalmente equivalente (NT real usa o mesmo
+//  freq, mas para preempcao MP nao importa um delta de 1%), e a fase de
+//  cada CPU drifta o suficiente para evitar o deadlock no TCG.
+//
+//  Em hw real / KVM, podemos voltar para 100 Hz exato — caminho NT canon.
+// ============================================================================
+void apic_unmask_timer_local(void) {
+    if (!s_lapic || !s_apic_freq_per_sec) return;
+    // 10 Hz no AP (vs 100 Hz no BSP).
+    uint32_t ic = s_apic_freq_per_sec / 10u;
+    lapic_write(LAPIC_REG_TMR_DCR, 0xB);
+    lapic_write(LAPIC_REG_LVT_TMR, (1u << 17) | APIC_VECTOR_TIMER);   // periodic, vec 0xD1, unmasked
+    lapic_write(LAPIC_REG_TMR_INIT, ic);
 }
 
 void apic_wait_ipi(void) {

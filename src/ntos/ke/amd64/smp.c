@@ -123,19 +123,44 @@ void ap_entry(void) {
         __atomic_store_n(&s_ap_seen_id[my_id], 1, __ATOMIC_SEQ_CST);
     }
 
-    // Pilar 4 (PARCIAL): AP carrega IDT compartilhado e habilita LAPIC com
-    // SVR+Timer programado. NAO chama ki_init_processor: bisect localizou
-    // que essa chamada (apos AP terminar) causa starvation/hang do BSP via
-    // serializacao TCG QEMU multi-thread mesmo com -accel tcg,thread=multi.
-    // Causa raiz nao identificada com certeza apos 4h debugging — relatorio
-    // explicita as hipoteses (race no s_apic_to_cpu? heap shared? page-table
-    // INVLPG inter-CPU?).
+    // Pilar 4 — SETUP DO AP em ordem segura:
+    //   (i)   idt_load() — IDT compartilhada. Sem efeito ate ter exceptions
+    //         ou interrupcoes (IF=0 ainda).
+    //   (ii)  apic_enable_local() — SVR ON + LVT entries mascaradas.
+    //         CRITICO: LVT Timer fica MASCARADO (bit 16=1) e TMR_INIT NAO
+    //         e' escrito — countdown NAO comeca. Diagnostico anterior: ligar
+    //         o timer aqui correlaciona com hang BSP via TCG.
+    //   (iii) ki_init_processor() — monta KPRCB do AP. Memoria compartilhada
+    //         + atomic_add no g_ki_cpu_count.
+    //   (iv)  apic_unmask_timer_local() — desmascara LVT_TMR + escreve
+    //         TMR_INIT. SO AGORA o LAPIC do AP comeca a contar p/ 0xD1.
+    //         PRCB ja esta pronto, scheduler pode entregar threads.
+    //   (v)   sti — IF=1. O primeiro tick pendente cai aqui dentro do dispatcher.
+    //   (vi)  ki_idle_loop — sti; hlt; preemptado quando houver ready.
+    // Pilar 4 — SETUP DO AP em ordem segura ja com bug do SIMD store
+    // contornado em ki_init_processor (atomic_store explicitos):
+    //   (i)   idt_load            — IDT compartilhada
+    //   (ii)  apic_enable_local   — SVR ON, LVT_TMR MASCARADO (mask=1)
+    //   (iii) ki_init_processor   — KPRCB do AP (sem SIMD zero-stores)
+    //   (iv)  apic_unmask_timer_local — desmascara + escreve TMR_INIT
+    //   (v)   sti                 — IF=1, primeiro tick cai no dispatcher
+    //   (vi)  ki_idle_loop        — sti; hlt; preemptado quando houver ready
+    // Pilar 4 — SETUP DO AP em ordem segura:
+    //   (i)   idt_load            — IDT compartilhada
+    //   (ii)  apic_enable_local   — SVR ON; LVT_TMR programado MASCARADO
+    //                               (bit 16=1), TMR_INIT NAO escrito ainda
+    //   (iii) ki_init_processor   — KPRCB do AP (com workaround SIMD-store)
+    //   (iv)  apic_unmask_timer_local — desmascara + escreve TMR_INIT
+    //                                  (AP a 99 Hz, BSP a 100 Hz — workaround
+    //                                  TCG phase-lock; ver apic.c)
+    //   (v)   sti                 — IF=1, primeiro tick cai no dispatcher
+    //   (vi)  ki_idle_loop        — sti; hlt; preemptado quando houver ready
     idt_load();
     apic_enable_local();
-    // ki_init_processor(my_id, my_id);   // PARCIAL — causa hang do BSP
-    // __asm__ volatile ("sti");
-    // ki_idle_loop();
-    for (;;) __asm__ volatile ("cli; hlt");
+    ki_init_processor(my_id, my_id);
+    apic_unmask_timer_local();
+    __asm__ volatile ("sti");
+    ki_idle_loop();
 }
 
 // --- MADT parse ----------------------------------------------------------
@@ -233,10 +258,7 @@ static void* alloc_zeroed(uint64_t bytes) {
     return p;
 }
 
-// Delay grosseiro independente de g_ticks. NAO depende do APIC timer estar
-// rodando — usamos PAUSE x N para nao queimar 100% CPU sem ser injusto com
-// QEMU TCG. ~10M iteracoes ~ alguns ms em hardware real, mais em TCG (mas
-// nao usamos sleep precisos — INIT-SIPI-SIPI tolera margem ampla).
+// Delay grosseiro independente de g_ticks.
 static void crude_delay(uint64_t pauses) {
     for (volatile uint64_t i = 0; i < pauses; i++) __asm__ volatile ("pause");
 }

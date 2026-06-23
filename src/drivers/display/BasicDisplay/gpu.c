@@ -203,3 +203,27 @@ void gpu_present(void) {
     // Bochs VBE: cada escrita ja vai pra VRAM (LFB MMIO); no-op.
     if (s_backend == GPU_BACKEND_VGPU) virtio_gpu_present();
 }
+
+// ----------------------------------------------------------------------------
+//  Cursor de HARDWARE. So o backend virtio-gpu tem cursor queue. No Bochs VBE
+//  nao ha — devolvemos 0 e o win32k cai no sprite de software (recompose).
+// ----------------------------------------------------------------------------
+int gpu_cursor_set(const uint32_t* img64x64, uint32_t hot_x, uint32_t hot_y,
+                   int init_x, int init_y) {
+    if (s_backend != GPU_BACKEND_VGPU) return 0;
+    if (init_x < 0) init_x = 0;
+    if (init_y < 0) init_y = 0;
+    return virtio_gpu_cursor_init(img64x64, hot_x, hot_y,
+                                  (uint32_t)init_x, (uint32_t)init_y);
+}
+
+void gpu_cursor_move(int x, int y) {
+    if (s_backend != GPU_BACKEND_VGPU) return;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    virtio_gpu_cursor_move((uint32_t)x, (uint32_t)y);
+}
+
+int gpu_has_hw_cursor(void) {
+    return (s_backend == GPU_BACKEND_VGPU) && virtio_gpu_cursor_ok();
+}

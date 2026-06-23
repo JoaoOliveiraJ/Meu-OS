@@ -116,6 +116,9 @@ typedef struct VIRTIO_QUEUE {
 #define VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING 0x0106
 #define VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING 0x0107
 #define VIRTIO_GPU_CMD_GET_CAPSET_INFO         0x0108
+// Cursor queue (spec sec. 5.7.7) — comandos vao pela cursorq (idx 1).
+#define VIRTIO_GPU_CMD_UPDATE_CURSOR           0x0300
+#define VIRTIO_GPU_CMD_MOVE_CURSOR             0x0301
 
 #define VIRTIO_GPU_RESP_OK_NODATA              0x1100
 #define VIRTIO_GPU_RESP_OK_DISPLAY_INFO        0x1101
@@ -204,3 +207,22 @@ uint32_t virtio_gpu_fb_width(void);
 uint32_t virtio_gpu_fb_height(void);
 uint32_t virtio_gpu_fb_pitch(void);
 volatile uint32_t* virtio_gpu_framebuffer(void);
+
+// ============================================================================
+//  Cursor de HARDWARE (cursor queue, spec sec. 5.7.7). O host (QEMU) compoe o
+//  cursor sobre o scanout — mover o cursor NAO recompoe o framebuffer.
+// ============================================================================
+#define VIRTIO_GPU_CURSOR_RESOURCE_ID  2
+#define VIRTIO_GPU_CURSOR_W            64
+#define VIRTIO_GPU_CURSOR_H            64
+
+// Cria o recurso 64x64 BGRA do cursor a partir de img (64*64 uint32; cada pixel
+// 0xAARRGGBB, alpha!=0 = opaco, alpha=0 = transparente) e faz UPDATE_CURSOR
+// ligando-o ao scanout 0 na posicao inicial com o hotspot (hot_x,hot_y).
+// Retorna 1 se a cursor queue aceitou; 0 se indisponivel (caller usa sprite SW).
+int  virtio_gpu_cursor_init(const uint32_t* img64x64, uint32_t hot_x, uint32_t hot_y,
+                            uint32_t init_x, uint32_t init_y);
+// MOVE_CURSOR: reposiciona o cursor (sem recompor). Barato — chamado por movimento.
+void virtio_gpu_cursor_move(uint32_t x, uint32_t y);
+// 1 se o cursor de hardware foi inicializado com sucesso.
+int  virtio_gpu_cursor_ok(void);

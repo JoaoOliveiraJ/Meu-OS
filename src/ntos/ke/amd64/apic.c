@@ -233,6 +233,29 @@ void ioapic_set_irq(uint8_t gsi, uint8_t vector, uint8_t apic_id) {
 // ============================================================================
 // Espera bit 12 (Delivery Status) do ICR_LOW limpar. Bounded para nao
 // enroscar quando o TCG/hw nunca completa (caminho seguro).
+// Pilar 4: AP-side LAPIC enable. BSP ja calibrou e guardou s_apic_freq_per_sec;
+// AP usa esse valor pra programar SEU Local APIC timer no mesmo 100 Hz.
+// Sem SVR enabled o AP nao recebe vetores nenhum (timer, IPI). Lint0/Lint1
+// mascarados — APs nao recebem ExtINT/NMI legacy do PIC.
+void apic_enable_local(void) {
+    if (!s_lapic) return;
+    // SVR: bit 8 (Software Enable) + spurious vector 0xFF.
+    lapic_write(LAPIC_REG_SVR, (1u << 8) | APIC_VECTOR_SPURIOUS);
+    lapic_write(LAPIC_REG_LVT_LINT0, 0x00010000u);
+    lapic_write(LAPIC_REG_LVT_LINT1, 0x00010000u);
+    lapic_write(LAPIC_REG_LVT_ERROR, 0x00010000u);
+
+    // Programa LVT Timer periodico no MESMO vetor 0xD1 + MESMA frequencia
+    // calibrada pelo BSP. Cada CPU tem seu proprio LAPIC; programar a do AP
+    // nao afeta o BSP.
+    if (s_apic_freq_per_sec) {
+        uint32_t ic = s_apic_freq_per_sec / 100u;
+        lapic_write(LAPIC_REG_TMR_DCR, 0xB);
+        lapic_write(LAPIC_REG_LVT_TMR, (1u << 17) | APIC_VECTOR_TIMER);
+        lapic_write(LAPIC_REG_TMR_INIT, ic);
+    }
+}
+
 void apic_wait_ipi(void) {
     if (!s_lapic) return;
     for (uint32_t i = 0; i < 100000u; i++) {

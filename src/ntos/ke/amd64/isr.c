@@ -2,6 +2,7 @@
 #include "ke/amd64/isr.h"
 #include "ke/amd64/pic.h"
 #include "ke/amd64/apic.h"        // Pilar 2: dispatch de vetores APIC + EOI
+#include "ke/sched.h"             // Pilar 4: ki_quantum_end / ki_ipi_reschedule
 #include "input/keyboard.h"
 #include "input/mouse/mouse.h"     // FASE 11: IRQ12 (mouse PS/2)
 #include "ke/amd64/syscall.h"
@@ -279,15 +280,21 @@ void isr_handler(struct regs* r) {
         return;
     }
     // APIC timer (NT CLOCK_VECTOR = 0xD1): tick periodico do kernel.
+    // Pilar 4 (parcial): gate por flag global g_p4_active — antes da prova
+    // P4, comportamento e' o mesmo do P3 (apenas g_ticks++ + EOI). Depois,
+    // chama ki_quantum_end para swap MP.
     if (r->int_no == APIC_VECTOR_TIMER) {
+        extern int g_p4_active;
         g_ticks++;
         mm_kuser_tick();
         apic_eoi();
+        if (g_p4_active) ki_quantum_end();
         return;
     }
-    // IPI (Pilar 3/4 vai usar): log low ruido. Adiciona handler real depois.
+    // IPI reschedule (vetor 0xE1, Pilar 4).
     if (r->int_no == APIC_VECTOR_IPI) {
         apic_eoi();
+        ki_ipi_reschedule();
         return;
     }
 

@@ -79,3 +79,12 @@ void apic_send_ipi(uint8_t dest_apic_id, apic_ipi_kind_t kind, uint8_t vector_or
 
 // Espera o IPI sair (Delivery Status do ICR Low = 0).
 void apic_wait_ipi(void);
+
+// Pilar 4: chamado pelo AP em ap_entry. Habilita o Local APIC corrente
+// (SVR.Software_Enable + spurious vector 0xFF) e mascara LINT0/LINT1/Error
+// — espelha o caminho do BSP em apic_init, mas SEM calibracao (a janela do
+// PIT ja se foi, e o BSP ja salvou a frequencia em s_apic_freq_per_sec).
+// Usa esse valor para programar o LVT Timer local em 100 Hz periodico,
+// igualzinho ao BSP. Necessario p/ AP receber APIC timer (vetor 0xD1) e
+// IPIs (0xE1).
+void apic_enable_local(void);

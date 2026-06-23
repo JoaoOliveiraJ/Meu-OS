@@ -50,3 +50,8 @@ void idt_init(void) {
 
     __asm__ volatile ("lidt %0" : : "m"(idtp));
 }
+
+void idt_load(void) {
+    // Apenas re-LIDT do idtp ja inicializado pelo BSP. Idempotente.
+    __asm__ volatile ("lidt %0" : : "m"(idtp));
+}

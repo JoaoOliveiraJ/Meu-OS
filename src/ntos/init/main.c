@@ -14,6 +14,7 @@
 #include "ke/amd64/isr.h"
 #include "mm/pmm.h"
 #include "mm/heap.h"
+#include "mm/paging.h"   // Pilar 1 (NT foundation): mmio arena + probe
 #include "hal/hal.h"
 #include "hal/cpu.h"
 #include "hal/disk.h"
@@ -565,6 +566,91 @@ static void fb_demo(void) {
           "Use QMP screendump para ver os pixels.\n");
 }
 
+// ============================================================================
+//  Pilar 1 (NT foundation) — PROVA de paginacao dinamica.
+//
+//  Tres etapas, em ordem:
+//   (a) Mapeia o Local APIC em 0xFEE00000 (FISICO ACIMA DE 1 GIB, fora da
+//       identidade) e LE o registrador LAPIC ID (offset 0x20). Sem PCD esse
+//       acesso poderia retornar lixo bufferizado; nosso hal_map_mmio seta
+//       PCD|PWT explicitamente. Logamos o valor lido.
+//   (b) Alias-mapeia uma mesma pagina fisica em DOIS enderecos virtuais
+//       diferentes do arena MMIO. Escreve 0xDEADBEEF via V1, le via V2:
+//       deve bater. Prova que mm_map_phys_range esta mesmo populando PTEs
+//       (e nao alguma identidade escondida).
+//   (c) Desmapeia V1, le via V1 dentro de mm_probe_read_u32 (que aciona o
+//       caminho expected-PF em isr.c). Deve disparar #PF -> g_mm_pf_caught=1.
+//       V2 continua valido (sao PTEs diferentes apontando p/ o mesmo phys).
+//
+//  Tudo logado com "[P1] ..." pra ficar visivel no serial.log do qemu.
+// ============================================================================
+static int proof_pillar1_paging(void) {
+    int ok = 1;
+    kputs("\n[P1] ==== prova de paginacao dinamica (Pilar 1) ====\n");
+
+    // (a) — LAPIC MMIO acima de 1 GiB.
+    volatile uint32_t* lapic = (volatile uint32_t*)hal_map_mmio(0xFEE00000ULL, 0x1000ULL);
+    if (!lapic) {
+        kputs("[P1] FAIL: hal_map_mmio(LAPIC) devolveu 0\n");
+        return 0;
+    }
+    // LAPIC ID register em offset 0x20 (bits 24..31 = APIC ID). No QEMU BSP=0.
+    uint32_t lapic_id_raw = lapic[0x20 / 4];
+    kputs("[P1] LAPIC mapeado @ "); kput_hex((uint64_t)(uintptr_t)lapic);
+    kputs("  ID raw="); kput_hex(lapic_id_raw);
+    kputs("  (APIC ID = "); kput_dec((lapic_id_raw >> 24) & 0xFF); kputs(")\n");
+    // (NAO desmapeamos: o Pilar 2 vai querer manter esse VA.)
+
+    // (b) — alias de uma mesma pagina fisica em DOIS VAs.
+    uint64_t phys = pmm_alloc_frame();
+    if (!phys) { kputs("[P1] FAIL: pmm_alloc_frame sem RAM\n"); return 0; }
+    uint64_t v1 = mm_mmio_reserve(0x1000);
+    uint64_t v2 = mm_mmio_reserve(0x1000);
+    if (!v1 || !v2) { kputs("[P1] FAIL: mm_mmio_reserve\n"); return 0; }
+    // Para RAM normal NAO setamos PCD: queremos cache write-back; aqui basta
+    // PRESENT|RW (memoria do PMM, nao MMIO de dispositivo).
+    if (!mm_map_phys_range(v1, phys, 0x1000, MM_FLAG_PRESENT | MM_FLAG_RW)) {
+        kputs("[P1] FAIL: map v1\n"); return 0;
+    }
+    if (!mm_map_phys_range(v2, phys, 0x1000, MM_FLAG_PRESENT | MM_FLAG_RW)) {
+        kputs("[P1] FAIL: map v2\n"); return 0;
+    }
+    volatile uint32_t* p1 = (volatile uint32_t*)(uintptr_t)v1;
+    volatile uint32_t* p2 = (volatile uint32_t*)(uintptr_t)v2;
+    *p1 = 0xDEADBEEFu;
+    uint32_t back = *p2;
+    kputs("[P1] alias map: phys="); kput_hex(phys);
+    kputs(" v1="); kput_hex(v1); kputs(" v2="); kput_hex(v2);
+    kputs(" write(v1)=0xDEADBEEF read(v2)="); kput_hex(back);
+    if (back == 0xDEADBEEFu) kputs(" OK\n");
+    else { kputs(" FAIL\n"); ok = 0; }
+
+    // (c) — unmap em V1; V1 deve faltar #PF, V2 continua valido.
+    if (!mm_unmap_range(v1, 0x1000)) {
+        kputs("[P1] FAIL: mm_unmap_range(v1)\n"); return 0;
+    }
+    uint32_t junk = 0xCAFEBABEu;
+    int got = mm_probe_read_u32(p1, &junk);
+    kputs("[P1] probe(v1 apos unmap): retorno="); kput_dec((uint64_t)got);
+    kputs(" caught="); kput_dec((uint64_t)g_mm_pf_caught);
+    if (!got && g_mm_pf_caught) kputs(" OK (PF capturado)\n");
+    else { kputs(" FAIL (esperava PF)\n"); ok = 0; }
+
+    // V2 ainda mapeado: leitura deve bater 0xDEADBEEF.
+    uint32_t back2 = *p2;
+    kputs("[P1] read(v2) pos-unmap(v1)="); kput_hex(back2);
+    if (back2 == 0xDEADBEEFu) kputs(" OK (alias independente)\n");
+    else { kputs(" FAIL\n"); ok = 0; }
+
+    // Limpa V2 e devolve a moldura ao PMM (higiene).
+    mm_unmap_range(v2, 0x1000);
+    pmm_free_frame(phys);
+
+    if (ok) kputs("[P1] ==== PROVA PASSOU ====\n\n");
+    else    kputs("[P1] ==== PROVA FALHOU ====\n\n");
+    return ok;
+}
+
 void kmain(uint32_t mb_info) {
     vga_init();
     serial_init();
@@ -613,6 +699,12 @@ void kmain(uint32_t mb_info) {
     kputs("[ok] PMM: "); kput_dec(pmm_free_frames()); kputs(" frames de 4 KiB livres\n");
 
     heap_init();
+    // Pilar 1 (NT foundation): inicializa o MMIO arena ANTES de qualquer
+    // caminho que possa precisar mapear fisicos > 1 GiB (Local APIC no Pilar 2,
+    // virtio-gpu BAR, etc.). mm_mmio_init pre-aloca o PDPT do arena em
+    // PML4[450] para que processos criados depois (mm_create_address_space
+    // copia PML4 por valor) herdem a entrada compartilhada.
+    mm_mmio_init();
     void* a = kmalloc(64);
     void* b = kmalloc(4096);
     kputs("     kmalloc(64)    = "); kput_hex((uint64_t)(uintptr_t)a); kputc('\n');
@@ -627,6 +719,16 @@ void kmain(uint32_t mb_info) {
     // --- HAL (Hardware Abstraction Layer): I/O ports + MMIO + enumeracao PCI ---
     // Loga cada dispositivo PCI achado na serial (controlador IDE, video, etc.).
     hal_init();
+
+    // Pilar 1 (NT foundation): PROVA de paginacao dinamica. Mapeia LAPIC fora
+    // da identidade, alias-mapeia 1 frame em 2 VAs, desmapeia 1 e confirma
+    // que o acesso pos-unmap dispara #PF. Se a prova falhar, NAO seguimos
+    // com os demais pilares — paginacao quebrada invalida APIC, SMP e tudo
+    // que vem depois.
+    if (!proof_pillar1_paging()) {
+        kputs("[P1] paginacao dinamica nao passou na prova; halting.\n");
+        for (;;) __asm__ volatile ("cli; hlt");
+    }
     hal_cpu_init();        // FASE 7: CPUID -> vendor/family/model + features (cpu.c)
     // FASE 7.7: CR4 + XCR0. Habilita OSXSAVE (e xsetbv XCR0=0x7 = X87+SSE+AVX
     // quando suportado) e CR4.SMEP/UMIP/PCIDE quando o CPU expoe. CADA bit e

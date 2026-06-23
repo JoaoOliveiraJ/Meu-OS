@@ -235,6 +235,23 @@ void isr_handler(struct regs* r) {
         // Page Fault: CR2 contem o endereco que causou o fault — essencial p/ diagnostico.
         if (r->int_no == 14) {
             uint64_t cr2; __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+
+            // Pilar 1 (NT foundation): caminho de expected-fault. Se a MM
+            // estava esperando este PF (mm_probe_read_u32 etc.), marca caught,
+            // pula a instrucao que faultou (rip := resume) e retorna. Logamos
+            // baixo ruido para nao poluir o relatorio. NUNCA cai pelo recovery
+            // de driver — o probe sabe o que esta fazendo.
+            if (g_mm_pf_expect) {
+                g_mm_pf_expect = 0;
+                g_mm_pf_caught = 1;
+                kputs("  [pf] expected-trap cr2="); kput_hex(cr2);
+                kputs(" rip="); kput_hex(r->rip);
+                kputs(" -> resume "); kput_hex(g_mm_pf_resume_rip);
+                kputs("\n");
+                r->rip = g_mm_pf_resume_rip;
+                return;
+            }
+
             kputs("  cr2="); kput_hex(cr2);
             kputs("\n  err bits: P="); kput_hex(r->err_code & 1);
             kputs(" W="); kput_hex((r->err_code >> 1) & 1);

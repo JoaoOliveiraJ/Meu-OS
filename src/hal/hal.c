@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "hal.h"
 #include "io.h"
+#include "mm/paging.h"   // Pilar 1: mm_map_phys_range / mm_unmap_range / arena
 
 // A serial e o canal de log do kernel (kputc -> VGA texto + COM1). Declaradas
 // em kernel.c; aqui as usamos para comprovar cada operacao da HAL em headless.
@@ -36,24 +37,68 @@ MS_ABI void HalWritePortUshort(uint16_t port, uint16_t value) { outw(port, value
 MS_ABI void HalWritePortUlong(uint16_t port, uint32_t value)  { outl(port, value); }
 
 // ============================================================================
-//  2) MMIO — acesso a memoria mapeada de dispositivo.
+//  2) MMIO — acesso a memoria mapeada de dispositivo (Pilar 1 da rodada NT
+//     foundation: paginacao dinamica).
 //
-//  O boot monta identidade de 1 GiB ([0, 0x40000000)). Para faixas fisicas
-//  dentro dela (caso da VGA em 0xA0000/0xB8000 e de BARs MMIO baixas), o
-//  endereco virtual == fisico, entao devolvemos o proprio ponteiro. Faixas
-//  acima de 1 GiB nao estao mapeadas; nao mexemos nas page tables aqui (o
-//  caminho seguro pedido no enunciado), entao devolvemos 0 e logamos o aviso.
+//  Identidade de 1 GiB cobre [0, 0x40000000): faixas dentro dela viram acesso
+//  direto (zero PTE novo, custo zero). Faixas ACIMA de 1 GiB sao mapeadas em
+//  VA do arena MMIO (PML4[450]) com flags PCD+PWT (cache-disable e write-thru
+//  — semantica do MmMapIoSpace(MmNonCached) do NT, obrigatorio para registros
+//  do APIC / IO-APIC e qualquer BAR de dispositivo: cache nao pode reordenar
+//  ou bufferizar as escritas).
 // ============================================================================
 
 #define HAL_IDENTITY_LIMIT 0x40000000ULL   // 1 GiB de identidade montada no boot
 
 volatile void* hal_map_mmio(uint64_t phys, uint64_t size) {
+    if (size == 0) return 0;
+
+    // Faixa toda dentro da identidade: acesso direto, sem PTE novo.
     if (phys + size <= HAL_IDENTITY_LIMIT) {
-        return (volatile void*)(uintptr_t)phys;   // acesso direto (identidade)
+        return (volatile void*)(uintptr_t)phys;
     }
-    kputs("[hal] MMIO @ "); kput_hex(phys);
-    kputs(" fora da identidade de 1 GiB (nao mapeado); use uma BAR baixa.\n");
-    return 0;
+
+    // Faixa acima da identidade: aloca VA no arena e mapeia phys -> VA
+    // com PCD|PWT (cache disable / write-through) — mandatorio em MMIO.
+    // Preserva o offset intra-pagina (BARs costumam comecar alinhadas mas
+    // o registro lido pode estar em meio de pagina).
+    uint64_t aligned_phys = phys & ~0xFFFULL;
+    uint64_t intra        = phys & 0xFFFULL;
+    uint64_t span         = (intra + size + 0xFFFULL) & ~0xFFFULL;
+
+    uint64_t va = mm_mmio_reserve(span);
+    if (!va) {
+        kputs("[hal] MMIO map: arena cheio (phys="); kput_hex(phys); kputs(")\n");
+        return 0;
+    }
+    uint64_t flags = MM_FLAG_PRESENT | MM_FLAG_RW | MM_FLAG_PCD | MM_FLAG_PWT;
+    if (!mm_map_phys_range(va, aligned_phys, span, flags)) {
+        kputs("[hal] MMIO map: mm_map_phys_range FALHOU phys="); kput_hex(phys); kputs("\n");
+        return 0;
+    }
+
+    volatile void* ptr = (volatile void*)(uintptr_t)(va + intra);
+    kputs("[hal] MMIO map phys="); kput_hex(phys);
+    kputs(" -> virt="); kput_hex((uint64_t)(uintptr_t)ptr);
+    kputs(" size="); kput_hex(size); kputs(" (PCD|PWT)\n");
+    return ptr;
+}
+
+void hal_unmap_mmio(volatile void* va, uint64_t size) {
+    if (!va || size == 0) return;
+    uint64_t v = (uint64_t)(uintptr_t)va;
+    // Identity range nao tem PTE proprio para desfazer: NOP.
+    if (v < HAL_IDENTITY_LIMIT) return;
+
+    uint64_t intra = v & 0xFFFULL;
+    uint64_t span  = (intra + size + 0xFFFULL) & ~0xFFFULL;
+    uint64_t base  = v & ~0xFFFULL;
+    if (!mm_unmap_range(base, span)) {
+        kputs("[hal] MMIO unmap FALHOU va="); kput_hex(v); kputs("\n");
+        return;
+    }
+    kputs("[hal] MMIO unmap va="); kput_hex(v);
+    kputs(" size="); kput_hex(size); kputs("\n");
 }
 
 MS_ABI uint8_t  HalReadMmioUchar(volatile void* a)  { return *(volatile uint8_t*)a; }

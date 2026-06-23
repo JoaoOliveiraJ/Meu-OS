@@ -298,6 +298,24 @@ void apic_unmask_timer_local(void) {
     lapic_write(LAPIC_REG_TMR_INIT, ic);
 }
 
+// ============================================================================
+//  apic_mask_timer_local — mascara o LVT Timer da CPU corrente (bit 16 = 1).
+//
+//  QUIESCE do APIC timer (ver FUTURE.md). Com o Pilar 4 (scheduler MP) PAUSADO
+//  e desacoplado do boot, mascaramos o LVT timer do BSP logo apos as provas
+//  P1-P3. Motivo medido: o timer ISR (vetor 0xD1) chama mm_kuser_tick() a cada
+//  tick; rodando concorrente com o init pos-P3 (mm_map_kuser_shared_data etc.)
+//  sob QEMU TCG, a re-entrancia do timer trava o boot ANTES do desktop. Com o
+//  timer mascarado g_ticks congela (relogio estatico), mas o boot alcanca o
+//  desktop. O IO-APIC permanece ativo — o IRQ12 do mouse continua roteavel.
+//  REATIVAR este timer faz parte de RETOMAR o Pilar 4 — nao reative isolado.
+// ============================================================================
+void apic_mask_timer_local(void) {
+    if (!s_lapic) return;
+    uint32_t lvt = lapic_read(LAPIC_REG_LVT_TMR);
+    lapic_write(LAPIC_REG_LVT_TMR, lvt | (1u << 16));   // bit 16 = mask
+}
+
 void apic_wait_ipi(void) {
     if (!s_lapic) return;
     for (uint32_t i = 0; i < 100000u; i++) {

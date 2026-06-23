@@ -33,3 +33,17 @@ void     gpu_copy_rect(int sx, int sy, int dx, int dy, int w, int h);  // intra-
 
 // Apresenta o frame na tela. Sem double-buffer: no-op. Existe p/ contrato.
 void     gpu_present(void);
+
+// ----------------------------------------------------------------------------
+//  Cursor de HARDWARE. No backend virtio-gpu, o host compoe o cursor sobre o
+//  scanout: mover NAO recompoe o framebuffer (barato). No Bochs VBE nao ha
+//  cursor de hardware — gpu_cursor_set devolve 0 e o caller usa sprite SW.
+// ----------------------------------------------------------------------------
+// Define a imagem do cursor (img = 64*64 uint32 BGRA; alpha!=0 = opaco) com
+// hotspot e posicao inicial. Devolve 1 se o cursor de HW ficou ativo, 0 senao.
+int      gpu_cursor_set(const uint32_t* img64x64, uint32_t hot_x, uint32_t hot_y,
+                        int init_x, int init_y);
+// Move o cursor de HW (no-op se nao houver). Barato: nao recompoe.
+void     gpu_cursor_move(int x, int y);
+// 1 se o cursor de HARDWARE esta ativo (entao o compose NAO desenha o sprite SW).
+int      gpu_has_hw_cursor(void);

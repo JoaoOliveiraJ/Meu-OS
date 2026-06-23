@@ -188,6 +188,23 @@ struct __attribute__((packed)) virtio_gpu_resp_display_info {
     struct virtio_gpu_display_one pmodes[VIRTIO_GPU_MAX_SCANOUTS];
 };
 
+// Cursor queue (spec sec. 5.7.7): UPDATE_CURSOR e MOVE_CURSOR usam a MESMA struct.
+struct __attribute__((packed)) virtio_gpu_cursor_pos {
+    uint32_t scanout_id;
+    uint32_t x;
+    uint32_t y;
+    uint32_t padding;
+};
+struct __attribute__((packed)) virtio_gpu_update_cursor {
+    struct virtio_gpu_ctrl_hdr   hdr;     // UPDATE_CURSOR ou MOVE_CURSOR
+    struct virtio_gpu_cursor_pos pos;
+    uint32_t resource_id;                 // recurso da imagem (0 no MOVE)
+    uint32_t hot_x;
+    uint32_t hot_y;
+    uint32_t padding;
+};
+_Static_assert(sizeof(struct virtio_gpu_update_cursor) == 56, "update_cursor 56B");
+
 // --- estado interno -------------------------------------------------------
 typedef struct VIRTIO_GPU_DEV {
     int                       present;
@@ -223,6 +240,11 @@ typedef struct VIRTIO_GPU_DEV {
     uint32_t                  fb_resource_id;    // resource_id usado no SET_SCANOUT
     uint64_t                  fb_phys;           // base fisica do FB DMA
     volatile uint32_t*        framebuffer;       // ponteiro virtual (== phys: identidade)
+
+    // Cursor de hardware (cursor queue).
+    int                       cursor_ok;         // UPDATE_CURSOR concluido
+    uint64_t                  cursor_phys;       // base fisica do bitmap 64x64 DMA
+    uint32_t                  cursor_resource_id;
 } VIRTIO_GPU_DEV;
 
 static VIRTIO_GPU_DEV g_vgpu = {0};
@@ -1259,3 +1281,88 @@ uint32_t virtio_gpu_fb_width(void)      { return g_vgpu.fb_width; }
 uint32_t virtio_gpu_fb_height(void)     { return g_vgpu.fb_height; }
 uint32_t virtio_gpu_fb_pitch(void)      { return g_vgpu.fb_pitch; }
 volatile uint32_t* virtio_gpu_framebuffer(void) { return g_vgpu.framebuffer; }
+
+// ============================================================================
+//  Cursor de HARDWARE — cursor queue (spec sec. 5.7.7).
+//
+//  QEMU processa UPDATE_CURSOR/MOVE_CURSOR e empurra o chain de volta no used
+//  ring com len=0 (NAO escreve resposta) — entao mandamos UM descriptor
+//  read-only (sem WRITE, sem NEXT). O buffer do comando e' um unico kmalloc
+//  reutilizado (DMA-safe: heap dentro da identidade de 1 GiB, virt==phys; e o
+//  send espera a resposta por polling antes de retornar, entao reusar e' seguro).
+// ============================================================================
+static struct virtio_gpu_update_cursor* s_cursor_cmd = 0;
+
+static void virtio_gpu_send_cursor_cmd(const void* req, uint32_t len) {
+    if (!g_vgpu.queues_ok) return;
+    VIRTIO_QUEUE* q = &g_vgpu.cursorq;
+    uint16_t h = virtio_queue_alloc_desc(q);
+    if (h == VIRTQ_DESC_FREE_END) { kputs("[vgpu] cursorq: sem descriptors livres\n"); return; }
+    q->desc[h].addr  = (uint64_t)(uintptr_t)req;
+    q->desc[h].len   = len;
+    q->desc[h].flags = 0;          // read-only: device le; sem WRITE e sem NEXT
+    q->desc[h].next  = 0;
+    mmio_mb();
+    virtio_queue_submit(q, h);
+    (void)virtio_queue_wait_response(q);   // device empurra (len=0); libera o chain
+}
+
+int virtio_gpu_cursor_init(const uint32_t* img, uint32_t hot_x, uint32_t hot_y,
+                           uint32_t init_x, uint32_t init_y) {
+    if (!g_vgpu.queues_ok || !g_vgpu.display_ok || !img) return 0;
+    if (g_vgpu.cursor_ok) return 1;
+
+    const uint32_t W = VIRTIO_GPU_CURSOR_W, H = VIRTIO_GPU_CURSOR_H;
+    uint32_t bytes = W * H * 4;                       // 64*64*4 = 16384
+    uint64_t pages = (bytes + 0xFFFu) / 4096u;        // 4 paginas
+    uint64_t phys  = pmm_alloc_contiguous(pages);
+    if (!phys) { kputs("[vgpu] cursor: pmm_alloc_contiguous falhou\n"); return 0; }
+    volatile uint32_t* dst = (volatile uint32_t*)(uintptr_t)phys;
+    for (uint32_t i = 0; i < W * H; i++) dst[i] = img[i];   // copia o bitmap p/ o DMA
+
+    // Recurso 2D do cursor (id=2) + backing + upload — tudo na controlq.
+    uint32_t t = virtio_gpu_cmd_resource_create_2d(VIRTIO_GPU_CURSOR_RESOURCE_ID,
+                                                   VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM, W, H);
+    if (t != VIRTIO_GPU_RESP_OK_NODATA) { kputs("[vgpu] cursor: CREATE_2D falhou\n"); return 0; }
+    t = virtio_gpu_cmd_resource_attach_backing(VIRTIO_GPU_CURSOR_RESOURCE_ID, phys, bytes);
+    if (t != VIRTIO_GPU_RESP_OK_NODATA) { kputs("[vgpu] cursor: ATTACH_BACKING falhou\n"); return 0; }
+    t = virtio_gpu_cmd_transfer_to_host_2d(VIRTIO_GPU_CURSOR_RESOURCE_ID, 0, 0, 0, W, H);
+    if (t != VIRTIO_GPU_RESP_OK_NODATA) { kputs("[vgpu] cursor: TRANSFER falhou\n"); return 0; }
+
+    // Buffer de comando reutilizavel (UPDATE agora, MOVE depois).
+    if (!s_cursor_cmd)
+        s_cursor_cmd = (struct virtio_gpu_update_cursor*)kmalloc(sizeof(*s_cursor_cmd));
+    if (!s_cursor_cmd) { kputs("[vgpu] cursor: kmalloc do cmd falhou\n"); return 0; }
+
+    // UPDATE_CURSOR (cursor queue): liga o recurso 2 como cursor do scanout 0.
+    vq_bzero(s_cursor_cmd, sizeof(*s_cursor_cmd));
+    virtio_gpu_hdr_init(&s_cursor_cmd->hdr, VIRTIO_GPU_CMD_UPDATE_CURSOR);
+    s_cursor_cmd->pos.scanout_id = 0;
+    s_cursor_cmd->pos.x = init_x;
+    s_cursor_cmd->pos.y = init_y;
+    s_cursor_cmd->resource_id = VIRTIO_GPU_CURSOR_RESOURCE_ID;
+    s_cursor_cmd->hot_x = hot_x;
+    s_cursor_cmd->hot_y = hot_y;
+    virtio_gpu_send_cursor_cmd(s_cursor_cmd, sizeof(*s_cursor_cmd));
+
+    g_vgpu.cursor_phys        = phys;
+    g_vgpu.cursor_resource_id = VIRTIO_GPU_CURSOR_RESOURCE_ID;
+    g_vgpu.cursor_ok          = 1;
+    kputs("[vgpu] cursor HW: recurso 64x64 BGRA + UPDATE_CURSOR (hotspot ");
+    kput_dec(hot_x); kputc(','); kput_dec(hot_y); kputs(") em (");
+    kput_dec(init_x); kputc(','); kput_dec(init_y); kputs(") OK\n");
+    return 1;
+}
+
+void virtio_gpu_cursor_move(uint32_t x, uint32_t y) {
+    if (!g_vgpu.cursor_ok || !s_cursor_cmd) return;
+    vq_bzero(s_cursor_cmd, sizeof(*s_cursor_cmd));
+    virtio_gpu_hdr_init(&s_cursor_cmd->hdr, VIRTIO_GPU_CMD_MOVE_CURSOR);
+    s_cursor_cmd->pos.scanout_id = 0;
+    s_cursor_cmd->pos.x = x;
+    s_cursor_cmd->pos.y = y;
+    s_cursor_cmd->resource_id = 0;     // ignorado no MOVE_CURSOR
+    virtio_gpu_send_cursor_cmd(s_cursor_cmd, sizeof(*s_cursor_cmd));
+}
+
+int virtio_gpu_cursor_ok(void) { return g_vgpu.cursor_ok; }

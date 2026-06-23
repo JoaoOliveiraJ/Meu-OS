@@ -411,6 +411,40 @@ static void draw_cursor_sprite(void) {
     }
 }
 
+// ============================================================================
+//  Cursor de HARDWARE (virtio-gpu cursor queue). Quando o backend o tem, o HOST
+//  compoe o cursor sobre o scanout: mover o cursor NAO recompoe o desktop. O
+//  sprite de software (draw_cursor_sprite) vira fallback (ex.: Bochs VBE).
+//
+//  A imagem 64x64 BGRA sai do MESMO s_cursor_bitmap 12x16: 'X' = preto opaco
+//  (0xFF000000), '.' = branco opaco (0xFFFFFFFF), ' ' = transparente (alpha=0).
+//  Hotspot (0,0) = ponta da seta no canto sup-esq (igual ao sprite SW).
+// ============================================================================
+static int s_hw_cursor       = 0;   // 1 = cursor de hardware ativo
+static int s_hw_cursor_tried = 0;   // ja tentamos inicializar (uma vez)
+
+static void win32k_hw_cursor_try_init(void) {
+    if (s_hw_cursor_tried) return;
+    s_hw_cursor_tried = 1;
+    if (!gpu_active()) return;
+    static uint32_t img[64 * 64];                  // BSS (16 KiB), nao stack
+    for (int i = 0; i < 64 * 64; i++) img[i] = 0x00000000u;   // transparente
+    for (int row = 0; row < 16; row++) {
+        const char* line = s_cursor_bitmap[row];
+        for (int col = 0; col < 12; col++) {
+            char c = line[col];
+            if (c == ' ') continue;
+            img[row * 64 + col] = (c == 'X') ? 0xFF000000u    // preto opaco
+                                             : 0xFFFFFFFFu;   // branco opaco
+        }
+    }
+    s_hw_cursor = gpu_cursor_set(img, 0, 0, (int)s_cursor_x, (int)s_cursor_y);
+    if (s_hw_cursor)
+        kputs("[win32k] cursor de HARDWARE ativo (virtio-gpu); sprite SW desligado\n");
+    else
+        kputs("[win32k] sem cursor de HW; usando sprite de software (recompose)\n");
+}
+
 void win32k_compose(void) {
     ensure_fb();
     // Backend GPU OU mode13h precisa estar ativo.
@@ -451,8 +485,9 @@ void win32k_compose(void) {
 
     // FASE 11 — Sprite do cursor por cima de tudo (apos taskbar+shell).
     // Desenhado apenas se ja houve algum evento de mouse (cursor inicializado),
-    // para nao poluir as composicoes anteriores ao init do PS/2.
-    if (s_cursor_initialized) draw_cursor_sprite();
+    // para nao poluir as composicoes anteriores ao init do PS/2. Com cursor de
+    // HARDWARE ativo, o HOST desenha o cursor — NAO desenhamos o sprite SW aqui.
+    if (s_cursor_initialized && !s_hw_cursor) draw_cursor_sprite();
 
     // FASE 10.4 — Apos cada compose, "apresenta" o frame ao display. Em
     // virtio-gpu isso envia TRANSFER_TO_HOST_2D + RESOURCE_FLUSH para o host
@@ -727,6 +762,7 @@ void win32k_on_mouse_event(int32_t dx, int32_t dy, uint32_t buttons) {
         s_cursor_x = scr_width()  / 2;
         s_cursor_y = scr_height() / 2;
         s_cursor_initialized = 1;
+        win32k_hw_cursor_try_init();   // tenta ligar o cursor de hardware (1x)
     }
 
     // Aplica delta com clamp aos limites da tela.
@@ -739,6 +775,12 @@ void win32k_on_mouse_event(int32_t dx, int32_t dy, uint32_t buttons) {
     if (ny >= SH) ny = SH - 1;
     s_cursor_x = nx;
     s_cursor_y = ny;
+
+    // Cursor de HARDWARE: reposiciona via cursor queue (barato, sem recompor) a
+    // CADA evento — antes da shell e do hit-test, entao vale para todos os
+    // caminhos. Se nao houver cursor de HW, isto e' no-op e o sprite SW + o
+    // recompose ao final cuidam do desenho.
+    if (s_hw_cursor) gpu_cursor_move((int)s_cursor_x, (int)s_cursor_y);
 
     // FASE 12 — A SHELL Windows 10 ve o evento PRIMEIRO. Se ela consumir
     // (clique no Start button, no botao de uma janela na taskbar, em
@@ -809,14 +851,15 @@ void win32k_on_mouse_event(int32_t dx, int32_t dy, uint32_t buttons) {
     if (hwnd) { kputs(" sobre HWND #"); kput_dec((uint64_t)w->id); }
     kputc('\n');
 
-    // REDESENHA. O cursor e' um sprite composto no framebuffer; sem recompor +
-    // present, a POSICAO muda mas a TELA fica parada (cursor "preso" no lugar).
-    // Espelha win32k_set_cursor (linha ~831). virtio_gpu_present faz polling no
-    // used ring (nao depende de IRQ), entao e' seguro chamar daqui mesmo no
-    // contexto da IRQ12 (IF=0). CUSTO: recompoe o desktop inteiro por movimento
-    // — caro sob TCG; otimizacao futura = cursor de HARDWARE via a cursor queue
-    // do virtio-gpu (ou save/restore-under-cursor), sem recompor tudo.
-    if (s_was_active) win32k_compose();
+    // REDESENHA o CONTEUDO so quando preciso:
+    //  - cursor de HARDWARE: recompoe APENAS se o conteudo mudou (clique mudou
+    //    foco/estado). Movimento puro NAO recompoe — o host ja desenha o cursor
+    //    (mexido por gpu_cursor_move acima). É isto que tira o lag.
+    //  - sprite de SOFTWARE (fallback): recompoe sempre, pois o sprite precisa
+    //    ser redesenhado na nova posicao. virtio_gpu_present faz polling (nao
+    //    depende de IRQ), seguro no contexto da IRQ12 (IF=0).
+    int content_changed = (changed != 0);   // clique => possivel mudanca de foco
+    if (s_was_active && (!s_hw_cursor || content_changed)) win32k_compose();
 }
 
 // ============================================================================
@@ -834,10 +877,13 @@ void win32k_set_cursor(int32_t x, int32_t y) {
     s_cursor_x = x;
     s_cursor_y = y;
     s_cursor_initialized = 1;
+    win32k_hw_cursor_try_init();
     kputs("[win32k] SetCursorPos -> (");
     kput_dec((uint64_t)s_cursor_x); kputc(',');
     kput_dec((uint64_t)s_cursor_y); kputs(")\n");
-    if (s_was_active) win32k_compose();
+    // Cursor de HW: so reposiciona (sem recompor). Senao, recompoe o sprite SW.
+    if (s_hw_cursor)        gpu_cursor_move((int)s_cursor_x, (int)s_cursor_y);
+    else if (s_was_active)  win32k_compose();
 }
 
 // ============================================================================

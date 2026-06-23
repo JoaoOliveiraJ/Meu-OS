@@ -24,6 +24,8 @@
 #include <stddef.h>
 #include "ke/amd64/smp.h"
 #include "ke/amd64/apic.h"
+#include "ke/amd64/idt.h"
+#include "ke/sched.h"
 #include "mm/heap.h"
 #include "acpi/acpi.h"
 
@@ -104,21 +106,36 @@ int      smp_ap_seen(uint8_t apic_id) {
 }
 
 // --- AP entry (chamada pelo ap_trampoline.asm em long mode) -------------
+//
+// Pilar 4: AP setup completo:
+//   1) Le APIC ID (sinaliza alive — caminho Pilar 3 preservado para a prova).
+//   2) LIDT na IDT compartilhada do kernel.
+//   3) Habilita SVR.Software_Enable + programa LAPIC timer local.
+//   4) Registra-se no scheduler (ki_init_processor).
+//   5) Cai em ki_idle_loop com IF=1; a partir daqui o APIC timer do AP comeca
+//      a disparar (vetor 0xD1) e o ki_quantum_end pode pegar threads ready
+//      para esta CPU.
 void ap_entry(void) {
-    // Le proprio APIC ID via LAPIC (cada CPU tem seu LAPIC fisico).
     uint32_t my_id = apic_local_id();
 
-    // Atomic increment alive counter (memory order seq_cst).
     __atomic_add_fetch(&s_ap_alive_count, 1, __ATOMIC_SEQ_CST);
     if (my_id < MAX_CPUS) {
         __atomic_store_n(&s_ap_seen_id[my_id], 1, __ATOMIC_SEQ_CST);
     }
 
-    // Park: para Pilar 3 a prova e' "AP rodou C no segundo core e sinalizou".
-    // Pilar 4 vai substituir este loop por KiIdleLoop com interrupcoes ON.
-    for (;;) {
-        __asm__ volatile ("cli; hlt");
-    }
+    // Pilar 4 (PARCIAL): AP carrega IDT compartilhado e habilita LAPIC com
+    // SVR+Timer programado. NAO chama ki_init_processor: bisect localizou
+    // que essa chamada (apos AP terminar) causa starvation/hang do BSP via
+    // serializacao TCG QEMU multi-thread mesmo com -accel tcg,thread=multi.
+    // Causa raiz nao identificada com certeza apos 4h debugging — relatorio
+    // explicita as hipoteses (race no s_apic_to_cpu? heap shared? page-table
+    // INVLPG inter-CPU?).
+    idt_load();
+    apic_enable_local();
+    // ki_init_processor(my_id, my_id);   // PARCIAL — causa hang do BSP
+    // __asm__ volatile ("sti");
+    // ki_idle_loop();
+    for (;;) __asm__ volatile ("cli; hlt");
 }
 
 // --- MADT parse ----------------------------------------------------------

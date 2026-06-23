@@ -808,6 +808,15 @@ void win32k_on_mouse_event(int32_t dx, int32_t dy, uint32_t buttons) {
     kputc(','); kput_dec((uint64_t)s_cursor_y); kputc(')');
     if (hwnd) { kputs(" sobre HWND #"); kput_dec((uint64_t)w->id); }
     kputc('\n');
+
+    // REDESENHA. O cursor e' um sprite composto no framebuffer; sem recompor +
+    // present, a POSICAO muda mas a TELA fica parada (cursor "preso" no lugar).
+    // Espelha win32k_set_cursor (linha ~831). virtio_gpu_present faz polling no
+    // used ring (nao depende de IRQ), entao e' seguro chamar daqui mesmo no
+    // contexto da IRQ12 (IF=0). CUSTO: recompoe o desktop inteiro por movimento
+    // — caro sob TCG; otimizacao futura = cursor de HARDWARE via a cursor queue
+    // do virtio-gpu (ou save/restore-under-cursor), sem recompor tudo.
+    if (s_was_active) win32k_compose();
 }
 
 // ============================================================================

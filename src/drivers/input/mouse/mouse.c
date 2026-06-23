@@ -265,9 +265,11 @@ void mouse_irq(void) {
     // Loga apenas algumas IRQs (cada 1: util pro headless; o mouse fica
     // quieto sem movimento, entao nao floodaria).
     kputs("[mouse] IRQ12 #"); kput_dec(s_irq_count);
-    kputs(": dx="); kput_dec((uint64_t)(int64_t)delta_x);
-    kputs(" dy="); kput_dec((uint64_t)(int64_t)delta_y);
-    kputs(" buttons=0x"); kput_hex((uint64_t)btns); kputc('\n');
+    kputs(": dx="); if (delta_x < 0) kputc('-');
+    kput_dec((uint64_t)(delta_x < 0 ? -delta_x : delta_x));
+    kputs(" dy="); if (delta_y < 0) kputc('-');
+    kput_dec((uint64_t)(delta_y < 0 ? -delta_y : delta_y));
+    kputs(" buttons="); kput_hex((uint64_t)btns); kputc('\n');
 
     // Posta o evento ao win32k. Ele atualiza a posicao do cursor (clamp),
     // faz hit-test e roteia WM_MOUSE* para a janela alvo.

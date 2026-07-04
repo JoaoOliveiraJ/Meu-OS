@@ -126,6 +126,20 @@ typedef ULONGLONG KSPIN_LOCK, *PKSPIN_LOCK;
 // FASE FUNDACAO (Item 3) — handle de queued spinlock (in-stack).
 typedef struct _KLOCK_QUEUE_HANDLE { PKSPIN_LOCK LockPtr; KIRQL OldIrql; } KLOCK_QUEUE_HANDLE, *PKLOCK_QUEUE_HANDLE;
 
+// FASE FUNDACAO (Item 2) — KDPC (Deferred Procedure Call), layout NT x64 (0x40).
+typedef struct _KDPC {
+    UCHAR  Type;                // +0x00
+    UCHAR  Importance;          // +0x01
+    USHORT Number;              // +0x02  (0xFFFF = nao enfileirado)
+    LIST_ENTRY DpcListEntry;    // +0x08
+    PVOID  DeferredRoutine;     // +0x18
+    PVOID  DeferredContext;     // +0x20
+    PVOID  SystemArgument1;     // +0x28
+    PVOID  SystemArgument2;     // +0x30
+    PVOID  DpcData;             // +0x38
+} KDPC, *PKDPC;
+typedef void (NTAPI *PKDEFERRED_ROUTINE)(PKDPC Dpc, PVOID Ctx, PVOID Arg1, PVOID Arg2);
+
 // Argumentos do KeWaitForSingleObject / KeDelayExecutionThread.
 typedef enum _KWAIT_REASON {
     Executive = 0, FreePage, PageIn, PoolAllocation, DelayExecution, Suspended,

@@ -1115,6 +1115,9 @@ void kmain(uint32_t mb_info) {
     // para KeStallExecutionProcessor e KeQueryPerformanceCounter reais.
     extern void hal_tsc_calibrate(void);
     hal_tsc_calibrate();
+    // FASE FUNDACAO (Item 2): inicializa o subsistema de DPC (fila per-CPU).
+    extern void KiInitializeDpcSubsystem(void);
+    KiInitializeDpcSubsystem();
     // FASE 7.7: CR4 + XCR0. Habilita OSXSAVE (e xsetbv XCR0=0x7 = X87+SSE+AVX
     // quando suportado) e CR4.SMEP/UMIP/PCIDE quando o CPU expoe. CADA bit e
     // gateado por CPUID antes de ser setado: bit reservado em CR4 = #GP no boot.
@@ -1151,6 +1154,9 @@ void kmain(uint32_t mb_info) {
     extern void syscall_msr_init(void);
     syscall_msr_init();
     kputs("[ok] HAL: portas de I/O + MMIO + enumeracao PCI + CPU info (CPUID) + KUSER_SHARED_DATA + KPCR/GS_BASE + SYSCALL\n");
+    // FASE FUNDACAO (Item 2): prova rapida do DPC (gs/KPCR ja prontos apos kpcr_init).
+    extern void KiDpcSelfTest(void);
+    KiDpcSelfTest();
 
     // --- FASE 10.1: detecta virtio-gpu (modern, virtio 1.1) ---
     // Caminha PCI capabilities, mapeia common/notify/isr/device cfg fora da

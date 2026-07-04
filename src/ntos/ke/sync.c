@@ -151,7 +151,14 @@ void NTAPI KeRaiseIrql_k(KIRQL NewIrql, KIRQL* OldIrql) {
 KIRQL NTAPI KfRaiseIrql_k(KIRQL NewIrql) { KIRQL old; KeRaiseIrql_k(NewIrql, &old); return old; }
 KIRQL NTAPI KeRaiseIrqlToDpcLevel_k(void) { KIRQL old; KeRaiseIrql_k(DISPATCH_LEVEL, &old); return old; }
 void NTAPI KeLowerIrql_k(KIRQL NewIrql) {
-    ki_irql_write(NewIrql);   // Item 2 adiciona a drenagem de DPC aqui
+    // FASE FUNDACAO (Item 2): ao cair abaixo de DISPATCH, drena a fila de DPC
+    // pendente do CPU corrente (enquanto ainda em DISPATCH), depois baixa.
+    KIRQL cur = KeGetCurrentIrql_k();
+    if (cur >= DISPATCH_LEVEL && NewIrql < DISPATCH_LEVEL) {
+        extern void KiCheckDpcDrain(void);
+        KiCheckDpcDrain();
+    }
+    ki_irql_write(NewIrql);
 }
 void NTAPI KfLowerIrql_k(KIRQL NewIrql) { KeLowerIrql_k(NewIrql); }
 

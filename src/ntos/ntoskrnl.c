@@ -31,6 +31,7 @@
 #include "mm/section.h"
 #include "cm/registry.h"
 #include "ke/sync.h"
+#include "ke/dpc.h"                 // FASE FUNDACAO (Item 2): DPC real
 #include "ex/pool.h"
 #include "ps/systhread.h"
 #include "ke/amd64/kpcr.h"          // FASE 7.2: KPCR/GS_BASE
@@ -596,10 +597,7 @@ __attribute__((ms_abi)) static int NT_vsprintf_s(char* buf, SIZE_T sz, const cha
 }
 
 // ---- Ke* faltantes (no-ops seguros) ----
-__attribute__((ms_abi)) static void NT_KeInitializeDpc(PVOID Dpc, PVOID Routine, PVOID Ctx) {
-    (void)Routine; (void)Ctx;
-    if (Dpc) { for (int i = 0; i < 64; i++) ((uint8_t*)Dpc)[i] = 0; }
-}
+// NT_KeInitializeDpc removido — KeInitializeDpc agora e real (KeInitializeDpc_k em ke/dpc.c, Item 2).
 __attribute__((ms_abi)) static void NT_KeInitializeTimer(PVOID Timer) {
     if (Timer) { for (int i = 0; i < 64; i++) ((uint8_t*)Timer)[i] = 0; }
 }
@@ -1106,7 +1104,7 @@ static const struct { const char* name; void* fn; } g_ntexports[] = {
     EX("_snwprintf_s",                 NT_swprintf_s),
     EX("swprintf",                     NT_swprintf_s),
     // Ke* extras
-    EX("KeInitializeDpc",              NT_KeInitializeDpc),
+    EX("KeInitializeDpc",              KeInitializeDpc_k),
     EX("KeInitializeTimer",            NT_KeInitializeTimer),
     EX("KeSetTimer",                   NT_KeSetTimer),
     EX("KeCancelTimer",                NT_KeCancelTimer),
@@ -1228,6 +1226,11 @@ static const struct { const char* name; void* fn; } g_ntexports[] = {
     EX("KfReleaseSpinLock",                KfReleaseSpinLock_k),
     EX("KeAcquireInStackQueuedSpinLock",   KeAcquireInStackQueuedSpinLock_k),
     EX("KeReleaseInStackQueuedSpinLock",   KeReleaseInStackQueuedSpinLock_k),
+    // FASE FUNDACAO (Item 2): DPC real. KeInitializeDpc repontado no lugar
+    // (~1109); Insert/Remove/SetImportance adicionados aqui (append-only).
+    EX("KeInsertQueueDpc",                 KeInsertQueueDpc_k),
+    EX("KeRemoveQueueDpc",                 KeRemoveQueueDpc_k),
+    EX("KeSetImportanceDpc",               KeSetImportanceDpc_k),
 
     { 0, 0 }
 };

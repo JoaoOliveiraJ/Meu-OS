@@ -37,7 +37,9 @@ Referência do plano: `C:\Users\joao\.claude\plans\lovely-baking-whale.md`.
 
 Ordem noturna: **4 → 1 → 3 → [2] → parada segura**. Deferidos p/ supervisão (tocam contexto de troca ou trajetória do pintok): **0a+5** (reentrância do swap + waits — são uma unidade, testar juntas com você acordado), **6** (KTIMER), **7** (Ex), **trilha I/O** inteira. Motivo: mexer no caminho de context-switch (`ki_swap_context`) ou tornar `KeWait` bloqueante sem supervisão é o maior risco à trajetória do pintok.
 
-| 2 | DPC | ⏸️ DEFERIDO | — | — | — | — |
+| 2 | DPC (fila per-CPU + drena no KeLowerIrql) | ✅ | ✅ idêntico (CPUID x3, C0000365) | preempção viva (51 beats) | DPC disparou inline OK | (este) |
+
+**Sessão retomada com o usuário presente ("Continua") — Item 2 (DPC) feito e verificado.** Próximos (supervisionados): Item 0a+5 (reentrância + waits bloqueantes — tocam pintok, verificar wait-usage antes), Item 6 (KTIMER), Item 7 (Ex).
 
 ---
 

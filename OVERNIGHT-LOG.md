@@ -41,7 +41,11 @@ Ordem noturna: **4 → 1 → 3 → [2] → parada segura**. Deferidos p/ supervi
 | 0a | Reentrância do swap (irq_save/restore) | ✅ | ✅ idêntico | preempção viva (60 beats) | — | 4aec7e6 |
 | 5 | Waits bloqueantes reais (gated) + fix terminate-freeze | ✅ | ✅ idêntico (CPUID x3, C0000365) | preempção viva (48 beats) | **block+wake ACORDOU OK** | 9aacf68 |
 | flag | `g_ke_legacy_mode` + retrofit waits | ✅ | ✅ (auto-legacy p/ pintok) | — | wait-test real OK | dfd7026 |
-| 6 | KTIMER real (flag-gated) | ✅ | ✅ idêntico (CPUID x3, C0000365) | 45 beats | **timer EXPIROU→OK** | (este) |
+| 6 | KTIMER real (flag-gated) | ✅ | ✅ idêntico (CPUID x3, C0000365) | 45 beats | **timer EXPIROU→OK** | 112ba70 |
+| 7 | Primitivos Ex (fast mutex/ERESOURCE/lookaside/interlocked, flag-gated) | ✅ | ✅ idêntico (CPUID x3, C0000365) | 54 beats | **fast mutex + lookaside OK** | (este) |
+
+### ✅ FUNDAÇÃO Ke/HAL COMPLETA
+Todos os 4 self-tests passam num boot: `[dpc] PROVA OK`, `[ex-test] OK`, `[wait-test] ACORDOU`, `[timer-test] EXPIROU→OK`. Pintok intacto o tempo todo (auto-legacy). A flag `g_ke_legacy_mode=1` reverte tudo pro antigo. Próximo (nova fase, supervisionada): **trilha de drivers I/O** (IRP layout NT, device stacks, `IoConnectInterrupt`, PnP, DMA) — plano em `lovely-baking-whale.md`.
 
 **Sessão retomada ("Continua").** pintok **não** usa `KeWaitForSingleObject`/`KeInitializeEvent` (baseline) → Item 5 gated por contexto (só threads worker reais bloqueiam; contexto boot/idle, onde o pintok roda, mantém auto-resolve). O auto-teste provou block+wake ponta-a-ponta, e de bônus corrigiu um **freeze latente de término de thread** (`cli;hlt` → `yield`).
 

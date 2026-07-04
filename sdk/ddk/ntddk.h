@@ -153,6 +153,37 @@ typedef struct _KTIMER {
 } KTIMER, *PKTIMER;
 typedef enum _TIMER_TYPE { NotificationTimer = 0, SynchronizationTimer = 1 } TIMER_TYPE;
 
+// FASE FUNDACAO (Item 7) — primitivos Ex (layout simplificado; nossos drivers
+// compilam contra ISTO. pintok os usa via modo legado (no-op) -> layout nao
+// importa p/ ele).
+typedef struct _FAST_MUTEX {
+    LONG   Count;          // 1=livre, <=0 preso/contencao
+    PVOID  Owner;
+    ULONG  Contention;
+    ULONG  _pad;
+    KEVENT Event;
+    ULONG  OldIrql;
+} FAST_MUTEX, *PFAST_MUTEX;
+
+typedef struct _ERESOURCE {
+    LONG       ActiveCount;      // >0 = N leitores (shared); -1 = exclusivo
+    LONG       ExclusiveWaiters;
+    LONG       SharedWaiters;
+    PVOID      OwnerThread;
+    KEVENT     ExclusiveEvent;
+    KSEMAPHORE SharedSem;
+} ERESOURCE, *PERESOURCE;
+
+typedef struct _NPAGED_LOOKASIDE_LIST {
+    void*      ListHead;   // LIFO: o primeiro ptr de cada bloco livre aponta o proximo
+    KSPIN_LOCK Lock;
+    uint32_t   Size;
+    uint32_t   Tag;
+    uint32_t   Depth;
+    uint32_t   _pad;
+} NPAGED_LOOKASIDE_LIST, *PNPAGED_LOOKASIDE_LIST;
+typedef NPAGED_LOOKASIDE_LIST PAGED_LOOKASIDE_LIST, *PPAGED_LOOKASIDE_LIST;
+
 // Argumentos do KeWaitForSingleObject / KeDelayExecutionThread.
 typedef enum _KWAIT_REASON {
     Executive = 0, FreePage, PageIn, PoolAllocation, DelayExecution, Suspended,

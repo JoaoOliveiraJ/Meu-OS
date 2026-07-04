@@ -33,6 +33,7 @@
 #include "ke/sync.h"
 #include "ke/dpc.h"                 // FASE FUNDACAO (Item 2): DPC real
 #include "ke/timer.h"               // FASE FUNDACAO (Item 6): KTIMER real
+#include "ex/ex_sync.h"             // FASE FUNDACAO (Item 7): primitivos Ex reais
 #include "ex/pool.h"
 #include "ps/systhread.h"
 #include "ke/amd64/kpcr.h"          // FASE 7.2: KPCR/GS_BASE
@@ -1232,6 +1233,26 @@ static const struct { const char* name; void* fn; } g_ntexports[] = {
     EX("KeInitializeTimerEx",              KeInitializeTimerEx_k),
     EX("KeSetTimerEx",                     KeSetTimerEx_k),
     EX("KeReadStateTimer",                 KeReadStateTimer_k),
+    // FASE FUNDACAO (Item 7): primitivos Ex reais (flag-gated). Append-only.
+    EX("ExInitializeFastMutex",            ExInitializeFastMutex_k),
+    EX("ExAcquireFastMutex",               ExAcquireFastMutex_k),
+    EX("ExReleaseFastMutex",               ExReleaseFastMutex_k),
+    EX("ExTryToAcquireFastMutex",          ExTryToAcquireFastMutex_k),
+    EX("ExAcquireFastMutexUnsafe",         ExAcquireFastMutexUnsafe_k),
+    EX("ExReleaseFastMutexUnsafe",         ExReleaseFastMutexUnsafe_k),
+    EX("ExInitializeResourceLite",         ExInitializeResourceLite_k),
+    EX("ExAcquireResourceExclusiveLite",   ExAcquireResourceExclusiveLite_k),
+    EX("ExAcquireResourceSharedLite",      ExAcquireResourceSharedLite_k),
+    EX("ExReleaseResourceLite",            ExReleaseResourceLite_k),
+    EX("ExDeleteResourceLite",             ExDeleteResourceLite_k),
+    EX("ExInitializeNPagedLookasideList",  ExInitializeNPagedLookasideList_k),
+    EX("ExAllocateFromNPagedLookasideList",ExAllocateFromNPagedLookasideList_k),
+    EX("ExFreeToNPagedLookasideList",      ExFreeToNPagedLookasideList_k),
+    EX("ExDeleteNPagedLookasideList",      ExDeleteNPagedLookasideList_k),
+    EX("ExInterlockedInsertHeadList",      ExInterlockedInsertHeadList_k),
+    EX("ExInterlockedInsertTailList",      ExInterlockedInsertTailList_k),
+    EX("ExInterlockedRemoveHeadList",      ExInterlockedRemoveHeadList_k),
+    EX("ExRaiseStatus",                    ExRaiseStatus_k),
 
     { 0, 0 }
 };

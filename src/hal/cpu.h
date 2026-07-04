@@ -34,7 +34,13 @@ const hal_cpu_info_t* hal_cpu_get(void);
 // Funcoes Ke* publicas do NT que dependem disso.
 ULONG     NTAPI KeQueryActiveProcessorCount_k(void* ActiveProcessors);
 ULONGLONG NTAPI KeQueryActiveProcessors_k(void);
-void      NTAPI KeQueryPerformanceCounter_k(PLARGE_INTEGER PerformanceFrequency);
+LARGE_INTEGER NTAPI KeQueryPerformanceCounter_k(PLARGE_INTEGER PerformanceFrequency);
 
 // Hal Get/Set (apoiados em rdtsc + PIT).
 uint64_t  hal_rdtsc(void);
+
+// FASE FUNDACAO: calibracao do TSC (contra g_ticks/PIT) + stall real + o
+// KeQueryPerformanceCounter agora retorna o contador (TSC) de verdade.
+void      hal_tsc_calibrate(void);
+uint64_t  hal_tsc_hz(void);
+void      NTAPI KeStallExecutionProcessor_k(ULONG MicroSeconds);

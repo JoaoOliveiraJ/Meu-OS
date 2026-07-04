@@ -1111,6 +1111,10 @@ void kmain(uint32_t mb_info) {
     kputs("[apic] LVT timer do BSP ATIVO (relogio/g_ticks correndo; preempcao liga adiante)\n");
 
     hal_cpu_init();        // FASE 7: CPUID -> vendor/family/model + features (cpu.c)
+    // FASE FUNDACAO: calibra o TSC (contra g_ticks @ 100 Hz, timer ja correndo)
+    // para KeStallExecutionProcessor e KeQueryPerformanceCounter reais.
+    extern void hal_tsc_calibrate(void);
+    hal_tsc_calibrate();
     // FASE 7.7: CR4 + XCR0. Habilita OSXSAVE (e xsetbv XCR0=0x7 = X87+SSE+AVX
     // quando suportado) e CR4.SMEP/UMIP/PCIDE quando o CPU expoe. CADA bit e
     // gateado por CPUID antes de ser setado: bit reservado em CR4 = #GP no boot.

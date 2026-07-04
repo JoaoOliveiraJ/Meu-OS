@@ -88,8 +88,56 @@ uint64_t hal_rdtsc(void) {
     __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
 }
-void NTAPI KeQueryPerformanceCounter_k(PLARGE_INTEGER PerformanceFrequency) {
-    if (PerformanceFrequency) PerformanceFrequency->QuadPart = 100;   // 100 Hz (PIT)
-    // RAX retornaria o valor; mas a assinatura ms_abi devolveria LARGE_INTEGER.
-    // Drivers que so leem Frequency ficam bem.
+// ============================================================================
+//  FASE FUNDACAO — TSC calibrado + KeStallExecutionProcessor real +
+//  KeQueryPerformanceCounter com retorno de contador real.
+//
+//  pintok NAO chama nenhuma destas no baseline (verificado) -> trajetoria
+//  intocada. Puramente aditivo: KeStallExecutionProcessor sai de generic_zero_
+//  stub (retornava instantaneo) para um busy-spin real por TSC.
+// ============================================================================
+static uint64_t s_tsc_hz = 0;
+uint64_t hal_tsc_hz(void) { return s_tsc_hz; }
+
+// Calibra a frequencia do TSC contra o g_ticks (PIT/APIC @ 100 Hz). Mede o TSC
+// ao longo de ~100 ms (10 ticks) e extrapola p/ Hz. Chamada no boot com o timer
+// ja correndo e IF=1. Guarda de seguranca: se o timer nao avancar, usa 1 GHz e
+// NAO trava o boot (critico).
+void hal_tsc_calibrate(void) {
+    const uint64_t GUARD_MAX = 20000000000ULL;   // teto de spins anti-hang
+    uint64_t guard = 0;
+    uint64_t t0 = g_ticks;
+    while (g_ticks == t0) {
+        __asm__ volatile ("pause");
+        if (++guard > GUARD_MAX) { s_tsc_hz = 1000000000ULL;
+            kputs("[hal] TSC calibracao: timer parado -> 1 GHz default\n"); return; }
+    }
+    t0 = g_ticks;
+    uint64_t tsc0 = hal_rdtsc();
+    guard = 0;
+    while (g_ticks < t0 + 10) {
+        __asm__ volatile ("pause");
+        if (++guard > GUARD_MAX) break;
+    }
+    uint64_t dt = hal_rdtsc() - tsc0;
+    s_tsc_hz = dt ? dt * 10ULL : 1000000000ULL;
+    kputs("[hal] TSC calibrado: "); kput_dec(s_tsc_hz); kputs(" Hz\n");
+}
+
+// KeQueryPerformanceCounter: retorna o contador (TSC) em RAX; opcionalmente
+// preenche a frequencia. Assinatura NT real (retorno LARGE_INTEGER).
+LARGE_INTEGER NTAPI KeQueryPerformanceCounter_k(PLARGE_INTEGER PerformanceFrequency) {
+    LARGE_INTEGER r;
+    r.QuadPart = (LONGLONG)hal_rdtsc();
+    if (PerformanceFrequency)
+        PerformanceFrequency->QuadPart = (LONGLONG)(s_tsc_hz ? s_tsc_hz : 1000000000ULL);
+    return r;
+}
+
+// KeStallExecutionProcessor: busy-spin de N microssegundos via TSC. Legal em
+// QUALQUER IRQL (nao bloqueia, nao usa timer nem scheduler).
+void NTAPI KeStallExecutionProcessor_k(ULONG MicroSeconds) {
+    uint64_t hz = s_tsc_hz ? s_tsc_hz : 1000000000ULL;
+    uint64_t target = hal_rdtsc() + (hz / 1000000ULL) * (uint64_t)MicroSeconds;
+    while (hal_rdtsc() < target) __asm__ volatile ("pause");
 }

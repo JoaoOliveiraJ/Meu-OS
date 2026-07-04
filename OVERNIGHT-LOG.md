@@ -54,7 +54,10 @@ Achado: `IO_STACK_LOCATION` já está NT-correto; correções de layout só melh
 | 1a | DEVICE_OBJECT → offsets NT (`DeviceExtension@0x40`, `DeviceType@0x48`, `sizeof 0xB8`) + `_Static_assert` + fix bug Flags/type | ✅ | ✅ idêntico | 4/4 | 3f5afe2 |
 | 3 | Modelo de interrupção: `KINTERRUPT`/`IoConnectInterrupt`/`IoDisconnectInterrupt`/`KeSynchronizeExecution`/`HalGetInterruptVector` + `ioapic_set_irq_ex` (level/active-low/mask) + early-out no ISR (antes da cadeia legada) | ✅ | ✅ idêntico | 3/3 | 418707f |
 | 2 | Device stacks: `IoAttachDeviceToDeviceStack(Safe)`/`IoDetachDevice`/`IoGetAttachedDevice(Reference)`/`IoGetLowerDeviceObject` (flag-gated; side-table p/ lower device) | ✅ | ✅ idêntico | 4/4 + devstack | afcc4e3 |
-| 5 | HAL DMA: `HalGetDmaAdapter` + vtable `DMA_OPERATIONS` (AllocateCommonBuffer via `pmm_alloc_contiguous`, phys==virt); `HalAllocate/FreeCommonBuffer` flag-gated | ✅ | ✅ idêntico | 6/6 self-tests | (este) |
+| 5 | HAL DMA: `HalGetDmaAdapter` + vtable `DMA_OPERATIONS` (AllocateCommonBuffer via `pmm_alloc_contiguous`, phys==virt); `HalAllocate/FreeCommonBuffer` flag-gated | ✅ | ✅ idêntico | 6/6 self-tests | 3983df7 |
+| 1b | **IRP → layout NT x64** (`sizeof 0xC8`, `Tail.CurrentStackLocation@0xB8`, array traseiro de `IO_STACK_LOCATION`; `SystemBuffer`→`AssociatedIrp.SystemBuffer`) + macros inline `IoGetCurrent/Next/Skip/Copy` + `IoCallDriver` avança a stack. **72 sites em 8 arquivos** reescritos. `_Static_assert` de offsets | ✅ | ✅ idêntico | 7/7 self-tests | (este) |
+
+Fluxo de IRP provado ponta-a-ponta (`[irp-test]`: build→advance→read, campos corretos). Drivers in-tree (ntfs/ioctldriver/calller) rodam `DriverEntry` completo. **Falta só**: Fase 4 (PnP: AddDevice + `IRP_MJ_PNP` START_DEVICE) e Fase 6 (drivers de teste WDM que processam IRP) — ambas agora desbloqueadas.
 
 **Todas as peças I/O que NÃO precisam do IRP reescrito estão feitas.** Um driver WDM já pode: criar device (layout NT), anexar device stack, conectar IRQ (ISR em DIRQL), usar DMA common buffer, + toda a fundação Ke. **Falta só**: Fase 1b (reescrita IRP, 72 sites) → desbloqueia Fase 4 (PnP) e Fase 6 (drivers de teste que processam IRP).
 

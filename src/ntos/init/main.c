@@ -315,13 +315,13 @@ static void ntfs_test(uint32_t part_lba) {
             static char iobuf[128];
             PIRP rd = io_build_read(vol, iobuf, (uint32_t)(sizeof(iobuf) - 1));
             if (rd) {
-                rd->CurrentStack->Parameters.Read.Key = (uint32_t)fi.mft_record;
-                rd->CurrentStack->Parameters.Read.ByteOffset = 0;
+                IoGetNextIrpStackLocation(rd)->Parameters.Read.Key = (uint32_t)fi.mft_record;
+                IoGetNextIrpStackLocation(rd)->Parameters.Read.ByteOffset = 0;
                 IoCallDriver(vol, rd);
                 uint64_t got = rd->IoStatus.Information;
                 uint64_t n = got < sizeof(iobuf) - 1 ? got : sizeof(iobuf) - 1;
                 for (uint64_t i = 0; i < n; i++)
-                    iobuf[i] = rd->SystemBuffer ? ((char*)rd->SystemBuffer)[i] : 0;
+                    iobuf[i] = rd->AssociatedIrp.SystemBuffer ? ((char*)rd->AssociatedIrp.SystemBuffer)[i] : 0;
                 iobuf[n] = 0;
                 kputs("[ntfs] IoCallDriver(READ) devolveu "); kput_dec(got);
                 kputs(" bytes: \""); kputs(iobuf); kputs("\"\n");
@@ -337,8 +337,8 @@ static void ntfs_test(uint32_t part_lba) {
             static uint8_t dbuf[320];
             PIRP dc = io_build_read(vol, dbuf, (uint32_t)sizeof(dbuf));
             if (!dc) break;
-            dc->CurrentStack->MajorFunction = IRP_MJ_DIRECTORY_CONTROL;
-            dc->CurrentStack->Parameters.Read.Length = (uint32_t)sizeof(dbuf);
+            IoGetNextIrpStackLocation(dc)->MajorFunction = IRP_MJ_DIRECTORY_CONTROL;
+            IoGetNextIrpStackLocation(dc)->Parameters.Read.Length = (uint32_t)sizeof(dbuf);
             IoCallDriver(vol, dc);
             uint64_t info = dc->IoStatus.Information;
             io_free_irp(dc);
@@ -356,8 +356,8 @@ static void ntfs_test(uint32_t part_lba) {
             uint32_t mlen = 0; while (msg[mlen]) mlen++;
             PIRP wr = io_build_write(vol, (void*)msg, mlen);
             if (wr) {
-                wr->CurrentStack->Parameters.Write.Key = (uint32_t)dfi.mft_record;
-                wr->CurrentStack->Parameters.Write.ByteOffset = 0;
+                IoGetNextIrpStackLocation(wr)->Parameters.Write.Key = (uint32_t)dfi.mft_record;
+                IoGetNextIrpStackLocation(wr)->Parameters.Write.ByteOffset = 0;
                 IoCallDriver(vol, wr);
                 kputs("[ntfs] IoCallDriver(WRITE) gravou "); kput_dec(wr->IoStatus.Information);
                 kputs(" bytes.\n");
@@ -367,13 +367,13 @@ static void ntfs_test(uint32_t part_lba) {
             static char vbuf[64];
             PIRP rd = io_build_read(vol, vbuf, (uint32_t)(sizeof(vbuf) - 1));
             if (rd) {
-                rd->CurrentStack->Parameters.Read.Key = (uint32_t)dfi.mft_record;
-                rd->CurrentStack->Parameters.Read.ByteOffset = 0;
+                IoGetNextIrpStackLocation(rd)->Parameters.Read.Key = (uint32_t)dfi.mft_record;
+                IoGetNextIrpStackLocation(rd)->Parameters.Read.ByteOffset = 0;
                 IoCallDriver(vol, rd);
                 uint64_t got = rd->IoStatus.Information;
                 uint64_t n = got < sizeof(vbuf) - 1 ? got : sizeof(vbuf) - 1;
                 for (uint64_t i = 0; i < n; i++)
-                    vbuf[i] = rd->SystemBuffer ? ((char*)rd->SystemBuffer)[i] : 0;
+                    vbuf[i] = rd->AssociatedIrp.SystemBuffer ? ((char*)rd->AssociatedIrp.SystemBuffer)[i] : 0;
                 vbuf[n] = 0;
                 kputs("[ntfs] RELIDO via IRP_MJ_READ: \""); kputs(vbuf); kputs("\"\n");
                 io_free_irp(rd);
@@ -1182,6 +1182,9 @@ void kmain(uint32_t mb_info) {
     // FASE FUNDACAO (trilha I/O, Fase 5): prova de HAL DMA.
     extern void KiDmaSelfTest(void);
     KiDmaSelfTest();
+    // FASE FUNDACAO (trilha I/O, Fase 1b): prova do IRP (layout NT).
+    extern void KiIrpSelfTest(void);
+    KiIrpSelfTest();
 
     // --- FASE 10.1: detecta virtio-gpu (modern, virtio 1.1) ---
     // Caminha PCI capabilities, mapeia common/notify/isr/device cfg fora da

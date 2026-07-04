@@ -25,11 +25,11 @@ static NTSTATUS DispatchClose(PDEVICE_OBJECT dev, PIRP irp) {
 }
 static NTSTATUS DispatchIoctl(PDEVICE_OBJECT dev, PIRP irp) {
     (void)dev;
-    PIO_STACK_LOCATION s = irp->CurrentStack;
+    PIO_STACK_LOCATION s = IoGetCurrentIrpStackLocation(irp);
     ULONG code = s->Parameters.DeviceIoControl.IoControlCode;
     DbgPrint("IoctlDrv: IRP_MJ_DEVICE_CONTROL recebido\n");
     if (code == IOCTL_GET_MAGIC) {
-        unsigned* out = (unsigned*)irp->SystemBuffer;   // METHOD_BUFFERED
+        unsigned* out = (unsigned*)irp->AssociatedIrp.SystemBuffer;   // METHOD_BUFFERED
         if (out) out[0] = 0xCAFEBABE;
         irp->IoStatus.Information = 4;
         irp->IoStatus.Status = STATUS_SUCCESS;

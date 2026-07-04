@@ -224,10 +224,10 @@ static void sys_deviceiocontrol(struct regs* r) {
 
     // METHOD_BUFFERED: devolve a saida do SystemBuffer para o buffer do usuario.
     uint64_t info = irp->IoStatus.Information;
-    if (outB && irp->SystemBuffer && info) {
+    if (outB && irp->AssociatedIrp.SystemBuffer && info) {
         uint64_t n = info < outL ? info : outL;
         for (uint64_t i = 0; i < n; i++)
-            ((uint8_t*)outB)[i] = ((uint8_t*)irp->SystemBuffer)[i];
+            ((uint8_t*)outB)[i] = ((uint8_t*)irp->AssociatedIrp.SystemBuffer)[i];
     }
     NTSTATUS st = irp->IoStatus.Status;
     io_free_irp(irp);
@@ -344,8 +344,8 @@ static void sys_writefile(struct regs* r) {
     // Volume NTFS: passa o registro MFT (Key) e o offset corrente p/ o driver de FS
     // (IRP_MJ_WRITE -> ntfs_write_file). Escrita sequencial: avanca o cursor.
     if (f->DeviceObject == ntfs_fs_volume_device() && f->FsContext) {
-        irp->CurrentStack->Parameters.Write.Key        = (ULONG)f->FsContext;
-        irp->CurrentStack->Parameters.Write.ByteOffset = f->CurrentByteOffset;
+        IoGetNextIrpStackLocation(irp)->Parameters.Write.Key        = (ULONG)f->FsContext;
+        IoGetNextIrpStackLocation(irp)->Parameters.Write.ByteOffset = f->CurrentByteOffset;
     }
     IoCallDriver(f->DeviceObject, irp);
     uint64_t info = irp->IoStatus.Information;
@@ -397,16 +397,16 @@ static void sys_readfile(struct regs* r) {
     if (!irp) { if (read) *read = 0; r->rax = (uint64_t)(uint32_t)STATUS_UNSUCCESSFUL; return; }
     // Volume NTFS: passa o registro MFT (Key) e o offset corrente p/ o driver de FS.
     if (f->DeviceObject == ntfs_fs_volume_device() && f->FsContext) {
-        irp->CurrentStack->Parameters.Read.Key        = (ULONG)f->FsContext;
-        irp->CurrentStack->Parameters.Read.ByteOffset = f->CurrentByteOffset;
+        IoGetNextIrpStackLocation(irp)->Parameters.Read.Key        = (ULONG)f->FsContext;
+        IoGetNextIrpStackLocation(irp)->Parameters.Read.ByteOffset = f->CurrentByteOffset;
     }
     IoCallDriver(f->DeviceObject, irp);
     uint64_t info = irp->IoStatus.Information;
     // METHOD_BUFFERED: copia a saida do SystemBuffer para o buffer do usuario.
-    if (buf && irp->SystemBuffer && info) {
+    if (buf && irp->AssociatedIrp.SystemBuffer && info) {
         uint64_t n = info < len ? info : len;
         for (uint64_t i = 0; i < n; i++)
-            ((uint8_t*)buf)[i] = ((uint8_t*)irp->SystemBuffer)[i];
+            ((uint8_t*)buf)[i] = ((uint8_t*)irp->AssociatedIrp.SystemBuffer)[i];
     }
     NTSTATUS st = irp->IoStatus.Status;
     io_free_irp(irp);
@@ -437,14 +437,14 @@ static void sys_querydirectoryfile(struct regs* r) {
 
     PIRP irp = io_build_read(f->DeviceObject, outB, outLen);   // METHOD_BUFFERED
     if (!irp) { if (retLen) *retLen = 0; r->rax = (uint64_t)(uint32_t)STATUS_UNSUCCESSFUL; return; }
-    irp->CurrentStack->MajorFunction = IRP_MJ_DIRECTORY_CONTROL;
-    irp->CurrentStack->Parameters.Read.Length = outLen;
+    IoGetNextIrpStackLocation(irp)->MajorFunction = IRP_MJ_DIRECTORY_CONTROL;
+    IoGetNextIrpStackLocation(irp)->Parameters.Read.Length = outLen;
     IoCallDriver(f->DeviceObject, irp);
     uint64_t info = irp->IoStatus.Information;
-    if (outB && irp->SystemBuffer && info) {
+    if (outB && irp->AssociatedIrp.SystemBuffer && info) {
         uint64_t n = info < outLen ? info : outLen;
         for (uint64_t i = 0; i < n; i++)
-            ((uint8_t*)outB)[i] = ((uint8_t*)irp->SystemBuffer)[i];
+            ((uint8_t*)outB)[i] = ((uint8_t*)irp->AssociatedIrp.SystemBuffer)[i];
     }
     NTSTATUS st = irp->IoStatus.Status;
     io_free_irp(irp);

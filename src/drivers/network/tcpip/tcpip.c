@@ -84,8 +84,8 @@ static NTSTATUS tcpip_write(PDEVICE_OBJECT dev, PIRP irp) {
     if (irp) {
         irp->IoStatus.Status = STATUS_SUCCESS;
         // Reporta TUDO escrito (write n bytes -> n bytes "transmitidos").
-        irp->IoStatus.Information = irp->CurrentStack ?
-            irp->CurrentStack->Parameters.Write.Length : 0;
+        irp->IoStatus.Information = IoGetCurrentIrpStackLocation(irp) ?
+            IoGetCurrentIrpStackLocation(irp)->Parameters.Write.Length : 0;
     }
     return STATUS_SUCCESS;
 }

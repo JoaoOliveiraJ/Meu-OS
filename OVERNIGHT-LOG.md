@@ -45,7 +45,13 @@ Ordem noturna: **4 → 1 → 3 → [2] → parada segura**. Deferidos p/ supervi
 | 7 | Primitivos Ex (fast mutex/ERESOURCE/lookaside/interlocked, flag-gated) | ✅ | ✅ idêntico (CPUID x3, C0000365) | 54 beats | **fast mutex + lookaside OK** | (este) |
 
 ### ✅ FUNDAÇÃO Ke/HAL COMPLETA
-Todos os 4 self-tests passam num boot: `[dpc] PROVA OK`, `[ex-test] OK`, `[wait-test] ACORDOU`, `[timer-test] EXPIROU→OK`. Pintok intacto o tempo todo (auto-legacy). A flag `g_ke_legacy_mode=1` reverte tudo pro antigo. Próximo (nova fase, supervisionada): **trilha de drivers I/O** (IRP layout NT, device stacks, `IoConnectInterrupt`, PnP, DMA) — plano em `lovely-baking-whale.md`.
+Todos os 4 self-tests passam num boot: `[dpc] PROVA OK`, `[ex-test] OK`, `[wait-test] ACORDOU`, `[timer-test] EXPIROU→OK`. Pintok intacto o tempo todo (auto-legacy). A flag `g_ke_legacy_mode=1` reverte tudo pro antigo.
+
+## TRILHA DE DRIVERS I/O (em progresso)
+Achado: `IO_STACK_LOCATION` já está NT-correto; correções de layout só melhoram o pintok (macros inline dele baked contra offsets MS). pintok **não cria device** no baseline → Fase 1 neutra.
+| fase | o que | build | pintok | fundação | commit |
+|------|-------|-------|--------|----------|--------|
+| 1a | DEVICE_OBJECT → offsets NT (`DeviceExtension@0x40`, `DeviceType@0x48`, `sizeof 0xB8`) + `_Static_assert` + fix bug Flags/type | ✅ | ✅ idêntico | 4/4 | (este) |
 
 **Sessão retomada ("Continua").** pintok **não** usa `KeWaitForSingleObject`/`KeInitializeEvent` (baseline) → Item 5 gated por contexto (só threads worker reais bloqueiam; contexto boot/idle, onde o pintok roda, mantém auto-resolve). O auto-teste provou block+wake ponta-a-ponta, e de bônus corrigiu um **freeze latente de término de thread** (`cli;hlt` → `yield`).
 

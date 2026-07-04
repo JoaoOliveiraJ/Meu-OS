@@ -257,17 +257,32 @@ typedef struct _DRIVER_OBJECT {
     PVOID          MajorFunction[28];   // 0x70
 } DRIVER_OBJECT, *PDRIVER_OBJECT;
 
+// FASE FUNDACAO (trilha I/O, Fase 1a) — DEVICE_OBJECT com offsets NT x64 reais.
+// DeviceExtension@0x40 (era 0x30) e DeviceType@0x48 (antes 'Flags' era usado como
+// tipo — bug). Drivers reais acessam esses campos por offset baked-in; aproximar
+// do NT so aumenta compatibilidade. Campos internos (Timer/Vpb/Queue/Dpc/...) sao
+// opacos aqui (nenhum driver in-tree os acessa por offset). Vpb sempre 0.
+typedef struct _VPB *PVPB;   // opaco
 typedef struct _DEVICE_OBJECT {
-    SHORT  Type;
-    SHORT  Size;
-    int32_t ReferenceCount;
-    PVOID  DriverObject;
-    PVOID  NextDevice;
-    PVOID  AttachedDevice;
-    PVOID  CurrentIrp;
-    ULONG  Flags;
-    PVOID  DeviceExtension;
+    SHORT   Type;                    // 0x00
+    SHORT   Size;                    // 0x02
+    int32_t ReferenceCount;          // 0x04
+    PVOID   DriverObject;            // 0x08
+    PVOID   NextDevice;              // 0x10
+    PVOID   AttachedDevice;          // 0x18
+    PVOID   CurrentIrp;              // 0x20
+    PVOID   Timer;                   // 0x28
+    ULONG   Flags;                   // 0x30
+    ULONG   Characteristics;         // 0x34
+    PVPB    Vpb;                     // 0x38
+    PVOID   DeviceExtension;         // 0x40  <- bate com NT
+    ULONG   DeviceType;              // 0x48
+    signed char StackSize;           // 0x4C  (CCHAR)
+    uint8_t _tail[0xB8 - 0x4D];      // 0x4D..0xB7 (Queue/Dpc/SecurityDescriptor/etc.)
 } DEVICE_OBJECT, *PDEVICE_OBJECT;
+_Static_assert(__builtin_offsetof(DEVICE_OBJECT, DeviceExtension) == 0x40, "DeviceExtension deve estar em 0x40 (NT x64)");
+_Static_assert(__builtin_offsetof(DEVICE_OBJECT, DeviceType)      == 0x48, "DeviceType deve estar em 0x48 (NT x64)");
+_Static_assert(sizeof(DEVICE_OBJECT) == 0xB8, "sizeof(DEVICE_OBJECT) deve ser 0xB8 (NT x64)");
 
 // ===================== I/O Manager (IRPs, IOCTL) =====================
 // IRP majors completas conforme o WDM (uso os mesmos numeros do Windows).

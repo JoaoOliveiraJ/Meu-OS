@@ -399,10 +399,17 @@ extern PVOID *IoFileObjectType;
 extern BOOLEAN KdDebuggerEnabled;
 extern BOOLEAN KdDebuggerNotPresent;
 
-// IRQL nominal (sem APIC). PASSIVE_LEVEL=0, APC=1, DISPATCH=2.
-#define PASSIVE_LEVEL  0
-#define APC_LEVEL      1
-#define DISPATCH_LEVEL 2
+// IRQL x64 real (0-15). CR8/TPR mapeia 1:1 (IRQL == priority class = vetor>>4):
+// PASSIVE=0, APC=1, DISPATCH=2, DIRQL de dispositivo=3..11, CLOCK=13 (vetor
+// 0xD1), IPI=14 (vetor 0xE1), HIGH=15. KIRQL e uint8_t (cabe 0-15).
+#define PASSIVE_LEVEL    0
+#define APC_LEVEL        1
+#define DISPATCH_LEVEL   2
+#define DEVICE_LEVEL_MIN 3
+#define DEVICE_LEVEL_MAX 12
+#define CLOCK_LEVEL      13
+#define IPI_LEVEL        14
+#define HIGH_LEVEL       15
 
 // ============================================================================
 //  FASE 7.6 — Memory Descriptor List (MDL) — layout NT x64 real.

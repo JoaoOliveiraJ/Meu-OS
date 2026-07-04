@@ -629,7 +629,7 @@ __attribute__((ms_abi)) static uintptr_t NT_KeIpiGenericCall(PVOID Routine, uint
     if (g_pintok_trace) { kputs("  [trace] KeIpiGenericCall worker retornou=0x"); kput_hex(rv); kputs("\n"); }
     return rv;
 }
-__attribute__((ms_abi)) static KIRQL NT_KfRaiseIrql(KIRQL NewIrql) { (void)NewIrql; return PASSIVE_LEVEL; }
+// NT_KfRaiseIrql removido — KfRaiseIrql agora e real (KfRaiseIrql_k em ke/sync.c, Item 1).
 // REAL KeRegisterBugCheckReasonCallback retorna BOOLEAN (TRUE se registrou), nao NTSTATUS.
 // pintok.sys le esse BOOLEAN e bail com STATUS_NOT_FOUND se for FALSE — STATUS_SUCCESS
 // (=0) era lido como FALSE. Retornar TRUE (1). [GATE 1 da init do pintok.sys; ver pintok.sys-INIT-NOTES.md]
@@ -1115,7 +1115,7 @@ static const struct { const char* name; void* fn; } g_ntexports[] = {
     EX("KeInitializeMutant",           NT_KeInitializeMutant),
     EX("KeAreAllApcsDisabled",         NT_KeAreAllApcsDisabled),
     EX("KeIpiGenericCall",             NT_KeIpiGenericCall),
-    EX("KfRaiseIrql",                  NT_KfRaiseIrql),
+    EX("KfRaiseIrql",                  KfRaiseIrql_k),
     EX("KeRegisterBugCheckReasonCallback", NT_KeRegisterBugCheckReasonCallback),
     EX("KeDeregisterBugCheckReasonCallback", NT_KeDeregisterBugCheckReasonCallback),
     EX("KeQuerySystemTimePrecise",     NT_KeQuerySystemTimePrecise),
@@ -1218,6 +1218,10 @@ static const struct { const char* name; void* fn; } g_ntexports[] = {
     // FASE FUNDACAO (Item 4): stall real por TSC. Append-only (nao reordenar).
     // KeQueryPerformanceCounter ja esta acima (linha ~960); so o corpo mudou.
     EX("KeStallExecutionProcessor",        KeStallExecutionProcessor_k),
+    // FASE FUNDACAO (Item 1): IRQL real. KfRaiseIrql foi repontado no lugar
+    // (~1118); KfLowerIrql/KeRaiseIrqlToDpcLevel adicionados aqui (append-only).
+    EX("KfLowerIrql",                      KfLowerIrql_k),
+    EX("KeRaiseIrqlToDpcLevel",            KeRaiseIrqlToDpcLevel_k),
 
     { 0, 0 }
 };

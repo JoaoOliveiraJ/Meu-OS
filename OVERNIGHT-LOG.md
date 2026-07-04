@@ -31,8 +31,9 @@ Referência do plano: `C:\Users\joao\.claude\plans\lovely-baking-whale.md`.
 | # | Item | build | pintok≥baseline | proof P4 | probe | commit |
 |---|------|-------|-----------------|----------|-------|--------|
 | — | setup/baseline | ✅ | — (baseline) | pausada | — | 2e652e9 |
-| 4 | Stall/PerfCounter (TSC) | ✅ | ✅ idêntico (CPUID x3, C0000365) | — | TSC=3.09GHz OK | (este) |
+| 4 | Stall/PerfCounter (TSC) | ✅ | ✅ idêntico (CPUID x3, C0000365) | — | TSC=3.09GHz OK | 5557e5b |
+| 1 | IRQL real (gs:[0x60]+CR8) | ✅ | ✅ idêntico | — | — (probe depois) | (este) |
 
 Ordem noturna: **4 → 1 → 3 → 0a → 2**. Deferidos p/ supervisão: 0b (reestrutura idle), 5 (waits), 6 (KTIMER), 7 (Ex), trilha I/O.
 
-(em progresso — Item 1: IRQL real)
+(em progresso — Item 3: spinlocks reais)

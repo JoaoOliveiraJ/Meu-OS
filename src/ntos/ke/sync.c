@@ -100,9 +100,33 @@ void NTAPI KeReleaseSpinLock_k(PKSPIN_LOCK SpinLock, KIRQL OldIrql) {
 void NTAPI KeAcquireSpinLockAtDpcLevel_k(PKSPIN_LOCK SpinLock) { if (SpinLock) *SpinLock = 1; }
 void NTAPI KeReleaseSpinLockFromDpcLevel_k(PKSPIN_LOCK SpinLock) { if (SpinLock) *SpinLock = 0; }
 
-KIRQL NTAPI KeGetCurrentIrql_k(void) { return PASSIVE_LEVEL; }
-void  NTAPI KeRaiseIrql_k(KIRQL NewIrql, KIRQL* OldIrql) { (void)NewIrql; if (OldIrql) *OldIrql = PASSIVE_LEVEL; }
-void  NTAPI KeLowerIrql_k(KIRQL NewIrql) { (void)NewIrql; }
+// ============================================================================
+//  FASE FUNDACAO (Item 1) — IRQL real. Espelhado em gs:[0x60] (KPCR.Irql, que
+//  drivers leem direto via gs) E em CR8/TPR. CR8=N segura IRQs de classe <=N
+//  (vetor>>4); o timer 0xD1 (classe 13) continua firando em DISPATCH, mantendo
+//  o relogio. NAO usamos cli/sti: o bloqueio de PREEMPCAO em DISPATCH vem no
+//  Item 2 (o ISR do timer passa a checar o IRQL). Nenhum caller interno usa
+//  estas funcoes (so drivers, que sobem apos kpcr_init) -> aditivo/seguro.
+// ============================================================================
+KIRQL NTAPI KeGetCurrentIrql_k(void) {
+    uint8_t v; __asm__ volatile ("mov %%gs:0x60, %0" : "=r"(v));
+    return (KIRQL)v;
+}
+static inline void ki_irql_write(KIRQL v) {
+    __asm__ volatile ("mov %0, %%gs:0x60" :: "r"(v) : "memory");
+    __asm__ volatile ("mov %0, %%cr8"     :: "r"((uint64_t)v));
+}
+void NTAPI KeRaiseIrql_k(KIRQL NewIrql, KIRQL* OldIrql) {
+    KIRQL old = KeGetCurrentIrql_k();
+    if (OldIrql) *OldIrql = old;
+    if (NewIrql > old) ki_irql_write(NewIrql);   // raise so sobe
+}
+KIRQL NTAPI KfRaiseIrql_k(KIRQL NewIrql) { KIRQL old; KeRaiseIrql_k(NewIrql, &old); return old; }
+KIRQL NTAPI KeRaiseIrqlToDpcLevel_k(void) { KIRQL old; KeRaiseIrql_k(DISPATCH_LEVEL, &old); return old; }
+void NTAPI KeLowerIrql_k(KIRQL NewIrql) {
+    ki_irql_write(NewIrql);   // Item 2 adiciona a drenagem de DPC aqui
+}
+void NTAPI KfLowerIrql_k(KIRQL NewIrql) { KeLowerIrql_k(NewIrql); }
 
 void NTAPI KeInitializeMutex_k(PKMUTEX Mutex, ULONG Level) {
     (void)Level;

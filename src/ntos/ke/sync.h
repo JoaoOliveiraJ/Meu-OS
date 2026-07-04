@@ -37,6 +37,10 @@ void NTAPI KeReleaseSpinLockFromDpcLevel_k(PKSPIN_LOCK SpinLock);
 KIRQL NTAPI KeGetCurrentIrql_k(void);
 void  NTAPI KeRaiseIrql_k(KIRQL NewIrql, KIRQL* OldIrql);
 void  NTAPI KeLowerIrql_k(KIRQL NewIrql);
+// FASE FUNDACAO (Item 1) — IRQL real (gs:[0x60] + CR8).
+KIRQL NTAPI KfRaiseIrql_k(KIRQL NewIrql);
+void  NTAPI KfLowerIrql_k(KIRQL NewIrql);
+KIRQL NTAPI KeRaiseIrqlToDpcLevel_k(void);
 
 void NTAPI KeInitializeMutex_k(PKMUTEX Mutex, ULONG Level);
 LONG NTAPI KeReleaseMutex_k(PKMUTEX Mutex, BOOLEAN Wait);

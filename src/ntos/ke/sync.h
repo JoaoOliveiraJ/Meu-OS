@@ -33,6 +33,12 @@ KIRQL NTAPI KeAcquireSpinLockRaiseToDpc_k(PKSPIN_LOCK SpinLock);
 void NTAPI KeReleaseSpinLock_k(PKSPIN_LOCK SpinLock, KIRQL OldIrql);
 void NTAPI KeAcquireSpinLockAtDpcLevel_k(PKSPIN_LOCK SpinLock);
 void NTAPI KeReleaseSpinLockFromDpcLevel_k(PKSPIN_LOCK SpinLock);
+// FASE FUNDACAO (Item 3) — variantes adicionais.
+void NTAPI KeAcquireSpinLock_k(PKSPIN_LOCK SpinLock, KIRQL* OldIrql);
+KIRQL NTAPI KfAcquireSpinLock_k(PKSPIN_LOCK SpinLock);
+void NTAPI KfReleaseSpinLock_k(PKSPIN_LOCK SpinLock, KIRQL OldIrql);
+void NTAPI KeAcquireInStackQueuedSpinLock_k(PKSPIN_LOCK SpinLock, PKLOCK_QUEUE_HANDLE Handle);
+void NTAPI KeReleaseInStackQueuedSpinLock_k(PKLOCK_QUEUE_HANDLE Handle);
 
 KIRQL NTAPI KeGetCurrentIrql_k(void);
 void  NTAPI KeRaiseIrql_k(KIRQL NewIrql, KIRQL* OldIrql);

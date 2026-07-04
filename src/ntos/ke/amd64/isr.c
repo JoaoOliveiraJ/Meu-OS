@@ -440,7 +440,15 @@ void isr_handler(struct regs* r) {
             mm_kuser_tick();
         }
         apic_eoi();
-        if (g_p4_active) ki_quantum_end();
+        // FASE FUNDACAO (Item 3 gating): so preempta se IRQL < DISPATCH_LEVEL(2)
+        // — torna "raise a DISPATCH bloqueia preempcao" real, base p/ spinlocks
+        // sem deadlock. Le gs:[0x60] (KPCR.Irql) direto (sem include). pintok
+        // roda em PASSIVE(0) -> preempcao igual ao baseline. Guardado por
+        // g_p4_active (gs ja pronto quando P4 liga). NAO toca o bloco anti-VM.
+        {
+            uint8_t _irql; __asm__ volatile ("mov %%gs:0x60, %0" : "=r"(_irql));
+            if (g_p4_active && _irql < 2) ki_quantum_end();
+        }
         return;
     }
     // IPI reschedule (vetor 0xE1, Pilar 4).

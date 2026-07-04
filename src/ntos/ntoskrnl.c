@@ -1222,6 +1222,12 @@ static const struct { const char* name; void* fn; } g_ntexports[] = {
     // (~1118); KfLowerIrql/KeRaiseIrqlToDpcLevel adicionados aqui (append-only).
     EX("KfLowerIrql",                      KfLowerIrql_k),
     EX("KeRaiseIrqlToDpcLevel",            KeRaiseIrqlToDpcLevel_k),
+    // FASE FUNDACAO (Item 3): spinlocks reais (variantes extras, append-only).
+    EX("KeAcquireSpinLock",                KeAcquireSpinLock_k),
+    EX("KfAcquireSpinLock",                KfAcquireSpinLock_k),
+    EX("KfReleaseSpinLock",                KfReleaseSpinLock_k),
+    EX("KeAcquireInStackQueuedSpinLock",   KeAcquireInStackQueuedSpinLock_k),
+    EX("KeReleaseInStackQueuedSpinLock",   KeReleaseInStackQueuedSpinLock_k),
 
     { 0, 0 }
 };

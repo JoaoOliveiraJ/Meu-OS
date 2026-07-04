@@ -37,4 +37,27 @@ Referência do plano: `C:\Users\joao\.claude\plans\lovely-baking-whale.md`.
 
 Ordem noturna: **4 → 1 → 3 → [2] → parada segura**. Deferidos p/ supervisão (tocam contexto de troca ou trajetória do pintok): **0a+5** (reentrância do swap + waits — são uma unidade, testar juntas com você acordado), **6** (KTIMER), **7** (Ex), **trilha I/O** inteira. Motivo: mexer no caminho de context-switch (`ki_swap_context`) ou tornar `KeWait` bloqueante sem supervisão é o maior risco à trajetória do pintok.
 
-(em progresso — Item 2: DPC)
+| 2 | DPC | ⏸️ DEFERIDO | — | — | — | — |
+
+---
+
+## RESUMO PARA ACORDAR (parada segura)
+
+**Seu trabalho está salvo:** checkpoint `2e652e9` na sua branch `feat/unblock-desktop-mouse-irq12`, **pushed** para o GitHub.
+
+**Fundação construída (branch isolada `feat/kernel-foundation-irql-dpc`, tudo pushed):**
+| commit | item | o que ficou real |
+|--------|------|------------------|
+| `5557e5b` | Item 4 | `KeStallExecutionProcessor` (busy-spin por TSC) + `KeQueryPerformanceCounter` (retorna contador real). TSC calibrado ~3.1 GHz. |
+| `b11fa80` | Item 1 | IRQL real: `KeGetCurrentIrql` lê `gs:[0x60]`; raise/lower mantêm `gs:[0x60]`+CR8. Níveis 0–15. |
+| `1ef56bc` | Item 3 | Spinlocks reais (atômico + raise IRQL) + gating de preempção no ISR do timer ("raise a DISPATCH bloqueia preempção"). |
+
+**Cada incremento foi verificado:** build OK + **pintok baseline byte-idêntico** (P1/P2/P3 PROVA PASSOU, `chamando DriverEntry`, CPUID x3, retorno C0000365) + preempção viva (workers batendo) + sem `Sistema parado`. **O pintok está intocado.**
+
+**Deferido para quando você estiver acordado (motivo: tocam o caminho de context-switch OU a trajetória do pintok — não faço sem supervisão):**
+- **Item 2 (DPC)** — o pintok chama `KeInitializeDpc`/`KeGenericCallDpc`/`KeSetTargetProcessorDpc`/`KeSignalCallDpc*`; DPC real tem superfície de interação com ele. Design pronto no plano.
+- **Item 0a + 5 (reentrância do swap + `KeWait` bloqueante)** — mexem em `ki_swap_context` e no "auto-resolve" que o pintok usa. São uma unidade.
+- **Item 6 (KTIMER)**, **Item 7 (primitivos Ex: FAST_MUTEX/ERESOURCE/lookaside)** — dependem do Item 5.
+- **Trilha I/O inteira** (IRP layout NT, device stacks, `IoConnectInterrupt`, PnP, DMA) + os drivers de teste (`tests/drivers/`).
+
+**Como continuar:** branch isolada, cada item é um commit limpo (revertível), design completo em `C:\Users\joao\.claude\plans\lovely-baking-whale.md`. Nada está quebrado; pior caso, revisar/reverter por commit. Baseline dourado do pintok em `$JOB/tmp/pintok_baseline.log`.

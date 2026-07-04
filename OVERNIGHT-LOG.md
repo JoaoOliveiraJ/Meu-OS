@@ -51,7 +51,10 @@ Todos os 4 self-tests passam num boot: `[dpc] PROVA OK`, `[ex-test] OK`, `[wait-
 Achado: `IO_STACK_LOCATION` já está NT-correto; correções de layout só melhoram o pintok (macros inline dele baked contra offsets MS). pintok **não cria device** no baseline → Fase 1 neutra.
 | fase | o que | build | pintok | fundação | commit |
 |------|-------|-------|--------|----------|--------|
-| 1a | DEVICE_OBJECT → offsets NT (`DeviceExtension@0x40`, `DeviceType@0x48`, `sizeof 0xB8`) + `_Static_assert` + fix bug Flags/type | ✅ | ✅ idêntico | 4/4 | (este) |
+| 1a | DEVICE_OBJECT → offsets NT (`DeviceExtension@0x40`, `DeviceType@0x48`, `sizeof 0xB8`) + `_Static_assert` + fix bug Flags/type | ✅ | ✅ idêntico | 4/4 | 3f5afe2 |
+| 3 | Modelo de interrupção: `KINTERRUPT`/`IoConnectInterrupt`/`IoDisconnectInterrupt`/`KeSynchronizeExecution`/`HalGetInterruptVector` + `ioapic_set_irq_ex` (level/active-low/mask) + early-out no ISR (antes da cadeia legada) | ✅ | ✅ idêntico | 3/3 | (este) |
+
+`int-test` prova o chain `IoConnectInterrupt`→`int`→`isr_handler`→dispatch→ISR do driver **em DIRQL**. Nomes fora da lista do pintok → efeito zero. kbd/mouse/timer legado intocados. **Pendente**: Fase 1b (reescrita IRP, 72 sites), Fase 2 (device stacks), Fase 4 (PnP), Fase 5 (DMA), Fase 6 (drivers de teste WDM).
 
 **Sessão retomada ("Continua").** pintok **não** usa `KeWaitForSingleObject`/`KeInitializeEvent` (baseline) → Item 5 gated por contexto (só threads worker reais bloqueiam; contexto boot/idle, onde o pintok roda, mantém auto-resolve). O auto-teste provou block+wake ponta-a-ponta, e de bônus corrigiu um **freeze latente de término de thread** (`cli;hlt` → `yield`).
 

@@ -34,6 +34,7 @@
 #include "ke/dpc.h"                 // FASE FUNDACAO (Item 2): DPC real
 #include "ke/timer.h"               // FASE FUNDACAO (Item 6): KTIMER real
 #include "ex/ex_sync.h"             // FASE FUNDACAO (Item 7): primitivos Ex reais
+#include "ke/amd64/kinterrupt.h"    // trilha I/O Fase 3: modelo de interrupcao
 #include "ex/pool.h"
 #include "ps/systhread.h"
 #include "ke/amd64/kpcr.h"          // FASE 7.2: KPCR/GS_BASE
@@ -1253,6 +1254,15 @@ static const struct { const char* name; void* fn; } g_ntexports[] = {
     EX("ExInterlockedInsertTailList",      ExInterlockedInsertTailList_k),
     EX("ExInterlockedRemoveHeadList",      ExInterlockedRemoveHeadList_k),
     EX("ExRaiseStatus",                    ExRaiseStatus_k),
+    // trilha I/O Fase 3: modelo de interrupcao (append-only). Nenhum destes
+    // nomes esta na lista do pintok -> efeito zero p/ ele.
+    EX("IoConnectInterrupt",               IoConnectInterrupt_k),
+    EX("IoDisconnectInterrupt",            IoDisconnectInterrupt_k),
+    EX("KeInitializeInterrupt",            KeInitializeInterrupt_k),
+    EX("KeConnectInterrupt",               KeConnectInterrupt_k),
+    EX("KeDisconnectInterrupt",            KeDisconnectInterrupt_k),
+    EX("KeSynchronizeExecution",           KeSynchronizeExecution_k),
+    EX("HalGetInterruptVector",            HalGetInterruptVector),
 
     { 0, 0 }
 };

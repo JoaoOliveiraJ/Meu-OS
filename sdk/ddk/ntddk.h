@@ -184,6 +184,16 @@ typedef struct _NPAGED_LOOKASIDE_LIST {
 } NPAGED_LOOKASIDE_LIST, *PNPAGED_LOOKASIDE_LIST;
 typedef NPAGED_LOOKASIDE_LIST PAGED_LOOKASIDE_LIST, *PPAGED_LOOKASIDE_LIST;
 
+// FASE FUNDACAO (trilha I/O, Fase 3) — modelo de interrupcao. KINTERRUPT e opaco
+// p/ drivers (so acessado via IoConnectInterrupt/KeSynchronizeExecution). Os
+// prototipos publicos precisam bater com o WDK (ms_abi resolve registradores).
+typedef struct _KINTERRUPT KINTERRUPT, *PKINTERRUPT;
+typedef BOOLEAN (NTAPI *PKSERVICE_ROUTINE)(PKINTERRUPT Interrupt, PVOID ServiceContext);
+typedef BOOLEAN (NTAPI *PKSYNCHRONIZE_ROUTINE)(PVOID SynchronizeContext);
+typedef enum _KINTERRUPT_MODE { LevelSensitive = 0, Latched = 1 } KINTERRUPT_MODE;
+typedef uint64_t KAFFINITY;
+#define DIRQL_DEFAULT_DEVICE  11
+
 // Argumentos do KeWaitForSingleObject / KeDelayExecutionThread.
 typedef enum _KWAIT_REASON {
     Executive = 0, FreePage, PageIn, PoolAllocation, DelayExecution, Suspended,

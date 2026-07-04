@@ -54,6 +54,7 @@ typedef NTSTATUS* PNTSTATUS;
 #define STATUS_INVALID_PARAMETER        ((NTSTATUS)0xC000000D)
 #define STATUS_NO_SUCH_FILE             ((NTSTATUS)0xC000000F)
 #define STATUS_END_OF_FILE              ((NTSTATUS)0xC0000011)
+#define STATUS_MORE_PROCESSING_REQUIRED ((NTSTATUS)0xC0000016)
 #define STATUS_NO_MEMORY                ((NTSTATUS)0xC0000017)
 #define STATUS_ACCESS_DENIED            ((NTSTATUS)0xC0000022)
 #define STATUS_BUFFER_TOO_SMALL         ((NTSTATUS)0xC0000023)
@@ -377,6 +378,13 @@ typedef struct _IO_STATUS_BLOCK {
     uint64_t Information;
 } IO_STATUS_BLOCK, *PIO_STATUS_BLOCK;
 
+// IO_STACK_LOCATION.Control bits — usados por IofCompleteRequest para decidir se
+// a rotina de conclusao daquele nivel deve ser chamada, e para propagar pending.
+#define SL_PENDING_RETURNED   0x01
+#define SL_INVOKE_ON_CANCEL   0x20
+#define SL_INVOKE_ON_SUCCESS  0x40
+#define SL_INVOKE_ON_ERROR    0x80
+
 typedef struct _IO_STACK_LOCATION {
     uint8_t MajorFunction;
     uint8_t MinorFunction;
@@ -466,7 +474,7 @@ typedef struct _DRIVER_EXTENSION {
 typedef NTSTATUS (NTAPI *PDRIVER_DISPATCH)(PDEVICE_OBJECT, PIRP);
 typedef void     (NTAPI *PDRIVER_UNLOAD)(PDRIVER_OBJECT);
 typedef NTSTATUS (NTAPI *PDRIVER_INITIALIZE)(PDRIVER_OBJECT, PUNICODE_STRING);
-typedef void     (NTAPI *PIO_COMPLETION_ROUTINE)(PDEVICE_OBJECT, PIRP, PVOID);
+typedef NTSTATUS (NTAPI *PIO_COMPLETION_ROUTINE)(PDEVICE_OBJECT, PIRP, PVOID);
 typedef void     (NTAPI *PKSTART_ROUTINE)(PVOID Context);
 
 // ====================== Callbacks de Ps/Ob/Cm ======================

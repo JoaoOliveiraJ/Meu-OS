@@ -124,3 +124,8 @@ uint32_t     ki_current_cpu_index(void);
 
 // IPI reschedule handler (chamado em isr.c quando vetor 0xE1 chega).
 void ki_ipi_reschedule(void);
+
+// FASE FUNDACAO (Item 5) — waits bloqueantes (infinito) p/ threads worker reais.
+int  ki_can_block(void);               // true se a thread corrente pode bloquear
+void ki_block_current(void* obj);      // marca WAITING + insere na lista de espera
+int  ki_wake(void* obj, int wake_all); // acorda waiters de 'obj' (-> ready)

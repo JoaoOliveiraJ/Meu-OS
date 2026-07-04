@@ -961,6 +961,10 @@ static void sched_start_demo_threads(void) {
     if (w2) ki_ready_thread(w2);
     if (wr) ki_ready_thread(wr);
 
+    // FASE FUNDACAO (Item 5): auto-teste de block+wake (2 threads worker reais).
+    extern void ki_wait_selftest_spawn(void);
+    ki_wait_selftest_spawn();
+
     __atomic_store_n(&g_p4_active, 1, __ATOMIC_SEQ_CST);   // liga a preempcao no timer ISR
     kputs("[sched] preempcao LIGADA (g_p4_active=1). Timer 0xD1 escalona agora.\n");
 }

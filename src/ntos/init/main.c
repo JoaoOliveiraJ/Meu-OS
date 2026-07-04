@@ -1185,6 +1185,9 @@ void kmain(uint32_t mb_info) {
     // FASE FUNDACAO (trilha I/O, Fase 1b): prova do IRP (layout NT).
     extern void KiIrpSelfTest(void);
     KiIrpSelfTest();
+    // FASE FUNDACAO (trilha I/O, Fase 6): round-trip completo de IOCTL por um driver.
+    extern void KiDriverIrpSelfTest(void);
+    KiDriverIrpSelfTest();
 
     // --- FASE 10.1: detecta virtio-gpu (modern, virtio 1.1) ---
     // Caminha PCI capabilities, mapeia common/notify/isr/device cfg fora da

@@ -309,6 +309,44 @@ void KiIrpSelfTest(void) {
     io_free_irp(irp);
 }
 
+// Prova de boot (Fase 6): round-trip COMPLETO de IOCTL por um driver — build IRP
+// -> IoCallDriver (avanca) -> dispatch le a current (MajorFunction/IoControlCode/
+// SystemBuffer) e escreve a resposta -> IoCompleteRequest -> caller le o buffer.
+// E' exatamente o que um driver WDM real faz ao servir um IOCTL.
+static NTSTATUS __attribute__((ms_abi)) test_ioctl_dispatch(PDEVICE_OBJECT dev, PIRP irp) {
+    (void)dev;
+    PIO_STACK_LOCATION s = IoGetCurrentIrpStackLocation(irp);
+    if (s && s->MajorFunction == IRP_MJ_DEVICE_CONTROL
+          && s->Parameters.DeviceIoControl.IoControlCode == 0xCAFE
+          && irp->AssociatedIrp.SystemBuffer) {
+        *(uint32_t*)irp->AssociatedIrp.SystemBuffer = 0xF00DBEEF;   // resposta "magic"
+        irp->IoStatus.Information = 4;
+        irp->IoStatus.Status = STATUS_SUCCESS;
+    } else {
+        irp->IoStatus.Status = STATUS_UNSUCCESSFUL;
+    }
+    IoCompleteRequest_k(irp, 0);
+    return irp->IoStatus.Status;
+}
+void KiDriverIrpSelfTest(void) {
+    static DRIVER_OBJECT drv;
+    for (unsigned i = 0; i < sizeof(drv); i++) ((uint8_t*)&drv)[i] = 0;
+    drv.MajorFunction[IRP_MJ_DEVICE_CONTROL] = (void*)test_ioctl_dispatch;
+    PDEVICE_OBJECT dev = 0;
+    io_create_device(&drv, 0, "\\Device\\ProbeIoctl", 0x22 /*FILE_DEVICE_UNKNOWN*/, &dev);
+    if (!dev) { kputs("[drv-irp-test] FALHOU (sem device)\n"); return; }
+    uint32_t inbuf = 0, outbuf = 0;
+    PIRP irp = io_build_ioctl(0xCAFE, dev, &inbuf, 0, &outbuf, 4);
+    if (!irp) { kputs("[drv-irp-test] FALHOU (sem IRP)\n"); return; }
+    IoCallDriver(dev, irp);
+    uint32_t result = irp->AssociatedIrp.SystemBuffer ? *(uint32_t*)irp->AssociatedIrp.SystemBuffer : 0;
+    NTSTATUS st = irp->IoStatus.Status;
+    if (result == 0xF00DBEEF && NT_SUCCESS(st))
+        kputs("[drv-irp-test] driver dispatch de IOCTL (IoCallDriver->IoCompleteRequest) OK\n");
+    else { kputs("[drv-irp-test] FALHOU result=0x"); kput_hex(result); kputs("\n"); }
+    io_free_irp(irp);
+}
+
 // ===== Symbolic links =====
 #define SYMLINK_MAX 32
 typedef struct { char link[64]; char target[64]; int used; } SYMLINK_ENT;

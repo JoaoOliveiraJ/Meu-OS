@@ -52,6 +52,21 @@ static volatile int s_dispatcher_lock = 0;
 static void disp_lock(void)   { while (__atomic_test_and_set(&s_dispatcher_lock, __ATOMIC_ACQUIRE)) __asm__ volatile ("pause"); }
 static void disp_unlock(void) { __atomic_clear(&s_dispatcher_lock, __ATOMIC_RELEASE); }
 
+// FASE FUNDACAO (Item 0a) — salva RFLAGS + cli / restaura RFLAGS. Protege as
+// secoes criticas do dispatcher (e o context-switch) contra reentrancia:
+//   - caminho do timer ISR: IF ja e' 0 (interrupt gate) -> save/cli no-op, e o
+//     restore mantem IF=0; o iretq do ISR reabilita.
+//   - yield VOLUNTARIO (IF=1, usado por KeWait bloqueante no Item 5): cli ate o
+//     swap; restore reabilita quando a thread volta a rodar.
+static inline uint64_t irq_save(void) {
+    uint64_t f;
+    __asm__ volatile ("pushfq; pop %0; cli" : "=r"(f) :: "memory");
+    return f;
+}
+static inline void irq_restore(uint64_t f) {
+    __asm__ volatile ("push %0; popfq" :: "r"(f) : "memory", "cc");
+}
+
 // --- list helpers (estilo LIST_ENTRY do NT) -----------------------------
 static void list_init(ki_list_entry_t* head) { head->next = head->prev = head; }
 static int  list_empty(const ki_list_entry_t* head) { return head->next == head; }
@@ -254,9 +269,11 @@ void ki_ready_thread(ki_thread_t* t) {
     t->cpu_current = target_cpu;
     t->state       = KI_THREAD_READY;
 
+    uint64_t _flags = irq_save();       // Item 0a: protege o insert na ready queue
     disp_lock();
     list_insert_tail(&g_ki_prcb[target_cpu].ready_head, &t->ready_link);
     disp_unlock();
+    irq_restore(_flags);
 
     // IPI cross-CPU 0xE1 cria hang determinístico sob TCG (apic_send_ipi
     // de BSP para AP durante a fase de criacao das threads). Desligado por
@@ -274,9 +291,11 @@ static ki_thread_t* ki_pick_next_locked(uint32_t cpu_index) {
 
 // --- ki_quantum_end: APIC timer ISR -> aqui ----------------------------
 void ki_quantum_end(void) {
+    // Item 0a: cli desde o topo ate o swap (dispatcher reentrancia-safe).
+    uint64_t _flags = irq_save();
     uint32_t cpu = ki_current_cpu_index();
     ki_prcb_t* p = &g_ki_prcb[cpu];
-    if (!p->online) return;
+    if (!p->online) { irq_restore(_flags); return; }
 
 
     ki_thread_t* cur = p->current_thread;
@@ -295,7 +314,7 @@ void ki_quantum_end(void) {
         }
     }
 
-    if (!do_swap) return;
+    if (!do_swap) { irq_restore(_flags); return; }
 
     disp_lock();
 
@@ -305,6 +324,7 @@ void ki_quantum_end(void) {
     // Se proxima e' a mesma + nao ha ninguem mais, nao troca (sem custo).
     if (next == cur) {
         disp_unlock();
+        irq_restore(_flags);
         return;
     }
 
@@ -329,6 +349,7 @@ void ki_quantum_end(void) {
     // KiSwapContext: salva RSP de cur, restaura RSP de next, ret.
     // Se cur == idle, ainda salvamos saved_rsp do idle pra restaurar depois.
     ki_swap_context(&cur->saved_rsp, next->saved_rsp);
+    irq_restore(_flags);   // Item 0a: reabilita IF quando 'cur' e' re-escalonada
 }
 
 void ki_yield_processor(void) {

@@ -194,6 +194,39 @@ typedef enum _KINTERRUPT_MODE { LevelSensitive = 0, Latched = 1 } KINTERRUPT_MOD
 typedef uint64_t KAFFINITY;
 #define DIRQL_DEFAULT_DEVICE  11
 
+// FASE FUNDACAO (trilha I/O, Fase 5) — HAL DMA. DMA_OPERATIONS e uma vtable que
+// o driver deref (adapter->DmaOperations->AllocateCommonBuffer(...)); a ORDEM dos
+// membros e ABI (WDK). So Allocate/FreeCommonBuffer + GetDmaAlignment tem corpo
+// real; o resto sao stubs seguros (0). phys==virt (identity map).
+typedef PHYSICAL_ADDRESS *PPHYSICAL_ADDRESS;
+typedef struct _DMA_ADAPTER DMA_ADAPTER, *PDMA_ADAPTER;
+typedef PVOID (NTAPI *PALLOCATE_COMMON_BUFFER)(PDMA_ADAPTER, ULONG Length, PPHYSICAL_ADDRESS LogicalAddress, BOOLEAN CacheEnabled);
+typedef void  (NTAPI *PFREE_COMMON_BUFFER)(PDMA_ADAPTER, ULONG Length, PHYSICAL_ADDRESS LogicalAddress, PVOID VirtualAddress, BOOLEAN CacheEnabled);
+typedef ULONG (NTAPI *PGET_DMA_ALIGNMENT)(PDMA_ADAPTER);
+typedef struct _DMA_OPERATIONS {
+    ULONG Size;                                 // +0x00
+    PVOID PutDmaAdapter;                         // +0x08
+    PALLOCATE_COMMON_BUFFER AllocateCommonBuffer;// +0x10
+    PFREE_COMMON_BUFFER     FreeCommonBuffer;    // +0x18
+    PVOID AllocateAdapterChannel;                // +0x20
+    PVOID FlushAdapterBuffers;                   // +0x28
+    PVOID FreeAdapterChannel;                    // +0x30
+    PVOID FreeMapRegisters;                      // +0x38
+    PVOID MapTransfer;                           // +0x40
+    PGET_DMA_ALIGNMENT GetDmaAlignment;          // +0x48
+    PVOID ReadDmaCounter;                        // +0x50
+    PVOID GetScatterGatherList;                  // +0x58
+    PVOID PutScatterGatherList;                  // +0x60
+    PVOID CalculateScatterGatherListSize;        // +0x68
+    PVOID BuildScatterGatherList;                // +0x70
+    PVOID BuildMdlFromScatterGatherList;         // +0x78
+} DMA_OPERATIONS, *PDMA_OPERATIONS;
+typedef struct _DMA_ADAPTER {
+    USHORT Version;
+    USHORT Size;
+    PDMA_OPERATIONS DmaOperations;
+} DMA_ADAPTER;
+
 // Argumentos do KeWaitForSingleObject / KeDelayExecutionThread.
 typedef enum _KWAIT_REASON {
     Executive = 0, FreePage, PageIn, PoolAllocation, DelayExecution, Suspended,

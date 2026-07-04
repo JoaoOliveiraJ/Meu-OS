@@ -32,6 +32,7 @@ void           NTAPI IoDetachDevice_k(PDEVICE_OBJECT Target);
 PDEVICE_OBJECT NTAPI IoGetLowerDeviceObject_k(PDEVICE_OBJECT dev);
 void KiDeviceStackSelfTest(void);
 void KiIrpSelfTest(void);
+void KiDriverIrpSelfTest(void);
 void     io_free_irp(PIRP irp);
 
 // =====================================================================

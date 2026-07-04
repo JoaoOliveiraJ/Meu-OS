@@ -1250,6 +1250,24 @@ __attribute__((ms_abi)) static uint64_t generic_zero_stub(void) {
 }
 uint64_t ntex_generic_stub_calls(void) { return g_generic_stub_calls; }
 
+// ============================================================================
+//  FASE FUNDACAO — FLAG DE MODO LEGADO (compat pintok). [pedido do usuario]
+//
+//    g_ke_legacy_mode == 0  (DEFAULT): faz o CORRETO — IRQL/DPC/waits/timers/Ex
+//                                      REAIS (comportamento NT de verdade).
+//    g_ke_legacy_mode == 1  : VOLTA PRO ANTIGO — stubs / auto-resolve (o
+//                                      comportamento pre-fundacao). Uma flag
+//                                      reverte tudo que e' sensivel.
+//
+//  ke_legacy_active() liga o modo antigo se a flag manual estiver setada OU
+//  AUTOMATICAMENTE enquanto o pintok roda (g_pintok_trace=1 no DriverEntry dele).
+//  Assim a trajetoria do pintok NUNCA muda — sem precisar setar nada a mao — e
+//  os primitivos reais ficam ativos para todo o resto (nossos testes / drivers
+//  genericos).
+// ============================================================================
+volatile int g_ke_legacy_mode = 0;
+int ke_legacy_active(void) { return g_ke_legacy_mode || g_pintok_trace; }
+
 // Reporte unico por nome (nao polui a serial).
 #define MISS_MAX 32
 static const char* s_missed[MISS_MAX];

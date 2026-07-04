@@ -18,6 +18,7 @@ extern void ki_block_current(void* obj);
 extern int  ki_wake(void* obj, int wake_all);
 extern void ki_yield_processor(void);
 extern void NTAPI KeStallExecutionProcessor_k(ULONG MicroSeconds);
+extern int  ke_legacy_active(void);   // 1 = modo ANTIGO (flag manual OU pintok rodando)
 static inline uint64_t sc_irq_save(void) { uint64_t f; __asm__ volatile ("pushfq; pop %0; cli" : "=r"(f) :: "memory"); return f; }
 static inline void sc_irq_restore(uint64_t f) { __asm__ volatile ("push %0; popfq" :: "r"(f) : "memory", "cc"); }
 // Consome o sinal conforme o tipo do objeto ao satisfazer um wait.
@@ -43,8 +44,10 @@ LONG NTAPI KeSetEvent_k(PKEVENT Event, KPRIORITY Increment, BOOLEAN Wait) {
     if (!Event) return 0;
     LONG prev = Event->Header.SignalState;
     Event->Header.SignalState = 1;
-    // Item 5: acorda waiters. NotificationEvent acorda TODOS; Synchronization UM.
-    ki_wake(&Event->Header, Event->Header.Type == NotificationEvent ? 1 : 0);
+    // Item 5: acorda waiters (so no modo CORRETO; no legado ninguem bloqueia).
+    // NotificationEvent acorda TODOS; SynchronizationEvent acorda UM.
+    if (!ke_legacy_active())
+        ki_wake(&Event->Header, Event->Header.Type == NotificationEvent ? 1 : 0);
     return prev;
 }
 LONG NTAPI KeResetEvent_k(PKEVENT Event) {
@@ -70,9 +73,10 @@ NTSTATUS NTAPI KeWaitForSingleObject_k(PVOID Object, KWAIT_REASON Reason, KPROCE
         if (hdr->SignalState) { sc_consume(hdr); sc_irq_restore(f); return STATUS_SUCCESS; }
         if (Timeout && Timeout->QuadPart == 0) { sc_irq_restore(f); return STATUS_TIMEOUT; }  // poll
         // Sem sinal. Bloqueio real SO p/ espera infinita (Timeout==NULL) de uma
-        // thread worker real. Timeout finito OU contexto idle/boot (pintok):
-        // auto-resolve (comportamento atual — nunca trava).
-        if (Timeout != 0 || !ki_can_block()) { sc_irq_restore(f); return STATUS_SUCCESS; }
+        // thread worker real. Casos de auto-resolve (comportamento ANTIGO —
+        // nunca trava): (a) modo legado (flag OU pintok rodando); (b) timeout
+        // finito; (c) contexto idle/boot que nao pode bloquear.
+        if (ke_legacy_active() || Timeout != 0 || !ki_can_block()) { sc_irq_restore(f); return STATUS_SUCCESS; }
         ki_block_current(hdr);               // WAITING + insere na lista de espera
         ki_yield_processor();                // swap; volta quando acordado
         sc_irq_restore(f);                   // reabilita IF; re-loop re-checa o sinal
@@ -82,6 +86,8 @@ NTSTATUS NTAPI KeWaitForMultipleObjects_k(ULONG Count, PVOID Object[], WAIT_TYPE
                                           KWAIT_REASON Reason, KPROCESSOR_MODE Mode,
                                           BOOLEAN Alertable, PLARGE_INTEGER Timeout, PVOID WaitBlockArray) {
     (void)Reason; (void)Mode; (void)Alertable; (void)Timeout; (void)WaitBlockArray;
+    // Modo legado (flag OU pintok): comportamento ANTIGO (retorna sucesso).
+    if (ke_legacy_active()) return STATUS_SUCCESS;
     // Poll (multi-objeto NAO bloqueia nesta fase — evita travar em Object[0]).
     // Bloqueio multi-objeto real vem com o wait-block array (fase posterior).
     uint64_t f = sc_irq_save();
@@ -211,7 +217,7 @@ LONG NTAPI KeReleaseMutex_k(PKMUTEX Mutex, BOOLEAN Wait) {
     LONG prev = Mutex->Header.SignalState;
     Mutex->Header.SignalState = 1;
     Mutex->OwnerThread = 0;
-    ki_wake(&Mutex->Header, 0);   // Item 5: acorda um waiter
+    if (!ke_legacy_active()) ki_wake(&Mutex->Header, 0);   // Item 5: acorda um waiter (modo correto)
     return prev;
 }
 
@@ -226,7 +232,7 @@ LONG NTAPI KeReleaseSemaphore_k(PKSEMAPHORE Sem, KPRIORITY Inc, LONG Adj, BOOLEA
     if (!Sem) return 0;
     LONG prev = Sem->Header.SignalState;
     Sem->Header.SignalState += Adj;
-    ki_wake(&Sem->Header, 1);   // Item 5: acorda waiters disponiveis (cada um consome 1)
+    if (!ke_legacy_active()) ki_wake(&Sem->Header, 1);   // Item 5: acorda waiters (modo correto)
     return prev;
 }
 

@@ -41,7 +41,9 @@ Ordem noturna: **4 → 1 → 3 → [2] → parada segura**. Deferidos p/ supervi
 | 0a | Reentrância do swap (irq_save/restore) | ✅ | ✅ idêntico | preempção viva (60 beats) | — | 4aec7e6 |
 | 5 | Waits bloqueantes reais (gated) + fix terminate-freeze | ✅ | ✅ idêntico (CPUID x3, C0000365) | preempção viva (48 beats) | **block+wake ACORDOU OK** | (este) |
 
-**Sessão retomada ("Continua").** pintok **não** usa `KeWaitForSingleObject`/`KeInitializeEvent` (baseline) → Item 5 gated por contexto (só threads worker reais bloqueiam; contexto boot/idle, onde o pintok roda, mantém auto-resolve). O auto-teste provou block+wake ponta-a-ponta, e de bônus corrigiu um **freeze latente de término de thread** (`cli;hlt` → `yield`). Próximos: Item 6 (KTIMER), Item 7 (primitivos Ex).
+**Sessão retomada ("Continua").** pintok **não** usa `KeWaitForSingleObject`/`KeInitializeEvent` (baseline) → Item 5 gated por contexto (só threads worker reais bloqueiam; contexto boot/idle, onde o pintok roda, mantém auto-resolve). O auto-teste provou block+wake ponta-a-ponta, e de bônus corrigiu um **freeze latente de término de thread** (`cli;hlt` → `yield`).
+
+**Flag `g_ke_legacy_mode`** (pedido do usuário): `0`=correto/real (default), `1`=volta pro antigo. `ke_legacy_active()` (em `ntoskrnl.c`) também liga o modo antigo **automaticamente** enquanto o pintok roda (`g_pintok_trace=1` no `DriverEntry`), então a trajetória do pintok é **garantidamente** preservada nos itens sensíveis (waits/timers/Ex) — sem setar nada. Waits (Item 5) já respeitam a flag. Isso desbloqueia Items 6/7 reais. Próximos: Item 6 (KTIMER) e Item 7 (Ex), ambos flag-gated.
 
 ---
 

@@ -35,6 +35,7 @@
 #include "ke/timer.h"               // FASE FUNDACAO (Item 6): KTIMER real
 #include "ex/ex_sync.h"             // FASE FUNDACAO (Item 7): primitivos Ex reais
 #include "ke/amd64/kinterrupt.h"    // trilha I/O Fase 3: modelo de interrupcao
+#include "hal/haldma.h"             // trilha I/O Fase 5: HAL DMA
 #include "ex/pool.h"
 #include "ps/systhread.h"
 #include "ke/amd64/kpcr.h"          // FASE 7.2: KPCR/GS_BASE
@@ -1270,6 +1271,10 @@ static const struct { const char* name; void* fn; } g_ntexports[] = {
     EX("IoGetAttachedDevice",              IoGetAttachedDevice_k),
     EX("IoGetAttachedDeviceReference",     IoGetAttachedDeviceReference_k),
     EX("IoGetLowerDeviceObject",           IoGetLowerDeviceObject_k),
+    // trilha I/O Fase 5: HAL DMA (append-only). Common-buffer flag-gated p/ pintok.
+    EX("HalGetDmaAdapter",                 HalGetDmaAdapter),
+    EX("HalAllocateCommonBuffer",          HalAllocateCommonBuffer),
+    EX("HalFreeCommonBuffer",              HalFreeCommonBuffer),
 
     { 0, 0 }
 };

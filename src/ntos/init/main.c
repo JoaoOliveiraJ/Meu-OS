@@ -1179,6 +1179,9 @@ void kmain(uint32_t mb_info) {
     // FASE FUNDACAO (trilha I/O, Fase 2): prova de device stacks.
     extern void KiDeviceStackSelfTest(void);
     KiDeviceStackSelfTest();
+    // FASE FUNDACAO (trilha I/O, Fase 5): prova de HAL DMA.
+    extern void KiDmaSelfTest(void);
+    KiDmaSelfTest();
 
     // --- FASE 10.1: detecta virtio-gpu (modern, virtio 1.1) ---
     // Caminha PCI capabilities, mapeia common/notify/isr/device cfg fora da

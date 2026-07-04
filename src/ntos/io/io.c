@@ -6,6 +6,7 @@
 extern void kputs(const char* s);
 extern void kputc(char c);
 extern void kput_hex(uint64_t v);
+extern int  ke_legacy_active(void);   // trilha I/O Fase 2: gate p/ pintok (legado -> stub)
 
 // Cria um DEVICE_OBJECT como objeto nomeado no namespace (\Device\...).
 NTSTATUS io_create_device(PDRIVER_OBJECT drv, ULONG ext_size, const char* name,
@@ -213,6 +214,80 @@ NTSTATUS NTAPI IoCreateDevice_k(PDRIVER_OBJECT drv, ULONG ext, PUNICODE_STRING n
     return io_create_device(drv, ext, nm[0] ? nm : 0, type, out);
 }
 void NTAPI IoDeleteDevice_k(PDEVICE_OBJECT dev) { (void)dev; }
+
+// ============================================================================
+//  FASE FUNDACAO (trilha I/O, Fase 2) — device stacks.
+//
+//  AttachedDevice/StackSize sao campos reais (Fase 1a). O "lower device" (que um
+//  driver le via IoGetLowerDeviceObject) fica numa side-table (o NT esconde no
+//  DEVOBJ_EXTENSION; aqui array paralelo, mesmo padrao dos symlinks). Flag-gated:
+//  no modo legado (ke_legacy_active: pintok) voltam ao ANTIGO (retorna 0/no-op,
+//  como os stubs) -> trajetoria do pintok preservada. Ref-counting simplificado
+//  (nao chamamos ObReferenceObject: os devices de teste sao estaticos, nao-Ob).
+// ============================================================================
+#define IOSTACK_MAX 64
+static struct { PDEVICE_OBJECT dev; PDEVICE_OBJECT lower; int used; } s_lower[IOSTACK_MAX];
+static void iostack_set_lower(PDEVICE_OBJECT dev, PDEVICE_OBJECT lower) {
+    for (int i = 0; i < IOSTACK_MAX; i++) if (s_lower[i].used && s_lower[i].dev == dev) { s_lower[i].lower = lower; return; }
+    for (int i = 0; i < IOSTACK_MAX; i++) if (!s_lower[i].used) { s_lower[i].dev = dev; s_lower[i].lower = lower; s_lower[i].used = 1; return; }
+}
+static PDEVICE_OBJECT iostack_get_lower(PDEVICE_OBJECT dev) {
+    for (int i = 0; i < IOSTACK_MAX; i++) if (s_lower[i].used && s_lower[i].dev == dev) return s_lower[i].lower;
+    return 0;
+}
+static void iostack_clear_lower(PDEVICE_OBJECT dev) {
+    for (int i = 0; i < IOSTACK_MAX; i++) if (s_lower[i].used && s_lower[i].dev == dev) { s_lower[i].used = 0; return; }
+}
+// Topo da pilha (raw, sem gate) — usado internamente.
+static PDEVICE_OBJECT io_top(PDEVICE_OBJECT dev) {
+    if (!dev) return 0;
+    while (dev->AttachedDevice) dev = (PDEVICE_OBJECT)dev->AttachedDevice;
+    return dev;
+}
+PDEVICE_OBJECT NTAPI IoGetAttachedDevice_k(PDEVICE_OBJECT dev) {
+    return ke_legacy_active() ? 0 : io_top(dev);
+}
+PDEVICE_OBJECT NTAPI IoGetAttachedDeviceReference_k(PDEVICE_OBJECT dev) {
+    return ke_legacy_active() ? 0 : io_top(dev);   // ref simplificado (ver acima)
+}
+PDEVICE_OBJECT NTAPI IoAttachDeviceToDeviceStack_k(PDEVICE_OBJECT Source, PDEVICE_OBJECT Target) {
+    if (ke_legacy_active() || !Source || !Target) return 0;   // ANTIGO: stub retornava 0
+    PDEVICE_OBJECT top = io_top(Target);
+    top->AttachedDevice = Source;
+    Source->StackSize = (signed char)(top->StackSize + 1);
+    iostack_set_lower(Source, top);
+    return top;
+}
+NTSTATUS NTAPI IoAttachDeviceToDeviceStackSafe_k(PDEVICE_OBJECT Source, PDEVICE_OBJECT Target, PDEVICE_OBJECT* AttachedTo) {
+    if (ke_legacy_active()) { if (AttachedTo) *AttachedTo = 0; return STATUS_UNSUCCESSFUL; }
+    PDEVICE_OBJECT t = IoAttachDeviceToDeviceStack_k(Source, Target);
+    if (AttachedTo) *AttachedTo = t;
+    return t ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+}
+void NTAPI IoDetachDevice_k(PDEVICE_OBJECT Target) {
+    if (ke_legacy_active() || !Target) return;   // ANTIGO: no-op
+    PDEVICE_OBJECT top = (PDEVICE_OBJECT)Target->AttachedDevice;
+    Target->AttachedDevice = 0;
+    if (top) iostack_clear_lower(top);
+}
+PDEVICE_OBJECT NTAPI IoGetLowerDeviceObject_k(PDEVICE_OBJECT dev) {
+    return ke_legacy_active() ? 0 : iostack_get_lower(dev);
+}
+
+// Prova de boot: attach de 2 niveis (upper sobre lower) + checagens.
+void KiDeviceStackSelfTest(void) {
+    static DEVICE_OBJECT lower, upper;
+    for (unsigned i = 0; i < sizeof(DEVICE_OBJECT); i++) { ((uint8_t*)&lower)[i] = 0; ((uint8_t*)&upper)[i] = 0; }
+    lower.StackSize = 1;
+    PDEVICE_OBJECT top      = IoAttachDeviceToDeviceStack_k(&upper, &lower);
+    PDEVICE_OBJECT attached = IoGetAttachedDevice_k(&lower);
+    PDEVICE_OBJECT low      = IoGetLowerDeviceObject_k(&upper);
+    if (top == &lower && attached == &upper && upper.StackSize == 2 && low == &lower)
+        kputs("[devstack-test] IoAttachDeviceToDeviceStack (2 niveis) OK\n");
+    else
+        kputs("[devstack-test] FALHOU\n");
+    IoDetachDevice_k(&lower);
+}
 
 // ===== Symbolic links =====
 #define SYMLINK_MAX 32

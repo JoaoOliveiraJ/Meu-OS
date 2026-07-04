@@ -452,6 +452,17 @@ static inline void IoCopyCurrentIrpStackLocationToNext(PIRP Irp) {
     *d = *s;
 }
 
+// FASE FUNDACAO (trilha I/O, Fase 4) — DRIVER_EXTENSION (layout compat com o
+// DRV_EXT de driver.c: AddDevice@0x08). Um function driver seta AddDevice no
+// DriverEntry; o PnP o chama p/ criar a FDO e enviar IRP_MN_START_DEVICE.
+typedef NTSTATUS (NTAPI *PDRIVER_ADD_DEVICE)(PDRIVER_OBJECT DriverObject, PDEVICE_OBJECT PhysicalDeviceObject);
+typedef struct _DRIVER_EXTENSION {
+    PDRIVER_OBJECT     DriverObject;    // 0x00
+    PDRIVER_ADD_DEVICE AddDevice;       // 0x08
+    ULONG              Count;           // 0x10
+    UNICODE_STRING     ServiceKeyName;  // 0x18
+} DRIVER_EXTENSION, *PDRIVER_EXTENSION;
+
 typedef NTSTATUS (NTAPI *PDRIVER_DISPATCH)(PDEVICE_OBJECT, PIRP);
 typedef void     (NTAPI *PDRIVER_UNLOAD)(PDRIVER_OBJECT);
 typedef NTSTATUS (NTAPI *PDRIVER_INITIALIZE)(PDRIVER_OBJECT, PUNICODE_STRING);

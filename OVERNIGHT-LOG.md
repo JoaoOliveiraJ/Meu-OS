@@ -56,7 +56,11 @@ Achado: `IO_STACK_LOCATION` já está NT-correto; correções de layout só melh
 | 2 | Device stacks: `IoAttachDeviceToDeviceStack(Safe)`/`IoDetachDevice`/`IoGetAttachedDevice(Reference)`/`IoGetLowerDeviceObject` (flag-gated; side-table p/ lower device) | ✅ | ✅ idêntico | 4/4 + devstack | afcc4e3 |
 | 5 | HAL DMA: `HalGetDmaAdapter` + vtable `DMA_OPERATIONS` (AllocateCommonBuffer via `pmm_alloc_contiguous`, phys==virt); `HalAllocate/FreeCommonBuffer` flag-gated | ✅ | ✅ idêntico | 6/6 self-tests | 3983df7 |
 | 1b | **IRP → layout NT x64** (`sizeof 0xC8`, `Tail.CurrentStackLocation@0xB8`, array traseiro de `IO_STACK_LOCATION`; `SystemBuffer`→`AssociatedIrp.SystemBuffer`) + macros inline `IoGetCurrent/Next/Skip/Copy` + `IoCallDriver` avança a stack. **72 sites em 8 arquivos** reescritos. `_Static_assert` de offsets | ✅ | ✅ idêntico | 7/7 self-tests | ad25c23 |
-| 6 | Round-trip completo de IOCTL por um driver (mini-driver kernel: `MajorFunction[IRP_MJ_DEVICE_CONTROL]` → `IoCallDriver` → dispatch lê current → escreve SystemBuffer → `IoCompleteRequest`) | ✅ | ✅ idêntico | 8/8 self-tests | (este) |
+| 6 | Round-trip completo de IOCTL por um driver (mini-driver kernel: `MajorFunction[IRP_MJ_DEVICE_CONTROL]` → `IoCallDriver` → dispatch lê current → escreve SystemBuffer → `IoCompleteRequest`) | ✅ | ✅ idêntico | 8/8 self-tests | 2d94a56 |
+| 4 | PnP mínimo: `pnp_start_function_driver` lê `DriverExtension.AddDevice`, cria PDO, chama AddDevice (driver cria FDO + anexa), envia `IRP_MJ_PNP`/`IRP_MN_START_DEVICE`. `DRIVER_EXTENSION` em ntddk.h (AddDevice@0x08). Legado (AddDevice=NULL) = no-op | ✅ | ✅ idêntico | 9/9 self-tests | (este) |
+
+### ✅✅ TRILHA DE DRIVERS I/O COMPLETA (Fases 1a,1b,2,3,4,5,6)
+**9/9 self-tests num boot**: int-test, devstack-test, dma-test, irp-test, drv-irp-test, pnp-test, ex-test, wait-test, timer-test. Pintok intacto o tempo todo. Um driver WDM genérico agora tem tudo: criar device (layout NT), **processar IRP** (layout NT), device stacks, `IoConnectInterrupt` (ISR em DIRQL), DMA, PnP (AddDevice+START_DEVICE), + fundação Ke completa. Wire de `pnp_start_function_driver`/START_DEVICE no caminho de load (driver.c) = passo futuro quando houver function driver real (driver.c fica intocado — pintok-safe).
 
 Fluxo de IRP provado ponta-a-ponta (`[irp-test]`: build→advance→read, campos corretos). Drivers in-tree (ntfs/ioctldriver/calller) rodam `DriverEntry` completo. **Falta só**: Fase 4 (PnP: AddDevice + `IRP_MJ_PNP` START_DEVICE) e Fase 6 (drivers de teste WDM que processam IRP) — ambas agora desbloqueadas.
 

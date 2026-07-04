@@ -967,6 +967,9 @@ static void sched_start_demo_threads(void) {
     // FASE FUNDACAO (Item 6): auto-teste do KTIMER (worker arma timer e bloqueia nele).
     extern void KiTimerSelfTestSpawn(void);
     KiTimerSelfTestSpawn();
+    // FASE FUNDACAO (Item 7): auto-teste dos primitivos Ex (fast mutex + lookaside).
+    extern void KiExSelfTestSpawn(void);
+    KiExSelfTestSpawn();
 
     __atomic_store_n(&g_p4_active, 1, __ATOMIC_SEQ_CST);   // liga a preempcao no timer ISR
     kputs("[sched] preempcao LIGADA (g_p4_active=1). Timer 0xD1 escalona agora.\n");

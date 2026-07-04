@@ -222,7 +222,9 @@ PIRP NTAPI IoBuildAsynchronousFsdRequest_k(ULONG MajorFunction, PDEVICE_OBJECT D
         if (MajorFunction == IRP_MJ_WRITE) s->Parameters.Write.ByteOffset = (uint64_t)StartingOffset->QuadPart;
         else if (MajorFunction == IRP_MJ_READ) s->Parameters.Read.ByteOffset = (uint64_t)StartingOffset->QuadPart;
     }
-    if (IoStatusBlock) irp->IoStatus = *IoStatusBlock;
+    // NT guarda o ponteiro do IOSB do chamador em UserIosb; o walk de conclusao
+    // escreve o resultado la no fim (write-back real), em vez de copiar pra dentro.
+    if (irp) irp->UserIosb = IoStatusBlock;
     return irp;
 }
 PIRP NTAPI IoBuildDeviceIoControlRequest_k(ULONG IoControlCode, PDEVICE_OBJECT DeviceObject,
@@ -230,10 +232,12 @@ PIRP NTAPI IoBuildDeviceIoControlRequest_k(ULONG IoControlCode, PDEVICE_OBJECT D
                                            PVOID OutputBuffer, ULONG OutputBufferLength,
                                            BOOLEAN InternalDeviceIoControl, PVOID Event,
                                            PIO_STATUS_BLOCK IoStatusBlock) {
-    (void)InternalDeviceIoControl; (void)Event;
+    (void)InternalDeviceIoControl;
     PIRP irp = io_build_ioctl(IoControlCode, DeviceObject, InputBuffer, InputBufferLength,
                               OutputBuffer, OutputBufferLength);
-    if (irp && IoStatusBlock) irp->IoStatus = *IoStatusBlock;
+    // UserIosb/UserEvent: o walk de conclusao escreve o IOSB e sinaliza o evento do
+    // chamador ao finalizar — e' assim que um DeviceIoControl sincrono acorda quem espera.
+    if (irp) { irp->UserIosb = IoStatusBlock; irp->UserEvent = Event; }
     return irp;
 }
 

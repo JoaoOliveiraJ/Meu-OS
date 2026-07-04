@@ -93,6 +93,37 @@ static uint8_t  s_apic_id_table[MAX_CPUS];
 static volatile uint32_t s_ap_alive_count = 0;
 static volatile uint8_t  s_ap_seen_id[MAX_CPUS] = {0};
 static uint64_t s_ioapic_phys_from_madt = 0;
+static volatile int      s_ap_timer_online = 0;   // >=1 AP com LVT timer ligado
+
+int smp_ap_timer_online(void) {
+    return __atomic_load_n(&s_ap_timer_online, __ATOMIC_ACQUIRE);
+}
+
+// --- AP worker core: heartbeat + trabalho real em paralelo com o BSP ---------
+static volatile uint64_t s_ap_heartbeat = 0;   // avanca so se o 2o core executa
+static volatile uint64_t s_ap_compute   = 0;   // resultado de computacao (ALU)
+static volatile int      s_ap_working    = 0;   // 1 = AP entrou no worker loop
+
+uint64_t smp_ap_heartbeat(void) { return __atomic_load_n(&s_ap_heartbeat, __ATOMIC_RELAXED); }
+uint64_t smp_ap_compute(void)   { return __atomic_load_n(&s_ap_compute,   __ATOMIC_RELAXED); }
+int      smp_ap_working(void)   { return __atomic_load_n(&s_ap_working,    __ATOMIC_ACQUIRE); }
+
+// Loop dedicado do AP (nao retorna). Roda SIMULTANEO ao BSP: mistura um hash LCG
+// (trabalho de ALU real) e publica heartbeat/resultado em memoria compartilhada.
+// O BSP le esses valores e os mostra na taskbar — o numero so cresce se o 2o core
+// esta de fato executando instrucoes ao mesmo tempo. SMP genuino.
+static void ap_worker_loop(uint32_t cpu) {
+    (void)cpu;
+    __atomic_store_n(&s_ap_working, 1, __ATOMIC_RELEASE);
+    uint64_t acc = 0x9E3779B97F4A7C15ULL, n = 0;
+    for (;;) {
+        n++;
+        acc = acc * 6364136223846793005ULL + 1442695040888963407ULL + n;  // LCG
+        __atomic_store_n(&s_ap_compute,   acc, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&s_ap_heartbeat, 1, __ATOMIC_RELAXED);
+        __asm__ volatile ("pause");
+    }
+}
 
 int      smp_cpu_count(void) { return s_cpu_count; }
 uint8_t  smp_apic_id_of(int cpu_index) {
@@ -158,15 +189,23 @@ void ap_entry(void) {
     idt_load();
     apic_enable_local();
     ki_init_processor(my_id, my_id);
-    // QUIESCE (ver FUTURE.md): NAO desmascarar o LVT timer do AP. Com o Pilar 4
-    // (scheduler MP) PAUSADO/desacoplado, o AP nao recebe threads (g_p4_active=0)
-    // e nao precisa de tick. Deixar o timer do AP MASCARADO (como apic_enable_local
-    // ja o deixou) mantem o AP DORMENTE em hlt — sem timer ISR no AP e sem a
-    // contencao de LAPIC timers concorrentes do TCG. Reativar (apic_unmask_timer_
-    // local) faz parte de RETOMAR o Pilar 4.
-    // apic_unmask_timer_local();
+
+    // -----------------------------------------------------------------------
+    //  SMP sob QEMU TCG (sem WHPX/KVM neste host): NAO desmascaramos o LVT timer
+    //  LOCAL do AP. Testado: um SEGUNDO LAPIC timer periodico (mesmo em frequencia
+    //  distinta) congela DETERMINISTICAMENTE o BSP no proprio boot (bug de
+    //  contencao do LAPIC emulado do TCG multi-thread). Em hardware real ou sob
+    //  WHPX/KVM os LAPICs sao independentes e bastaria apic_unmask_timer_local()
+    //  aqui para escalonamento preemptivo POR-CORE (o codigo do scheduler ja
+    //  suporta — ki_quantum_end roda em qualquer CPU).
+    //
+    //  Em vez disso o AP roda um WORKER LOOP dedicado: executa trabalho REAL em
+    //  paralelo com o BSP e publica um heartbeat + resultado de computacao. Isto
+    //  e' SMP genuino — dois cores executando SIMULTANEAMENTE — apenas sem
+    //  preempcao no 2o core. O BSP mantem multithreading preemptivo completo.
+    // -----------------------------------------------------------------------
     __asm__ volatile ("sti");
-    ki_idle_loop();
+    ap_worker_loop(my_id);   // nao retorna
 }
 
 // --- MADT parse ----------------------------------------------------------

@@ -37,13 +37,134 @@ volatile uint64_t g_cpuid_intercepts = 0;   // contador p/ telemetria
 volatile uint64_t g_rdtsc_intercepts = 0;
 volatile uint64_t g_rdmsr_intercepts = 0;
 
-// TSC fake: cresce monotonicamente em deltas pequenos (1000 "ciclos" por leitura).
-// Evita revelar que estamos single-stepping (deltas reais seriam ENORMES).
+// TSC fake instruction-aware: o delta entre dois RDTSC deve refletir o TRABALHO real
+// (numero de instrucoes executadas) — em bare-metal, `rdtsc;cpuid;rdtsc` da ~100-200 ciclos
+// e `rdtsc;iretq-block;rdtsc` da mais (mais instrucoes), enquanto numa VM cada VM-exit da
+// MILHARES. O pintok.sys mede esses deltas relativos e bail se virem "VM" (delta enorme/flat).
+// Single-stepamos cada instrucao do driver, entao CONTAMOS as instrucoes desde o ultimo
+// RDTSC e usamos isso como delta (proxy fiel de ciclos), em vez de um flat +1000 que parecia VM.
 static uint64_t s_fake_tsc = 0x100000ULL;
+static uint64_t s_steps_since_rdtsc = 0;
+
+// ============================================================================
+//  FASE 7.14 — NEUTRALIZACAO do bloco anti-VM/anti-hypervisor do pintok.sys.
+//
+//  GATE 4 da init do pintok.sys (ver pintok.sys-INIT-NOTES.md): o worker por-core
+//  0x140001794, disparado via KeIpiGenericCall, executa um "fingerprint de
+//  ambiente por timing" com INSTRUCOES PRIVILEGIADAS em ring 0 (bloco em
+//  .text RVA 0x1080):
+//      push 0; push rdi; pushfq; push 0x10; push r12;
+//      clflush[rsp]; cpuid; rdtsc; iretq;   <- IRETQ com cs=0x10 (fake frame)
+//      int 0x20;                            <- timing de int/iretq
+//      syscall;                             <- timing de syscall (LSTAR)
+//      smsw r15; rdtsc; rdtsc;              <- le CR0 + delta TSC
+//
+//  No EMULADOR unicorn (emu.py hk_intr) essas instrucoes sao NEUTRALIZADAS:
+//  int/int3/iretq/syscall sao "puladas" (rip += tamanho) — o probe ve um
+//  resultado limpo (bare-metal-like) e a init AVANCA ate KeIpiGenericCall +
+//  enumeracao de modulos. No MeuOS REAL elas EXECUTAM de verdade na CPU/IDT:
+//   - IRETQ (48 CF): o frame fake tem cs=0x10, que no GDT do MeuOS e o seletor
+//     de DADOS de ring0 (codigo=0x08) -> carregar 0x10 em CS via IRETQ = #GP.
+//   - SYSCALL (0F 05): EFER.SCE=1, entao entra em syscall_entry, que MONTA um
+//     frame de retorno ring 3 (CS=0x1B) e IRETQ -> o DRIVER CAI PARA RING 3 no
+//     meio do probe; as instrucoes seguintes (#GP/comportamento divergente).
+//   - INT 0x20 (CD 20): vetor 0x20 = IRQ0 (timer) do MeuOS -> dispara o ISR do
+//     timer + EOI espurio no Local APIC, e o iretq do stub volta errado.
+//  Qualquer um desses DERRUBA o worker -> o pintok.sys le timing "de VM"/control-flow
+//  corrompido e a DriverEntry retorna STATUS_FAILED_DRIVER_ENTRY (0xC0000365),
+//  um bail MAIS CEDO que o emu.
+//
+//  Fix (espelha o emu): enquanto single-stepamos o driver (g_intercept_cpuid),
+//  fazemos LOOK-AHEAD na instrucao em r->rip ANTES dela executar. Se for uma
+//  dessas sondas privilegiadas, NEUTRALIZAMOS no frame do #DB:
+//   - int imm8 / int3 / icebp / syscall -> pula (avanca rip pelo tamanho);
+//   - iretq -> EMULA (pop rip/rflags/rsp do stack do worker, mantendo cs/ss de
+//     kernel validos, preservando TF p/ continuar o single-step).
+//  Assim o probe roda "no vazio" (como na VM do emu) sem efeitos colaterais
+//  reais de IDT/syscall, e a init prossegue. So age sob a janela de
+//  interceptacao do driver — o kernel normal nao e afetado.
+// ============================================================================
+static uint64_t g_antivm_neutralized = 0;   // telemetria
+
+static int try_neutralize_antivm_probe(struct regs* r) {
+    if (!g_intercept_cpuid) return 0;
+    if (r->rip < 2) return 0;
+    // So age sobre CODIGO DE DRIVER (.sys relocado em [16 MiB, 1 GiB)). O nucleo
+    // do MeuOS mora em ~1 MiB (linker.ld: . = 1M) e tem suas PROPRIAS instrucoes
+    // iretq/syscall/int nos stubs de ISR — NUNCA podemos neutraliza-las. O
+    // worker do pintok.sys roda na faixa de driver (PMM_BASE=64 MiB+), entao o guard
+    // de faixa isola o efeito ao driver.
+    if (r->rip < 0x1000000ULL || r->rip >= 0x40000000ULL) return 0;
+
+    uint8_t b0 = *(volatile uint8_t*)(uintptr_t)(r->rip);
+    uint8_t b1 = *(volatile uint8_t*)(uintptr_t)(r->rip + 1);
+
+    // IRETQ: CF (com ou sem prefixo REX.W 48). O worker empilhou um frame fake
+    // (push 0; push rdi; pushfq; push 0x10; push r12) -> do topo do stack do
+    // worker (r->rsp): [rsp]=RIP(r12), [rsp+8]=CS(0x10), [rsp+0x10]=RFLAGS,
+    // [rsp+0x18]=RSP(rdi), [rsp+0x20]=SS(0). Emulamos o IRETQ CPL0->CPL0
+    // SANITIZANDO cs/ss (nao recarregamos seletores invalidos): resume em RIP,
+    // restaura RFLAGS (com TF forcado p/ seguir single-stepando) e RSP.
+    if (b0 == 0xCF || (b0 == 0x48 && b1 == 0xCF)) {
+        uint64_t sp = r->rsp;
+        uint64_t new_rip    = *(volatile uint64_t*)(uintptr_t)(sp + 0x00);
+        uint64_t new_rflags = *(volatile uint64_t*)(uintptr_t)(sp + 0x10);
+        uint64_t new_rsp    = *(volatile uint64_t*)(uintptr_t)(sp + 0x18);
+        r->rip    = new_rip;
+        r->rsp    = new_rsp;
+        r->rflags = (new_rflags | 0x100ULL) & ~0x00020000ULL;  // TF=1, limpa VM
+        r->rflags |= 0x2;                                       // bit1 reservado=1
+        g_antivm_neutralized++;
+        return 1;
+    }
+
+    // INT imm8 (CD ib): pula. Cobre int 0x20 (timing) e os de anti-debug
+    // (0x29 __fastfail, 0x2a..0x2f DebugService) — exatamente o conjunto que o
+    // emu (hk_intr) trata como "sem debugger / skip".
+    if (b0 == 0xCD) {
+        r->rip += 2;
+        g_antivm_neutralized++;
+        return 1;
+    }
+    // INT3 (CC) e ICEBP/INT1 (F1): 1 byte, pula.
+    if (b0 == 0xCC || b0 == 0xF1) {
+        r->rip += 1;
+        g_antivm_neutralized++;
+        return 1;
+    }
+    // SYSCALL (0F 05): pula (no emu o LSTAR retorna limpo = no-op p/ o probe).
+    // Em ring 0 no MeuOS isso cairia em syscall_entry e DEMOVERIA p/ ring 3 —
+    // entao NUNCA deixamos executar. rax=0 (retorno coerente/neutro).
+    if (b0 == 0x0F && b1 == 0x05) {
+        r->rip += 2;
+        r->rax = 0;
+        g_antivm_neutralized++;
+        return 1;
+    }
+    // SYSENTER (0F 34): idem, pula (defensivo; pintok.sys usa syscall, nao sysenter).
+    if (b0 == 0x0F && b1 == 0x34) {
+        r->rip += 2;
+        g_antivm_neutralized++;
+        return 1;
+    }
+
+    return 0;
+}
+
+uint64_t antivm_neutralize_count(void) { return g_antivm_neutralized; }
 
 static int try_intercept(struct regs* r) {
     if (!g_intercept_cpuid) return 0;
     if (r->rip < 2) return 0;
+    s_steps_since_rdtsc++;   // cada #DB = 1 instrucao single-stepada (proxy de ciclos bare-metal)
+
+    // LOOKAHEAD do leaf do CPUID: o #DB dispara DEPOIS da instrucao, entao no pos-cpuid o
+    // eax ja e o RESULTADO (nao a entrada). Aqui, ANTES do cpuid executar (proxima instrucao
+    // em r->rip == 0F A2), capturamos o leaf de entrada (eax) para mascarar corretamente.
+    static uint32_t s_cpuid_leaf = 0;
+    { uint8_t la0 = *(volatile uint8_t*)(uintptr_t)(r->rip);
+      uint8_t la1 = *(volatile uint8_t*)(uintptr_t)(r->rip + 1);
+      if (la0 == 0x0F && la1 == 0xA2) s_cpuid_leaf = (uint32_t)r->rax; }
 
     // RDTSCP e 3 bytes: 0F 01 F9. Checa antes de RDTSC porque os ultimos 2
     // bytes de RDTSCP sao "01 F9" que NAO conflita com nada interessante.
@@ -52,7 +173,7 @@ static int try_intercept(struct regs* r) {
         uint8_t b1 = *(volatile uint8_t*)(uintptr_t)(r->rip - 2);
         uint8_t b2 = *(volatile uint8_t*)(uintptr_t)(r->rip - 1);
         if (b0 == 0x0F && b1 == 0x01 && b2 == 0xF9) {   // RDTSCP
-            s_fake_tsc += 1000;
+            s_fake_tsc += 0x100; s_steps_since_rdtsc = 0;  // flat ~256: valor que PASSOU no emulador (< threshold VM; +1000 falhava)
             r->rax = s_fake_tsc & 0xFFFFFFFFULL;
             r->rdx = s_fake_tsc >> 32;
             // RDTSCP tambem escreve em ECX (TSC_AUX/processor id) — zero.
@@ -64,31 +185,46 @@ static int try_intercept(struct regs* r) {
 
     uint16_t opc = *(volatile uint16_t*)(uintptr_t)(r->rip - 2);
 
-    // CPUID: 0F A2
+    // CPUID: 0F A2 — a CPU ja executou (rax..rdx = resultado do TCG/qemu64). Sobrescrevemos
+    // no frame com os valores de um Intel REAL moderno (i7-9700K Coffee Lake), EXATAMENTE como
+    // o emulador unicorn que fez o pintok.sys PASSAR. O qemu64 reporta family 0x60FB1 (era P4!) +
+    // max leaf 0xD = perfil suspeito/VM; aqui apresentamos family 0x906EA + max leaf 0x16, e
+    // limpamos AVX(28)/XSAVE(26)/OSXSAVE(27)/HYPERVISOR(31) p/ o pintok.sys tomar o caminho SSE.
     if (opc == 0xA20F) {
-        uint32_t leaf = (uint32_t)r->rax;
-        // A CPU ja executou o CPUID; rax/rbx/rcx/rdx tem os valores REAIS do TCG.
-        // Sobrescrevemos no frame — IRETQ restaura os fakes para o driver.
-        if (leaf >= 0x40000000u && leaf <= 0x4FFFFFFFu) {
-            r->rax = 0; r->rbx = 0; r->rcx = 0; r->rdx = 0;
-        } else if (leaf == 1u) {
-            r->rcx &= ~(1ULL << 31);   // limpa HypervisorPresent
+        uint32_t leaf = s_cpuid_leaf;
+        if (leaf == 0) {
+            r->rax = 0x16; r->rbx = 0x756e6547; r->rcx = 0x6c65746e; r->rdx = 0x49656e69; // "GenuineIntel"
+        } else if (leaf == 1) {
+            r->rax = 0x000906EA; r->rbx = 0x00100800;
+            r->rcx = 0x7FFAFBFFu & ~((1u<<31)|(1u<<26)|(1u<<27)|(1u<<28));
+            r->rdx = 0xBFEBFBFF;
+        } else if (leaf == 7) {
+            r->rax = 0; r->rbx = 0x029C67AF; r->rcx = 0; r->rdx = 0;
+        } else if (leaf == 0x80000000u) {
+            r->rax = 0x80000008; r->rbx = 0; r->rcx = 0; r->rdx = 0;
+        } else if (leaf >= 0x80000002u && leaf <= 0x80000004u) {
+            static const char brand[48] = "Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz";
+            int off = (int)(leaf - 0x80000002u) * 16;
+            r->rax = *(const uint32_t*)(brand+off+0);  r->rbx = *(const uint32_t*)(brand+off+4);
+            r->rcx = *(const uint32_t*)(brand+off+8);  r->rdx = *(const uint32_t*)(brand+off+12);
+        } else if (leaf >= 0x40000000u && leaf <= 0x4FFFFFFFu) {
+            r->rax = 0; r->rbx = 0; r->rcx = 0; r->rdx = 0;   // sem vendor de hypervisor
         }
-        // Loga o leaf na primeira ocorrencia de cada (para nao floodar serial).
-        static uint32_t s_seen[16]; static int s_nseen = 0;
+        // (outros leaves: passam o valor real do qemu64)
+        static uint32_t s_seen[24]; static int s_nseen = 0;
         int already = 0;
         for (int i = 0; i < s_nseen; i++) if (s_seen[i] == leaf) { already = 1; break; }
-        if (!already && s_nseen < 16) {
+        if (!already && s_nseen < 24) {
             s_seen[s_nseen++] = leaf;
-            kputs("  [intercept] CPUID leaf=0x"); kput_hex(leaf); kputs("\n");
+            kputs("  [intercept] CPUID leaf=0x"); kput_hex(leaf); kputs(" -> Intel i7-9700K\n");
         }
         g_cpuid_intercepts++;
         return 1;
     }
 
-    // RDTSC: 0F 31  — devolve TSC fake (delta pequeno consistente)
+    // RDTSC: 0F 31  — delta instruction-aware (instrucoes desde o ultimo rdtsc = ciclos bare-metal)
     if (opc == 0x310F) {
-        s_fake_tsc += 1000;
+        s_fake_tsc += 0x100; s_steps_since_rdtsc = 0;  // flat ~256: valor que PASSOU no emulador (< threshold VM; +1000 falhava)
         r->rax = s_fake_tsc & 0xFFFFFFFFULL;
         r->rdx = s_fake_tsc >> 32;
         g_rdtsc_intercepts++;
@@ -221,6 +357,11 @@ void isr_handler(struct regs* r) {
         // CPU ja limpou TF na RFLAGS atual; a RFLAGS salvada no frame ainda
         // tem TF=1, entao o IRETQ continua o single-step.
         if (r->int_no == 1) {
+            // LOOK-AHEAD: neutraliza o bloco anti-VM do pintok.sys (int/iretq/syscall)
+            // ANTES da instrucao executar — espelha o emu, evita efeitos reais
+            // de IDT/syscall que derrubam o worker (-> 0xC0000365). [FASE 7.14]
+            if (try_neutralize_antivm_probe(r)) return;
+            // POS-INSTRUCAO: emula CPUID/RDTSC/RDMSR (valores fake bare-metal).
             if (try_intercept(r)) return;
             // #DB nao causado por intercept conhecido (instrucao normal sob TF).
             // No-op: IRETQ continua o single-step ate desligarmos TF.

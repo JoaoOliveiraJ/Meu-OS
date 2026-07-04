@@ -706,6 +706,10 @@ uint32_t virtio_gpu_cmd_set_scanout(uint32_t scanout_id, uint32_t resource_id,
 }
 
 // 5) TRANSFER_TO_HOST_2D — copia bytes do backing para o recurso do host.
+// Suprime o log serial de TRANSFER/FLUSH (ligado durante presents de cursor,
+// que ocorrem a cada movimento do mouse — logar cada um floodaria a serial).
+static int s_vgpu_quiet = 0;
+
 uint32_t virtio_gpu_cmd_transfer_to_host_2d(uint32_t resource_id,
                                             uint64_t offset,
                                             uint32_t x, uint32_t y,
@@ -724,10 +728,12 @@ uint32_t virtio_gpu_cmd_transfer_to_host_2d(uint32_t resource_id,
     req->padding     = 0;
 
     uint32_t t = virtio_gpu_send_cmd(req, sizeof(*req), resp, sizeof(*resp));
-    kputs("[vgpu] TRANSFER_TO_HOST_2D resource_id="); kput_dec(resource_id);
-    kputs(" "); kput_dec(width); kputc('x'); kput_dec(height);
-    kputs(" offset="); kput_dec(offset);
-    kputs(" -> "); kputs(virtio_gpu_resp_name(t)); kputc('\n');
+    if (!s_vgpu_quiet) {
+        kputs("[vgpu] TRANSFER_TO_HOST_2D resource_id="); kput_dec(resource_id);
+        kputs(" "); kput_dec(width); kputc('x'); kput_dec(height);
+        kputs(" offset="); kput_dec(offset);
+        kputs(" -> "); kputs(virtio_gpu_resp_name(t)); kputc('\n');
+    }
     kfree(req);
     kfree(resp);
     return t;
@@ -750,9 +756,11 @@ uint32_t virtio_gpu_cmd_resource_flush(uint32_t resource_id,
     req->padding     = 0;
 
     uint32_t t = virtio_gpu_send_cmd(req, sizeof(*req), resp, sizeof(*resp));
-    kputs("[vgpu] RESOURCE_FLUSH resource_id="); kput_dec(resource_id);
-    kputs(" "); kput_dec(width); kputc('x'); kput_dec(height);
-    kputs(" -> "); kputs(virtio_gpu_resp_name(t)); kputc('\n');
+    if (!s_vgpu_quiet) {
+        kputs("[vgpu] RESOURCE_FLUSH resource_id="); kput_dec(resource_id);
+        kputs(" "); kput_dec(width); kputc('x'); kput_dec(height);
+        kputs(" -> "); kputs(virtio_gpu_resp_name(t)); kputc('\n');
+    }
     kfree(req);
     kfree(resp);
     return t;
@@ -1273,6 +1281,21 @@ void virtio_gpu_present(void) {
     (void)virtio_gpu_cmd_resource_flush(g_vgpu.fb_resource_id,
                                         0, 0,
                                         g_vgpu.fb_width, g_vgpu.fb_height);
+}
+
+// Present PARCIAL: publica so o retangulo (x,y,w,h) do framebuffer. Usado pelo
+// cursor de software (move do mouse) para nao re-transferir a tela inteira a cada
+// movimento — mantem o cursor fluido. Silencioso (nao loga cada transfer/flush).
+void virtio_gpu_present_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    if (!g_vgpu.display_ok || w == 0 || h == 0) return;
+    if (x >= g_vgpu.fb_width || y >= g_vgpu.fb_height) return;
+    if (x + w > g_vgpu.fb_width)  w = g_vgpu.fb_width  - x;
+    if (y + h > g_vgpu.fb_height) h = g_vgpu.fb_height - y;
+    uint64_t offset = (uint64_t)y * g_vgpu.fb_pitch + (uint64_t)x * 4u;
+    s_vgpu_quiet = 1;
+    (void)virtio_gpu_cmd_transfer_to_host_2d(g_vgpu.fb_resource_id, offset, x, y, w, h);
+    (void)virtio_gpu_cmd_resource_flush(g_vgpu.fb_resource_id, x, y, w, h);
+    s_vgpu_quiet = 0;
 }
 
 // Acessores para o gpu.c.

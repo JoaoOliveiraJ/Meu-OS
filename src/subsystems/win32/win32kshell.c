@@ -65,13 +65,13 @@
 //   - start button 40x40 (cabe na taskbar).
 //   - botao de app na taskbar: 96x32 (cabem ~9 na largura).
 //   - start menu popup: 400x500 (acima da taskbar).
-#define SH_TASKBAR_H10     40
-#define SH_START_BTN_W     40
-#define SH_APP_BTN_W       96
-#define SH_APP_BTN_H       32
-#define SH_CLOCK_W         56
-#define SH_MENU_W          400
-#define SH_MENU_H          500
+#define SH_TASKBAR_H10     48
+#define SH_START_BTN_W     48
+#define SH_APP_BTN_W       160
+#define SH_APP_BTN_H       40
+#define SH_CLOCK_W         92
+#define SH_MENU_W          320
+#define SH_MENU_H          460
 
 // Chrome de janela estilo Windows 10:
 //   - title bar height 18 (em LFB; cabe a fonte 8x8 + padding).
@@ -81,9 +81,9 @@
 // desenha a barra "espessa" de 18px POR CIMA — a area cliente comeca depois da
 // barra original (TITLE_H=12), entao texto nao colide com nossa barra extra.
 // (Visualmente: barra do BASE 12px + extensao 6px = 18px total da chrome.)
-#define SH_TITLE_H         18
-#define SH_BTN_W           18
-#define SH_BTN_H           18
+#define SH_TITLE_H         28
+#define SH_BTN_W           46
+#define SH_BTN_H           28
 
 // ============================================================================
 //  Estado da shell (escopo do TU win32k).
@@ -306,6 +306,275 @@ static void shell_draw_start_menu(void) {
         y += 32;
         if (y + 32 > my + mh) break;
     }
+}
+
+// ============================================================================
+//  ====================  COMPOSE TRUE-COLOR (Windows 10/11)  ==================
+//
+//  Caminho usado quando o backend e o LFB 32 bpp (gpu_active). Desenha o
+//  desktop INTEIRO com cores XRGB reais: wallpaper com gradiente, janelas com
+//  drop-shadow + caption em gradiente de acento + botoes [_ [] X], taskbar
+//  acrilica com botao Iniciar (logo de 4 ladrilhos), botoes de app e relogio.
+//
+//  As funcoes _tc (true-color) sao paralelas as de paleta acima (usadas so no
+//  fallback mode13h). win32k_shell_compose_full e' chamada por win32k_compose.
+// ============================================================================
+
+// SMP: status dos cores para a system tray (prova visual de multinucleo).
+extern int      smp_cpu_count(void);
+extern int      smp_ap_working(void);
+extern uint64_t smp_ap_heartbeat(void);
+
+// uint64 -> string decimal (helper local; kput_dec e' so serial).
+static int shell_u64(char* buf, uint64_t v) {
+    char tmp[24]; int n = 0;
+    if (v == 0) { buf[0] = '0'; buf[1] = 0; return 1; }
+    while (v) { tmp[n++] = (char)('0' + (int)(v % 10)); v /= 10; }
+    for (int i = 0; i < n; i++) buf[i] = tmp[n - 1 - i];
+    buf[n] = 0; return n;
+}
+static void shell_strcat(char* dst, int* p, const char* s) {
+    while (*s) dst[(*p)++] = *s++;
+    dst[*p] = 0;
+}
+
+// Largura reservada na direita da taskbar para a system tray de CPU.
+#define SH_TRAY_W  150
+
+// Logo do Iniciar: 4 ladrilhos azuis (bandeira do Windows) centrados no botao.
+static void shell_logo4_tc(int bx, int by, int box_w) {
+    int tile = 9, gap = 3;
+    int ox = bx + (box_w - (2 * tile + gap)) / 2;
+    int oy = by + (SH_TASKBAR_H10 - (2 * tile + gap)) / 2;
+    uint32_t c = UI_START_TILE;
+    w32k_rgb_rect(ox,             oy,             tile, tile, c);
+    w32k_rgb_rect(ox + tile + gap, oy,            tile, tile, c);
+    w32k_rgb_rect(ox,             oy + tile + gap, tile, tile, c);
+    w32k_rgb_rect(ox + tile + gap, oy + tile + gap, tile, tile, c);
+}
+
+// Botoes da caption [_] [[]] [X] no canto superior direito. Geometria IDENTICA
+// a do hit-test em win32k_shell_on_mouse (x_close = x+w-SH_BTN_W-1).
+static void shell_caption_buttons_tc(WND* w, int slot) {
+    int bh = TITLE_H;
+    int by = w->y;
+    int x_close = w->x + w->w - SH_BTN_W - 1;
+    int x_max   = x_close - SH_BTN_W;
+    int x_min   = x_max   - SH_BTN_W;
+    if (x_min < w->x) return;                 // janela estreita demais p/ botoes
+
+    int hov_close = (s_pending_close_idx == slot);
+    int hov_max   = (s_pending_max_idx   == slot);
+    int hov_min   = (s_pending_min_idx   == slot);
+
+    // Minimize: barra horizontal.
+    if (hov_min) w32k_rgb_rect(x_min, by, SH_BTN_W, bh, UI_BTN_HOVER);
+    w32k_rgb_rect(x_min + SH_BTN_W / 2 - 6, by + bh / 2 + 3, 12, 2, UI_TEXT_LT);
+
+    // Maximize: quadrado de contorno (2px de espessura visual).
+    if (hov_max) w32k_rgb_rect(x_max, by, SH_BTN_W, bh, UI_BTN_HOVER);
+    w32k_rgb_frame(x_max + SH_BTN_W / 2 - 6, by + bh / 2 - 6, 12, 12, UI_TEXT_LT);
+    w32k_rgb_frame(x_max + SH_BTN_W / 2 - 5, by + bh / 2 - 5, 10, 10, UI_TEXT_LT);
+
+    // Close: X (fundo vermelho no hover). Duas diagonais de 2px.
+    if (hov_close) w32k_rgb_rect(x_close, by, SH_BTN_W, bh, UI_CLOSE_HOVER);
+    int cx = x_close + SH_BTN_W / 2 - 4, cy = by + bh / 2 - 4;
+    for (int k = 0; k < 9; k++) {
+        gpu_pixel(cx + k,     cy + k, UI_TEXT_LT);
+        gpu_pixel(cx + k + 1, cy + k, UI_TEXT_LT);
+        gpu_pixel(cx + 8 - k, cy + k, UI_TEXT_LT);
+        gpu_pixel(cx + 8 - k + 1, cy + k, UI_TEXT_LT);
+    }
+}
+
+// Uma janela "normal" completa: sombra + cliente + caption + titulo + botoes + borda.
+static void shell_window_tc(WND* w, int slot) {
+    int active = (w->id == s_focus_id);
+    int x = w->x, y = w->y, ww = w->w, hh = w->h;
+
+    w32k_rgb_shadow(x, y, ww, hh);                       // drop shadow
+
+    // Corpo (area cliente) abaixo da caption — branco Win10.
+    if (hh > TITLE_H)
+        w32k_rgb_rect(x, y + TITLE_H, ww, hh - TITLE_H, UI_CLIENT);
+
+    // Caption com gradiente vertical (acento se focada, cinza se nao).
+    if (active) gpu_gradient_v(x, y, ww, TITLE_H, UI_ACCENT_LT, UI_ACCENT_DK);
+    else        gpu_gradient_v(x, y, ww, TITLE_H, UI_TITLE_INACT1, UI_TITLE_INACT2);
+
+    // Titulo em 2x (16px) com leve sombra, centrado na altura da caption.
+    int ty = y + (TITLE_H - 16) / 2;
+    w32k_rgb_text_sh(x + 12, ty, w->title,
+                     active ? UI_TEXT_LT : UI_TEXT_DIM, 0x00102038, 2);
+
+    shell_caption_buttons_tc(w, slot);
+
+    // Borda externa 1px (acento quando focada).
+    w32k_rgb_frame(x, y, ww, hh, active ? UI_ACCENT_DK : 0x00303337);
+}
+
+// Taskbar acrilica: fundo escuro translucido + Iniciar + botoes de app + relogio.
+static void shell_taskbar_tc(void) {
+    int W  = scr_width();
+    int ty = scr_height() - SH_TASKBAR_H10;
+
+    gpu_blend_rect(0, ty, W, SH_TASKBAR_H10, UI_TASKBAR, 236);   // "acrilico"
+    w32k_rgb_rect(0, ty, W, 1, UI_TASKBAR_HI);                    // realce superior
+
+    // Botao Iniciar (48px). Fundo levemente mais claro quando o menu esta aberto.
+    if (s_start_menu_open) w32k_rgb_rect(0, ty, SH_START_BTN_W, SH_TASKBAR_H10, 0x002E3136);
+    shell_logo4_tc(0, ty, SH_START_BTN_W);
+
+    // Bandeja de apps: um botao por janela top-level visivel.
+    int bx = SH_START_BTN_W + 8;
+    int max_x = W - SH_CLOCK_W - SH_TRAY_W - 8;
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        WND* w = &s_wins[i];
+        if (!w->used || !w->visible || (w->flags & WNDF_DESKTOP)) continue;
+        if (bx + SH_APP_BTN_W > max_x) break;
+        int active = (w->id == s_focus_id) && !s_minimized[i];
+
+        w32k_rgb_rect(bx, ty + 3, SH_APP_BTN_W, SH_TASKBAR_H10 - 3,
+                      active ? 0x002D2F34 : UI_TASKBAR);
+        // Realce (underline) de acento embaixo do botao ativo.
+        if (active)
+            w32k_rgb_rect(bx, ty + SH_TASKBAR_H10 - 3, SH_APP_BTN_W, 3, UI_ACCENT);
+        else if (!s_minimized[i])
+            w32k_rgb_rect(bx + 6, ty + SH_TASKBAR_H10 - 3, SH_APP_BTN_W - 12, 2, 0x00555A61);
+
+        // Icone (quadradinho de acento) + titulo abreviado.
+        w32k_rgb_rect(bx + 10, ty + SH_TASKBAR_H10 / 2 - 6, 12, 12, UI_ACCENT_LT);
+        char lbl[18]; int k = 0;
+        for (; k < 17 && w->title[k]; k++) lbl[k] = w->title[k];
+        lbl[k] = 0;
+        w32k_rgb_text(bx + 30, ty + SH_TASKBAR_H10 / 2 - 4, lbl, UI_TEXT_LT, 1);
+        bx += SH_APP_BTN_W + 4;
+    }
+
+    // System tray — status dos NUCLEOS (prova visual de SMP no desktop).
+    // Dois "chips": CPU0 (BSP) sempre aceso; CPU1 (AP) aceso se o 2o core esta no
+    // worker loop. Abaixo, o heartbeat do AP (em milhoes) — so avanca se o AP esta
+    // executando instrucoes AGORA, em paralelo ao BSP que desenha esta taskbar.
+    {
+        int tx = W - SH_CLOCK_W - SH_TRAY_W;
+        int ap_on = smp_ap_working();
+        w32k_rgb_rect(tx,      ty + 9, 9, 9, UI_ACCENT_LT);                         // CPU0
+        w32k_rgb_rect(tx + 12, ty + 9, 9, 9, ap_on ? UI_START_TILE : 0x00505357);  // CPU1
+        char top[32]; int p = 0;
+        shell_u64(top, (uint64_t)smp_cpu_count());
+        p = (int)0; while (top[p]) p++;
+        shell_strcat(top, &p, " nucleos");
+        w32k_rgb_text(tx + 28, ty + 8, top, UI_TEXT_LT, 1);
+        char bot[40]; p = 0;
+        shell_strcat(bot, &p, "AP ");
+        shell_u64(bot + p, smp_ap_heartbeat() / 1000000ULL);
+        while (bot[p]) p++;
+        shell_strcat(bot, &p, "M");
+        w32k_rgb_text(tx + 28, ty + SH_TASKBAR_H10 - 16, bot,
+                      ap_on ? UI_TEXT_DIM : 0x00707070, 1);
+    }
+
+    // Relogio HH:MM:SS a direita. g_ticks @100 Hz -> segundos. Com o timer do
+    // scheduler ativo, ele avanca em tempo real (prova visual do multitarefa).
+    uint64_t secs = (uint64_t)g_ticks / 100u;
+    uint32_t ss = (uint32_t)(secs % 60u);
+    uint32_t mm = (uint32_t)((secs / 60u) % 60u);
+    uint32_t hh = (uint32_t)((secs / 3600u) % 24u);
+    char clk[9];
+    clk[0] = (char)('0' + (hh / 10) % 10); clk[1] = (char)('0' + hh % 10);
+    clk[2] = ':';
+    clk[3] = (char)('0' + (mm / 10) % 10); clk[4] = (char)('0' + mm % 10);
+    clk[5] = ':';
+    clk[6] = (char)('0' + (ss / 10) % 10); clk[7] = (char)('0' + ss % 10);
+    clk[8] = 0;
+    int cw = w32k_text_w(clk, 1);
+    int cxr = W - 14 - cw;
+    w32k_rgb_text(cxr, ty + 10, clk, UI_TEXT_LT, 1);
+    const char* label = "MeuOS 11";
+    w32k_rgb_text(W - 14 - w32k_text_w(label, 1), ty + SH_TASKBAR_H10 - 16,
+                  label, UI_TEXT_DIM, 1);
+}
+
+// Menu Iniciar (painel escuro acima do botao) com lista de apps.
+static void shell_start_menu_tc(void) {
+    if (!s_start_menu_open) return;
+    int mh = SH_MENU_H;
+    int mw = SH_MENU_W;
+    int mx = 0;
+    int my = scr_height() - SH_TASKBAR_H10 - mh;
+    if (my < 0) { my = 0; mh = scr_height() - SH_TASKBAR_H10; }
+
+    gpu_blend_rect(mx, my, mw, mh, 0x00202124, 244);
+    w32k_rgb_frame(mx, my, mw, mh, 0x00343841);
+
+    // Cabecalho com "usuario".
+    gpu_gradient_v(mx, my, mw, 56, UI_ACCENT_LT, UI_ACCENT_DK);
+    w32k_rgb_rect(mx + 16, my + 16, 24, 24, 0x00FFFFFF);        // avatar
+    w32k_rgb_text(mx + 52, my + 24, "MeuOS User", UI_TEXT_LT, 1);
+
+    static const char* items[] = {
+        "Documentos", "Imagens", "Configuracoes",
+        "Explorador", "Prompt de Comando", "Energia"
+    };
+    int y = my + 72;
+    for (int i = 0; i < 6; i++) {
+        w32k_rgb_rect(mx + 16, y, 22, 22, UI_ACCENT);          // "icone"
+        w32k_rgb_text(mx + 50, y + 7, items[i], UI_TEXT_LT, 1);
+        y += 40;
+        if (y + 30 > my + mh) break;
+    }
+}
+
+// Compose completo (chamado por win32k_compose no backend LFB 32 bpp).
+void win32k_shell_compose_full(void) {
+    if (!s_shell_initialized) {
+        s_shell_initialized = 1;
+        kputs("[shell] compose TRUE-COLOR (Windows 10/11) ativo.\n");
+    }
+    int W = scr_width();
+    int H = scr_height();
+    int half = H / 2;
+
+    // 1) Wallpaper: gradiente vertical em duas metades (brilho no meio).
+    gpu_gradient_v(0, 0,    W, half,     UI_WALL_TOP, UI_WALL_MID);
+    gpu_gradient_v(0, half, W, H - half, UI_WALL_MID, UI_WALL_BOT);
+
+    // 2) Janelas normais, em ordem de z crescente (topo por cima).
+    for (int pass = 1; pass <= s_next_z; pass++) {
+        for (int i = 0; i < MAX_WINDOWS; i++) {
+            WND* w = &s_wins[i];
+            if (!w->used || !w->visible || w->z != pass) continue;
+            if (w->flags & WNDF_DESKTOP) continue;   // wallpaper ja desenhado
+            if (s_minimized[i]) continue;            // minimizada -> so na taskbar
+            shell_window_tc(w, i);
+        }
+    }
+
+    // 3) Taskbar + menu Iniciar por cima de tudo.
+    shell_taskbar_tc();
+    shell_start_menu_tc();
+
+    kputs("[shell] compose(true-color): wallpaper+janelas+taskbar");
+    if (s_start_menu_open) kputs("+menu");
+    kputc('\n');
+}
+
+// Refresh LEVE: repinta SO a faixa da taskbar (relogio ao vivo) sem tocar nas
+// janelas — assim o conteudo das apps NAO e' apagado a cada tique. Chamado pela
+// thread kdesktop_refresh ~2x/s. Serializado pelo mesmo guard s_composing.
+void win32k_refresh_taskbar(void) {
+    if (!w32k_use_gpu()) return;
+    if (!s_shell_initialized) return;                 // nada composto ainda
+    if (__atomic_test_and_set(&s_composing, __ATOMIC_ACQUIRE)) return;
+    cursor_hide();                                    // tira a setinha (save-under)
+    int W  = scr_width();
+    int ty = scr_height() - SH_TASKBAR_H10;
+    // Base fresca sob a taskbar (p/ o "acrilico" nao driftar ao reblender).
+    w32k_rgb_rect(0, ty, W, SH_TASKBAR_H10, UI_WALL_BOT);
+    shell_taskbar_tc();
+    cursor_show();                                    // redesenha a setinha por cima
+    gpu_present();
+    __atomic_clear(&s_composing, __ATOMIC_RELEASE);
 }
 
 // ----------------------------------------------------------------------------

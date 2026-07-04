@@ -31,8 +31,24 @@ void     gpu_pixel(int x, int y, uint32_t rgba);
 void     gpu_fill_rect(int x, int y, int w, int h, uint32_t rgba);
 void     gpu_copy_rect(int sx, int sy, int dx, int dy, int w, int h);  // intra-LFB
 
+// ----------------------------------------------------------------------------
+//  Primitivas TRUE-COLOR (32 bpp) — a base da UI moderna (gradientes, sombras).
+//  Todas operam em XRGB (0x00RRGGBB); so tem efeito no backend LFB 32 bpp.
+// ----------------------------------------------------------------------------
+// Le a cor XRGB de um pixel (0 se fora da tela / sem GPU).
+uint32_t gpu_get_pixel(int x, int y);
+// Gradiente VERTICAL: interpola 'top' (no topo do retangulo) ate 'bottom'
+// (na base). Uma cor por linha — barato mesmo em tela cheia.
+void     gpu_gradient_v(int x, int y, int w, int h, uint32_t top, uint32_t bottom);
+// Preenche um retangulo MISTURANDO 'rgb' com o fundo existente (alpha 0..255).
+// alpha=255 => opaco (== fill_rect); alpha=0 => no-op. Base de sombras/acrilico.
+void     gpu_blend_rect(int x, int y, int w, int h, uint32_t rgb, uint8_t alpha);
+
 // Apresenta o frame na tela. Sem double-buffer: no-op. Existe p/ contrato.
 void     gpu_present(void);
+// Apresenta SO um retangulo (cursor de software: move do mouse sem re-publicar a
+// tela inteira). No Bochs VBE (LFB MMIO direto) e' no-op. Coordenadas em pixels.
+void     gpu_present_rect(int x, int y, int w, int h);
 
 // ----------------------------------------------------------------------------
 //  Cursor de HARDWARE. No backend virtio-gpu, o host compoe o cursor sobre o

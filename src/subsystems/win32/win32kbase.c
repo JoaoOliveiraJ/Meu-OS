@@ -33,7 +33,7 @@
 #define TITLE_TEXT       FB_WHITE
 #define CLIENT_COLOR     FB_LIGHT_GRAY
 #define FRAME_COLOR      FB_BLACK
-#define TITLE_H          12          // altura da barra de titulo
+#define TITLE_H          28          // altura da barra de titulo (caption Win10/11)
 
 // ---- FASE 6: barra de tarefas (estilo Windows, no rodape do desktop) ----
 #define TASKBAR_H        14          // altura da barra de tarefas
@@ -137,6 +137,103 @@ static void w32k_draw_text(int x, int y, const char* s, uint8_t fg8, uint8_t bg8
 }
 
 // ============================================================================
+//  Camada TRUE-COLOR (32 bpp) — a base do visual moderno (Windows 10/11).
+//
+//  As funcoes w32k_* acima falam em indices de paleta (16 cores do mode13h);
+//  boas para compat, pobres para um desktop bonito. Quando o backend e o LFB
+//  32 bpp (gpu_active), a shell usa ESTAS funcoes: cores XRGB reais, gradientes,
+//  sombras (alpha-blend) e texto escalado/com sombra. Sem efeito no mode13h
+//  (a shell cai no caminho de paleta antigo nesse fallback).
+// ============================================================================
+
+// ---- Paleta Windows 10/11 (0x00RRGGBB) ----
+#define UI_WALL_TOP     0x00123A6Eu   // topo do wallpaper (azul profundo)
+#define UI_WALL_MID     0x001E5FA8u   // meio (brilho)
+#define UI_WALL_BOT     0x000C2748u   // base (mais escuro)
+#define UI_TASKBAR      0x00202124u   // barra de tarefas (quase preto Win10)
+#define UI_TASKBAR_HI   0x003A3D42u   // realce superior da taskbar (1px)
+#define UI_ACCENT       0x000078D7u   // azul de acento do Windows 10
+#define UI_ACCENT_LT    0x002B88E0u   // acento claro (topo do gradiente)
+#define UI_ACCENT_DK    0x00005A9Eu   // acento escuro (base/borda)
+#define UI_TITLE_INACT1 0x004A4D52u   // caption inativa (topo)
+#define UI_TITLE_INACT2 0x003A3D42u   // caption inativa (base)
+#define UI_CLIENT       0x00F3F3F3u   // area cliente (branco Win10)
+#define UI_TEXT_LT      0x00FFFFFFu   // texto claro
+#define UI_TEXT_DK      0x00202020u   // texto escuro
+#define UI_TEXT_DIM     0x00C8C8C8u   // texto esmaecido
+#define UI_SHADOW       0x00000000u   // sombra (alpha-blend preto)
+#define UI_CLOSE_HOVER  0x00E81123u   // X hover (vermelho Win10)
+#define UI_BTN_HOVER    0x00505357u   // botao caption hover (cinza)
+#define UI_START_TILE   0x0037A0EBu   // ladrilhos do logo Iniciar
+
+// Um glifo 8x8 da fonte embutida, desenhado em cor XRGB e escala inteira.
+static void w32k_rgb_glyph(int x, int y, char c, uint32_t fg, int scale) {
+    unsigned char uc = (unsigned char)c;
+    if (uc < 0x20 || uc > 0x7F) uc = '?';
+    const uint8_t* glyph = g_font8x8[uc - 0x20];
+    if (scale <= 1) {
+        for (int row = 0; row < 8; row++) {
+            uint8_t bits = glyph[row];
+            for (int col = 0; col < 8; col++)
+                if (bits & (0x80 >> col)) gpu_pixel(x + col, y + row, fg);
+        }
+        return;
+    }
+    for (int row = 0; row < 8; row++) {
+        uint8_t bits = glyph[row];
+        for (int col = 0; col < 8; col++)
+            if (bits & (0x80 >> col))
+                gpu_fill_rect(x + col * scale, y + row * scale, scale, scale, fg);
+    }
+}
+
+// Texto XRGB numa escala inteira (1 = 8px, 2 = 16px, ...).
+static void w32k_rgb_text(int x, int y, const char* s, uint32_t fg, int scale) {
+    int cx = x;
+    while (*s) {
+        char c = *s++;
+        if (c == '\n') { cx = x; y += 8 * scale; continue; }
+        w32k_rgb_glyph(cx, y, c, fg, scale);
+        cx += 8 * scale;
+    }
+}
+
+// Texto XRGB com sombra 1px deslocada (legibilidade sobre gradientes/caption).
+static void w32k_rgb_text_sh(int x, int y, const char* s, uint32_t fg, uint32_t shadow, int scale) {
+    w32k_rgb_text(x + 1, y + 1, s, shadow, scale);
+    w32k_rgb_text(x,     y,     s, fg,     scale);
+}
+
+// Largura em pixels de uma string na fonte 8x8 escalada.
+static int w32k_text_w(const char* s, int scale) {
+    int n = 0; while (s[n]) n++;
+    return n * 8 * scale;
+}
+
+// Retangulo XRGB solido (atalho tipado p/ a shell).
+static void w32k_rgb_rect(int x, int y, int w, int h, uint32_t rgb) {
+    gpu_fill_rect(x, y, w, h, rgb);
+}
+// Contorno XRGB de 1px.
+static void w32k_rgb_frame(int x, int y, int w, int h, uint32_t rgb) {
+    if (w <= 0 || h <= 0) return;
+    gpu_fill_rect(x, y, w, 1, rgb);
+    gpu_fill_rect(x, y + h - 1, w, 1, rgb);
+    gpu_fill_rect(x, y, 1, h, rgb);
+    gpu_fill_rect(x + w - 1, y, 1, h, rgb);
+}
+// Sombra suave (drop shadow) atras de uma janela: aneis de preto translucido
+// que crescem para fora, deslocados um pouco para baixo (luz vinda de cima).
+static void w32k_rgb_shadow(int x, int y, int w, int h) {
+    const int N = 7;                 // espessura da sombra
+    for (int i = N; i >= 1; i--) {
+        uint8_t a = (uint8_t)(6 + (N - i) * 5);   // mais forte perto da janela
+        int off = i;
+        gpu_blend_rect(x - off, y - off + 3, w + 2 * off, h + 2 * off, UI_SHADOW, a);
+    }
+}
+
+// ============================================================================
 //  Janelas (arvore + z-order)
 // ============================================================================
 #define MAX_WINDOWS 16
@@ -172,6 +269,11 @@ static int32_t  s_cursor_x = 160;
 static int32_t  s_cursor_y = 100;
 static uint32_t s_cursor_buttons = 0;  // estado anterior dos botoes (p/ detectar mudancas)
 static int      s_cursor_initialized = 0;
+
+// Guard que serializa TODA escrita composta no framebuffer (compose, refresh da
+// taskbar e move do cursor de software). test-and-set: um pedido concorrente e'
+// descartado. Declarado cedo pois o cursor de software (acima do compose) o usa.
+static volatile int s_composing = 0;
 
 // Classes registradas (so o nome; o wndproc real fica no user32 em ring 3).
 typedef struct _WNDCLASS_K { int used; char name[32]; void* wndProc; } WNDCLASS_K;
@@ -420,36 +522,134 @@ static void draw_cursor_sprite(void) {
 //  (0xFF000000), '.' = branco opaco (0xFFFFFFFF), ' ' = transparente (alpha=0).
 //  Hotspot (0,0) = ponta da seta no canto sup-esq (igual ao sprite SW).
 // ============================================================================
-static int s_hw_cursor       = 0;   // 1 = cursor de hardware ativo
-static int s_hw_cursor_tried = 0;   // ja tentamos inicializar (uma vez)
+// ============================================================================
+//  Cursor de SOFTWARE com save-under.
+//
+//  Historico: usavamos o cursor de HARDWARE do virtio-gpu (cursor queue), mas ele
+//  SO aparece quando o host renderiza o overlay — no QEMU 2D em Windows isso exige
+//  `-display gtk,gl=on`. Sem isso, o cursor fica INVISIVEL. Solucao robusta: uma
+//  setinha desenhada DIRETO no framebuffer (aparece em qualquer modo de display).
+//
+//  Para ficar FLUIDO sem recompor a tela a cada movimento, guardamos os pixels
+//  sob o cursor (save-under): ao mover, restauramos o fundo antigo, salvamos o
+//  novo, desenhamos a setinha e publicamos SO o retangulo afetado (gpu_present_rect).
+// ============================================================================
+static int s_hw_cursor = 0;         // mantido 0: cursor de HW desativado (ver acima)
 
-static void win32k_hw_cursor_try_init(void) {
-    if (s_hw_cursor_tried) return;
-    s_hw_cursor_tried = 1;
-    if (!gpu_active()) return;
-    static uint32_t img[64 * 64];                  // BSS (16 KiB), nao stack
-    for (int i = 0; i < 64 * 64; i++) img[i] = 0x00000000u;   // transparente
-    for (int row = 0; row < 16; row++) {
-        const char* line = s_cursor_bitmap[row];
+#define CUR_W 12
+#define CUR_H 16
+static uint32_t s_cur_back[CUR_W * CUR_H];   // pixels salvos sob a setinha
+static int      s_cur_bx = 0, s_cur_by = 0;  // onde o save-under foi capturado
+static int      s_cur_back_valid = 0;
+
+// Remove a setinha: repoe os pixels salvos sob ela.
+static void cursor_hide(void) {
+    if (!s_cur_back_valid) return;
+    for (int r = 0; r < CUR_H; r++)
+        for (int c = 0; c < CUR_W; c++)
+            gpu_pixel(s_cur_bx + c, s_cur_by + r, s_cur_back[r * CUR_W + c]);
+    s_cur_back_valid = 0;
+}
+
+// Desenha a setinha na posicao atual: salva o fundo e pinta o sprite por cima.
+// Assume que NAO ha setinha desenhada agora (chame cursor_hide antes, ou apos um
+// compose que ja redesenhou tudo).
+static void cursor_show(void) {
+    if (!s_cursor_initialized || !w32k_use_gpu()) return;
+    int x = (int)s_cursor_x, y = (int)s_cursor_y;
+    for (int r = 0; r < CUR_H; r++)
+        for (int c = 0; c < CUR_W; c++)
+            s_cur_back[r * CUR_W + c] = gpu_get_pixel(x + c, y + r);
+    s_cur_bx = x; s_cur_by = y; s_cur_back_valid = 1;
+    for (int r = 0; r < 16; r++) {
+        const char* line = s_cursor_bitmap[r];
         for (int col = 0; col < 12; col++) {
-            char c = line[col];
-            if (c == ' ') continue;
-            img[row * 64 + col] = (c == 'X') ? 0xFF000000u    // preto opaco
-                                             : 0xFFFFFFFFu;   // branco opaco
+            char ch = line[col];
+            if (ch == ' ') continue;
+            gpu_pixel(x + col, y + r, (ch == 'X') ? 0x00000000u    // contorno preto
+                                                  : 0x00FFFFFFu);  // interior branco
         }
     }
-    s_hw_cursor = gpu_cursor_set(img, 0, 0, (int)s_cursor_x, (int)s_cursor_y);
-    if (s_hw_cursor)
-        kputs("[win32k] cursor de HARDWARE ativo (virtio-gpu); sprite SW desligado\n");
-    else
-        kputs("[win32k] sem cursor de HW; usando sprite de software (recompose)\n");
+}
+
+// Move a setinha para (s_cursor_x, s_cursor_y) e publica SO a regiao afetada.
+// Fluido: nao recompoe a tela. Chamado a cada evento de mouse (movimento).
+// Serializado pelo guard s_composing: a thread de refresh e as apps tambem mexem
+// no framebuffer/save-under; um compose/refresh em andamento faz este pedido ser
+// descartado (a setinha reaparece no proximo compose/refresh usando s_cursor_x/y).
+void win32k_cursor_repaint(void) {
+    if (!w32k_use_gpu()) { if (s_was_active) win32k_compose(); return; }
+    if (__atomic_test_and_set(&s_composing, __ATOMIC_ACQUIRE)) return;
+    int ox = s_cur_bx, oy = s_cur_by, had = s_cur_back_valid;
+    cursor_hide();
+    cursor_show();
+    int minx = s_cur_bx, miny = s_cur_by;
+    int maxx = s_cur_bx + CUR_W, maxy = s_cur_by + CUR_H;
+    if (had) {                                   // uniao do retangulo velho + novo
+        if (ox < minx) minx = ox;
+        if (oy < miny) miny = oy;
+        if (ox + CUR_W > maxx) maxx = ox + CUR_W;
+        if (oy + CUR_H > maxy) maxy = oy + CUR_H;
+    }
+    gpu_present_rect(minx, miny, maxx - minx, maxy - miny);
+    __atomic_clear(&s_composing, __ATOMIC_RELEASE);
+}
+
+// Compat: os caminhos de input chamam isto na 1a vez. Com cursor de SOFTWARE nao
+// ha nada a inicializar no host — so registramos a escolha uma vez.
+static void win32k_hw_cursor_try_init(void) {
+    static int logged = 0;
+    if (logged) return;
+    logged = 1;
+    s_hw_cursor = 0;
+    kputs("[win32k] cursor de SOFTWARE (save-under; visivel em qualquer display)\n");
+}
+
+// Compose TRUE-COLOR completo (LFB 32 bpp): definido em win32kshell.c. Desenha
+// wallpaper com gradiente + janelas (sombra/caption/borda) + taskbar + menu.
+void win32k_shell_compose_full(void);
+
+// (s_composing declarado la em cima, junto do estado do cursor, pois o cursor de
+// software — definido antes do compose — tambem precisa serializar por ele.)
+
+// Apos um compose completo, a area cliente de cada janela foi repintada com a
+// cor de fundo (o conteudo desenhado pela app foi coberto). Pedimos que cada
+// janela visivel repinte seu conteudo (WM_PAINT, coalescido) — igual ao Windows,
+// que envia WM_PAINT quando uma regiao e' invalidada. A app repinta no proximo
+// giro do seu message loop e o present-on-idle publica o resultado.
+static void win32k_invalidate_all(void) {
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        WND* w = &s_wins[i];
+        if (w->used && w->visible && !(w->flags & WNDF_DESKTOP))
+            queue_post((void*)(uintptr_t)w->id, WM_PAINT, 0, 0);
+    }
 }
 
 void win32k_compose(void) {
+    if (__atomic_test_and_set(&s_composing, __ATOMIC_ACQUIRE)) return;
+
     ensure_fb();
     // Backend GPU OU mode13h precisa estar ativo.
-    if (!w32k_use_gpu() && !fb_active()) return;
+    if (!w32k_use_gpu() && !fb_active()) { __atomic_clear(&s_composing, __ATOMIC_RELEASE); return; }
     s_was_active = 1;                      // a GUI tomou a tela ao menos uma vez
+
+    // -------- Caminho TRUE-COLOR (Windows 10/11) --------
+    // No backend LFB 32 bpp a shell e' a dona do compose inteiro: desenha o
+    // wallpaper com gradiente, cada janela com sombra + caption moderna, a
+    // taskbar acrilica e o menu Iniciar. O caminho de paleta abaixo (mode13h)
+    // fica so como fallback quando nao ha GPU.
+    if (w32k_use_gpu()) {
+        win32k_shell_compose_full();
+        // A tela foi redesenhada: o save-under antigo esta invalido. Redesenha a
+        // setinha de software DENTRO deste frame (capturando o fundo novo).
+        s_cur_back_valid = 0;
+        cursor_show();
+        gpu_present();
+        __atomic_clear(&s_composing, __ATOMIC_RELEASE);
+        win32k_invalidate_all();   // apps repintam seu conteudo apos o compose
+        return;
+    }
+
     kputs("[win32k] compose: desktop + ");
     kput_dec((uint64_t)s_nwin); kputs(" janela(s) (z-order) + barra de tarefas");
     kputs(w32k_use_gpu() ? " [backend: gpu/LFB 32bpp]\n" : " [backend: vga mode13h 8bpp]\n");
@@ -495,6 +695,7 @@ void win32k_compose(void) {
     // MMIO ja propaga as escritas). Sem este flush, em virtio-gpu o desktop
     // SO apareceria no proximo evento que chamasse explicitamente gpu_present.
     if (w32k_use_gpu()) gpu_present();
+    __atomic_clear(&s_composing, __ATOMIC_RELEASE);
 }
 
 // ============================================================================
@@ -681,6 +882,9 @@ uintptr_t NtUserPostQuitMessage_k(int exitCode) {
     return 1;
 }
 
+// Driver da tablet absoluta (virtio-input): poll dos eventos no idle (sem IRQ).
+extern void virtio_input_poll(void);
+
 // Tira a proxima mensagem. BLOQUEIA (hlt) ate haver algo: o teclado (IRQ1) e o
 // timer (IRQ0) seguem rodando e o win32k_on_key/etc enchem a fila. Devolve:
 //   1 = mensagem normal; 0 = WM_QUIT (a app encerra o loop); -1 = sem janelas.
@@ -699,8 +903,17 @@ int NtUserGetMessage_k(W32_MSG* out) {
             out->hwnd = 0; out->message = WM_QUIT; out->wParam = 0; out->lParam = 0;
             return 0;
         }
+        // Fila vazia = a app terminou de processar (inclusive o WM_PAINT). No
+        // backend virtio-gpu as escritas do WNDPROC (TextOut/FillRect) so vao
+        // pra tela apos um present; fazemos UM present por volta ociosa do loop
+        // (barato — nao por chamada GDI) para o conteudo da janela aparecer.
+        if (w32k_use_gpu()) gpu_present();
         // Espera por uma interrupcao (teclado/timer) que possa postar algo.
         __asm__ volatile ("sti; hlt");
+        // Apos acordar (timer @100Hz), drena a tablet absoluta (virtio-input):
+        // ela nao tem IRQ wired, entao fazemos poll aqui. Os eventos viram
+        // WM_MOUSE* na fila e o loop acima os entrega na proxima volta.
+        virtio_input_poll();
     }
 }
 
@@ -755,33 +968,11 @@ static uint64_t pack_lparam_point(int x, int y) {
     return (uint64_t)((hi << 16) | lo);
 }
 
-void win32k_on_mouse_event(int32_t dx, int32_t dy, uint32_t buttons) {
-    // Marca o cursor como inicializado: agora o compose desenha o sprite.
-    if (!s_cursor_initialized) {
-        // Centro da tela na 1a chamada (a IRQ12 nao ve a tela ate o init).
-        s_cursor_x = scr_width()  / 2;
-        s_cursor_y = scr_height() / 2;
-        s_cursor_initialized = 1;
-        win32k_hw_cursor_try_init();   // tenta ligar o cursor de hardware (1x)
-    }
-
-    // Aplica delta com clamp aos limites da tela.
-    int32_t nx = s_cursor_x + dx;
-    int32_t ny = s_cursor_y + dy;
-    int SW = scr_width(), SH = scr_height();
-    if (nx < 0) nx = 0;
-    if (ny < 0) ny = 0;
-    if (nx >= SW) nx = SW - 1;
-    if (ny >= SH) ny = SH - 1;
-    s_cursor_x = nx;
-    s_cursor_y = ny;
-
-    // Cursor de HARDWARE: reposiciona via cursor queue (barato, sem recompor) a
-    // CADA evento — antes da shell e do hit-test, entao vale para todos os
-    // caminhos. Se nao houver cursor de HW, isto e' no-op e o sprite SW + o
-    // recompose ao final cuidam do desenho.
-    if (s_hw_cursor) gpu_cursor_move((int)s_cursor_x, (int)s_cursor_y);
-
+// Roteamento compartilhado entre o mouse RELATIVO (PS/2) e o ABSOLUTO (virtio-
+// tablet): assume s_cursor_x/y JA atualizados. A shell ve o evento primeiro;
+// senao faz hit-test e posta WM_MOUSE*/botoes; recompoe so em mudanca de
+// conteudo (clique). NAO mexe na posicao do cursor — cada chamador ja fez isso.
+static void win32k_route_mouse(uint32_t buttons) {
     // FASE 12 — A SHELL Windows 10 ve o evento PRIMEIRO. Se ela consumir
     // (clique no Start button, no botao de uma janela na taskbar, em
     // [_][[]][X] da chrome, ou drag em andamento), o BASE NAO posta os
@@ -790,10 +981,7 @@ void win32k_on_mouse_event(int32_t dx, int32_t dy, uint32_t buttons) {
         uint32_t prev = s_cursor_buttons;
         if (win32k_shell_on_mouse((int)s_cursor_x, (int)s_cursor_y, buttons, prev)) {
             s_cursor_buttons = buttons;       // atualiza antes do return
-            kputs("[win32k] cursor (shell-consumed) em (");
-            kput_dec((uint64_t)s_cursor_x); kputc(',');
-            kput_dec((uint64_t)s_cursor_y); kputs(")\n");
-            return;
+            return;                            // (sem log por-evento: floodaria a serial)
         }
     }
 
@@ -846,20 +1034,67 @@ void win32k_on_mouse_event(int32_t dx, int32_t dy, uint32_t buttons) {
     }
     s_cursor_buttons = buttons;
 
-    kputs("[win32k] cursor agora em ("); kput_dec((uint64_t)s_cursor_x);
-    kputc(','); kput_dec((uint64_t)s_cursor_y); kputc(')');
-    if (hwnd) { kputs(" sobre HWND #"); kput_dec((uint64_t)w->id); }
-    kputc('\n');
+    // Recompoe o desktop SO quando o conteudo pode ter mudado (clique = mudanca de
+    // foco/estado). Movimento puro do mouse NAO recompoe — a setinha de software e'
+    // atualizada de forma barata (present parcial) pelo chamador via
+    // win32k_cursor_repaint(). (Sem log por-evento: floodaria a serial.)
+    int content_changed = (changed != 0);
+    if (s_was_active && content_changed) {
+        kputs("[win32k] clique roteado em (");
+        kput_dec((uint64_t)s_cursor_x); kputc(','); kput_dec((uint64_t)s_cursor_y);
+        if (hwnd) { kputs(") sobre HWND #"); kput_dec((uint64_t)w->id); } else kputc(')');
+        kputc('\n');
+        win32k_compose();
+    }
+}
 
-    // REDESENHA o CONTEUDO so quando preciso:
-    //  - cursor de HARDWARE: recompoe APENAS se o conteudo mudou (clique mudou
-    //    foco/estado). Movimento puro NAO recompoe — o host ja desenha o cursor
-    //    (mexido por gpu_cursor_move acima). É isto que tira o lag.
-    //  - sprite de SOFTWARE (fallback): recompoe sempre, pois o sprite precisa
-    //    ser redesenhado na nova posicao. virtio_gpu_present faz polling (nao
-    //    depende de IRQ), seguro no contexto da IRQ12 (IF=0).
-    int content_changed = (changed != 0);   // clique => possivel mudanca de foco
-    if (s_was_active && (!s_hw_cursor || content_changed)) win32k_compose();
+// ============================================================================
+//  FASE 14 — Entrada ABSOLUTA (virtio-tablet). Diferente do PS/2 (delta), aqui
+//  recebemos a posicao ABSOLUTA ja em pixels da tela. Reposiciona o cursor de
+//  HW via MOVE_CURSOR (gpu_cursor_move): no caminho de compose GL do QEMU
+//  (-display gtk,gl=on) o cursor do virtio-gpu e' um OVERLAY posicionado pelo
+//  guest — sem MOVE_CURSOR ele ficaria parado. Barato (cursor queue, sem
+//  recompor). Depois atualiza a posicao interna (hit-test/cliques) e roteia WM_*.
+// ============================================================================
+void win32k_on_mouse_abs(int32_t x, int32_t y, uint32_t buttons) {
+    if (!s_cursor_initialized) {
+        s_cursor_initialized = 1;
+        win32k_hw_cursor_try_init();   // garante o cursor de HW definido (1x)
+    }
+    int SW = scr_width(), SH = scr_height();
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x >= SW) x = SW - 1;
+    if (y >= SH) y = SH - 1;
+    s_cursor_x = x;
+    s_cursor_y = y;
+    win32k_route_mouse(buttons);
+    win32k_cursor_repaint();      // move a setinha de software (present parcial)
+}
+
+void win32k_on_mouse_event(int32_t dx, int32_t dy, uint32_t buttons) {
+    // Marca o cursor como inicializado: agora o compose desenha o sprite.
+    if (!s_cursor_initialized) {
+        // Centro da tela na 1a chamada (a IRQ12 nao ve a tela ate o init).
+        s_cursor_x = scr_width()  / 2;
+        s_cursor_y = scr_height() / 2;
+        s_cursor_initialized = 1;
+        win32k_hw_cursor_try_init();   // tenta ligar o cursor de hardware (1x)
+    }
+
+    // Aplica delta com clamp aos limites da tela.
+    int32_t nx = s_cursor_x + dx;
+    int32_t ny = s_cursor_y + dy;
+    int SW = scr_width(), SH = scr_height();
+    if (nx < 0) nx = 0;
+    if (ny < 0) ny = 0;
+    if (nx >= SW) nx = SW - 1;
+    if (ny >= SH) ny = SH - 1;
+    s_cursor_x = nx;
+    s_cursor_y = ny;
+
+    win32k_route_mouse(buttons);
+    win32k_cursor_repaint();      // move a setinha de software (present parcial)
 }
 
 // ============================================================================
@@ -881,9 +1116,7 @@ void win32k_set_cursor(int32_t x, int32_t y) {
     kputs("[win32k] SetCursorPos -> (");
     kput_dec((uint64_t)s_cursor_x); kputc(',');
     kput_dec((uint64_t)s_cursor_y); kputs(")\n");
-    // Cursor de HW: so reposiciona (sem recompor). Senao, recompoe o sprite SW.
-    if (s_hw_cursor)        gpu_cursor_move((int)s_cursor_x, (int)s_cursor_y);
-    else if (s_was_active)  win32k_compose();
+    win32k_cursor_repaint();      // move a setinha de software (present parcial)
 }
 
 // ============================================================================

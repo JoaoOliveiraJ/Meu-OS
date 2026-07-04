@@ -202,6 +202,9 @@ int      virtio_gpu_smoke_test(void);
 // ============================================================================
 int      virtio_gpu_init_display(uint32_t width, uint32_t height);
 void     virtio_gpu_present(void);
+// Present PARCIAL de um retangulo (cursor de software — evita re-transferir a
+// tela toda a cada movimento do mouse). Silencioso na serial.
+void     virtio_gpu_present_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 int      virtio_gpu_display_ok(void);
 uint32_t virtio_gpu_fb_width(void);
 uint32_t virtio_gpu_fb_height(void);

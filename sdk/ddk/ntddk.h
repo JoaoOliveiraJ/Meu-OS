@@ -400,16 +400,57 @@ typedef struct _IO_STACK_LOCATION {
     PVOID Context;
 } IO_STACK_LOCATION, *PIO_STACK_LOCATION;
 
+// FASE FUNDACAO (trilha I/O, Fase 1b) — IRP com layout NT x64 real. As
+// IO_STACK_LOCATIONs seguem o header (array traseiro); Tail.CurrentStackLocation
+// (@0xB8) e' o que o macro inline IoGetCurrentIrpStackLocation devolve — igual
+// ao que drivers reais tem baked. SystemBuffer virou AssociatedIrp.SystemBuffer.
 typedef struct _IRP {
-    PVOID              SystemBuffer;     // AssociatedIrp.SystemBuffer (METHOD_BUFFERED)
-    IO_STATUS_BLOCK    IoStatus;
-    PVOID              UserBuffer;       // buffer de saida do usuario
-    PIO_STACK_LOCATION CurrentStack;     // -> StackLocation
-    IO_STACK_LOCATION  StackLocation;    // 1 nivel (simplificado)
-    UCHAR              Cancel;
-    UCHAR              StackCount;       // expostos p/ drivers que checam
-    UCHAR              CurrentLocation;
+    SHORT   Type;                        // 0x000
+    USHORT  Size;                        // 0x002
+    PVOID   MdlAddress;                  // 0x008  (PMDL; def. mais abaixo no header)
+    ULONG   Flags;                       // 0x010
+    union { PVOID SystemBuffer; struct _IRP* MasterIrp; LONG IrpCount; } AssociatedIrp; // 0x018
+    LIST_ENTRY      ThreadListEntry;     // 0x020
+    IO_STATUS_BLOCK IoStatus;            // 0x030
+    signed char RequestorMode;           // 0x040
+    UCHAR   PendingReturned;             // 0x041
+    signed char StackCount;              // 0x042
+    signed char CurrentLocation;         // 0x043
+    UCHAR   Cancel;                      // 0x044
+    UCHAR   CancelIrql;                  // 0x045
+    signed char ApcEnvironment;          // 0x046
+    UCHAR   AllocationFlags;             // 0x047
+    PVOID   UserIosb;                    // 0x048
+    PVOID   UserEvent;                   // 0x050
+    PVOID   _Overlay[2];                 // 0x058
+    PVOID   CancelRoutine;               // 0x068
+    PVOID   UserBuffer;                  // 0x070
+    struct {
+        PVOID DriverContext[4];          // 0x078
+        PVOID Thread;                    // 0x098
+        PVOID AuxiliaryBuffer;           // 0x0A0
+        LIST_ENTRY ListEntry;            // 0x0A8
+        PIO_STACK_LOCATION CurrentStackLocation; // 0x0B8
+        PVOID OriginalFileObject;        // 0x0C0
+    } Tail;
 } IRP, *PIRP;
+_Static_assert(__builtin_offsetof(IRP, AssociatedIrp) == 0x18, "IRP.AssociatedIrp@0x18");
+_Static_assert(__builtin_offsetof(IRP, IoStatus) == 0x30, "IRP.IoStatus@0x30");
+_Static_assert(__builtin_offsetof(IRP, UserBuffer) == 0x70, "IRP.UserBuffer@0x70");
+_Static_assert(__builtin_offsetof(IRP, Tail.CurrentStackLocation) == 0xB8, "IRP.Tail.CurrentStackLocation@0xB8");
+_Static_assert(sizeof(IRP) == 0xC8, "sizeof(IRP)==0xC8");
+
+// Macros inline (FORCEINLINE do WDK) — e' o que um driver real usa (baked contra
+// estes offsets). O codigo in-tree tambem passa a usar estes.
+static inline PIO_STACK_LOCATION IoGetCurrentIrpStackLocation(PIRP Irp) { return Irp->Tail.CurrentStackLocation; }
+static inline PIO_STACK_LOCATION IoGetNextIrpStackLocation(PIRP Irp)    { return Irp->Tail.CurrentStackLocation - 1; }
+static inline void IoSkipCurrentIrpStackLocation(PIRP Irp) { Irp->CurrentLocation++; Irp->Tail.CurrentStackLocation++; }
+static inline void IoSetNextIrpStackLocation(PIRP Irp)     { Irp->CurrentLocation--; Irp->Tail.CurrentStackLocation--; }
+static inline void IoCopyCurrentIrpStackLocationToNext(PIRP Irp) {
+    PIO_STACK_LOCATION s = IoGetCurrentIrpStackLocation(Irp);
+    PIO_STACK_LOCATION d = IoGetNextIrpStackLocation(Irp);
+    *d = *s;
+}
 
 typedef NTSTATUS (NTAPI *PDRIVER_DISPATCH)(PDEVICE_OBJECT, PIRP);
 typedef void     (NTAPI *PDRIVER_UNLOAD)(PDRIVER_OBJECT);

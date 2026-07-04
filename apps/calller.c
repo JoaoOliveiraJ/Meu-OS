@@ -118,15 +118,15 @@ static NTSTATUS NTAPI DispatchCleanup(PDEVICE_OBJECT dev, PIRP irp) {
 }
 static NTSTATUS NTAPI DispatchIoctl(PDEVICE_OBJECT dev, PIRP irp) {
     (void)dev;
-    PIO_STACK_LOCATION s = irp->CurrentStack;
+    PIO_STACK_LOCATION s = IoGetCurrentIrpStackLocation(irp);
     ULONG code = s->Parameters.DeviceIoControl.IoControlCode;
     DbgPrint("calller: IRP_MJ_DEVICE_CONTROL\n");
     if (code == CALLLER_IOCTL_ECHO) {
         // Cifra "RC4" simbolica (xor de demo): apenas reflete os bytes invertidos.
         ULONG inLen = s->Parameters.DeviceIoControl.InputBufferLength;
         ULONG outLen = s->Parameters.DeviceIoControl.OutputBufferLength;
-        if (irp->SystemBuffer && outLen >= inLen) {
-            uint8_t* p = (uint8_t*)irp->SystemBuffer;
+        if (irp->AssociatedIrp.SystemBuffer && outLen >= inLen) {
+            uint8_t* p = (uint8_t*)irp->AssociatedIrp.SystemBuffer;
             for (ULONG i = 0; i < inLen; i++) p[i] ^= 0x5A;
             irp->IoStatus.Information = inLen;
         }
@@ -136,8 +136,8 @@ static NTSTATUS NTAPI DispatchIoctl(PDEVICE_OBJECT dev, PIRP irp) {
     }
     if (code == CALLLER_IOCTL_SECTION) {
         // Devolve um marcador identificando que a section esta viva.
-        if (irp->SystemBuffer && s->Parameters.DeviceIoControl.OutputBufferLength >= 8) {
-            *(uint64_t*)irp->SystemBuffer = (uint64_t)(uintptr_t)g_section_base;
+        if (irp->AssociatedIrp.SystemBuffer && s->Parameters.DeviceIoControl.OutputBufferLength >= 8) {
+            *(uint64_t*)irp->AssociatedIrp.SystemBuffer = (uint64_t)(uintptr_t)g_section_base;
             irp->IoStatus.Information = 8;
         }
         irp->IoStatus.Status = STATUS_SUCCESS;

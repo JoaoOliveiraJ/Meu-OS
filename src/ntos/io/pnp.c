@@ -75,8 +75,8 @@ NTSTATUS pnp_dispatch(void* dev, void* irp_) {
     PIRP irp = (PIRP)irp_;
     s_irp_count++;
     uint8_t mn = 0;
-    if (irp && irp->CurrentStack) {
-        mn = irp->CurrentStack->MinorFunction;
+    if (irp && IoGetCurrentIrpStackLocation(irp)) {
+        mn = IoGetCurrentIrpStackLocation(irp)->MinorFunction;
     }
     // Caminho seguro: completa o IRP com SUCCESS.
     if (irp) {

@@ -27,27 +27,40 @@ NTSTATUS io_create_device(PDRIVER_OBJECT drv, ULONG ext_size, const char* name,
     return STATUS_SUCCESS;
 }
 
-// Monta um IRP de IOCTL (METHOD_BUFFERED): SystemBuffer recebe a entrada.
+// FASE FUNDACAO (trilha I/O, Fase 1b) — aloca um IRP (layout NT) com (sc+1)
+// IO_STACK_LOCATIONs no array traseiro. CurrentStackLocation comeca no sentinela;
+// o build preenche a "next" (topo) e o 1o IoCallDriver avanca (a next vira current).
+static PIRP io_alloc_irp(uint8_t stack_count) {
+    uint8_t sc = stack_count ? stack_count : 1;
+    uint64_t sz = sizeof(IRP) + (uint64_t)(sc + 1) * sizeof(IO_STACK_LOCATION);
+    PIRP irp = (PIRP)kmalloc(sz);
+    if (!irp) return 0;
+    for (uint64_t i = 0; i < sz; i++) ((uint8_t*)irp)[i] = 0;
+    irp->Type = 6;                       // IO_TYPE_IRP
+    irp->Size = (USHORT)sz;
+    irp->StackCount = (signed char)sc;
+    irp->CurrentLocation = (signed char)(sc + 1);
+    irp->Tail.CurrentStackLocation = (PIO_STACK_LOCATION)(irp + 1) + sc;   // sentinela
+    return irp;
+}
+
+// Monta um IRP de IOCTL (METHOD_BUFFERED): AssociatedIrp.SystemBuffer = entrada.
 PIRP io_build_ioctl(ULONG ioctl, PDEVICE_OBJECT dev,
                     void* in_buf, ULONG in_len, void* out_buf, ULONG out_len) {
-    PIRP irp = (PIRP)kmalloc(sizeof(IRP));
+    PIRP irp = io_alloc_irp(1);
     if (!irp) return 0;
-    for (unsigned i = 0; i < sizeof(IRP); i++) ((uint8_t*)irp)[i] = 0;
-
-    irp->CurrentStack = &irp->StackLocation;
-    irp->StackCount = 1;
-    PIO_STACK_LOCATION s = irp->CurrentStack;
+    PIO_STACK_LOCATION s = IoGetNextIrpStackLocation(irp);
     s->MajorFunction = IRP_MJ_DEVICE_CONTROL;
     s->DeviceObject  = dev;
-    s->Parameters.DeviceIoControl.IoControlCode     = ioctl;
+    s->Parameters.DeviceIoControl.IoControlCode      = ioctl;
     s->Parameters.DeviceIoControl.InputBufferLength  = in_len;
     s->Parameters.DeviceIoControl.OutputBufferLength = out_len;
 
     ULONG buf = in_len > out_len ? in_len : out_len;
     if (buf) {
-        irp->SystemBuffer = kmalloc(buf);
+        irp->AssociatedIrp.SystemBuffer = kmalloc(buf);
         for (ULONG i = 0; i < in_len; i++)
-            ((uint8_t*)irp->SystemBuffer)[i] = ((uint8_t*)in_buf)[i];
+            ((uint8_t*)irp->AssociatedIrp.SystemBuffer)[i] = ((uint8_t*)in_buf)[i];
     }
     irp->UserBuffer = out_buf;
     return irp;
@@ -56,22 +69,17 @@ PIRP io_build_ioctl(ULONG ioctl, PDEVICE_OBJECT dev,
 // Monta um IRP de WRITE (METHOD_BUFFERED): copia 'len' bytes do buffer do
 // usuario para o SystemBuffer e os entrega ao driver. Parameters.Write.Length.
 PIRP io_build_write(PDEVICE_OBJECT dev, void* buf, ULONG len) {
-    PIRP irp = (PIRP)kmalloc(sizeof(IRP));
+    PIRP irp = io_alloc_irp(1);
     if (!irp) return 0;
-    for (unsigned i = 0; i < sizeof(IRP); i++) ((uint8_t*)irp)[i] = 0;
-
-    irp->CurrentStack = &irp->StackLocation;
-    irp->StackCount = 1;
-    PIO_STACK_LOCATION s = irp->CurrentStack;
+    PIO_STACK_LOCATION s = IoGetNextIrpStackLocation(irp);
     s->MajorFunction = IRP_MJ_WRITE;
     s->DeviceObject  = dev;
     s->Parameters.Write.Length = len;
-
     if (len) {
-        irp->SystemBuffer = kmalloc(len);
-        if (irp->SystemBuffer && buf)
+        irp->AssociatedIrp.SystemBuffer = kmalloc(len);
+        if (irp->AssociatedIrp.SystemBuffer && buf)
             for (ULONG i = 0; i < len; i++)
-                ((uint8_t*)irp->SystemBuffer)[i] = ((uint8_t*)buf)[i];
+                ((uint8_t*)irp->AssociatedIrp.SystemBuffer)[i] = ((uint8_t*)buf)[i];
     }
     return irp;
 }
@@ -79,31 +87,24 @@ PIRP io_build_write(PDEVICE_OBJECT dev, void* buf, ULONG len) {
 // Monta um IRP de READ (METHOD_BUFFERED): o driver preenche o SystemBuffer e
 // reporta os bytes lidos em IoStatus.Information. Parameters.Read.Length.
 PIRP io_build_read(PDEVICE_OBJECT dev, void* buf, ULONG len) {
-    PIRP irp = (PIRP)kmalloc(sizeof(IRP));
+    PIRP irp = io_alloc_irp(1);
     if (!irp) return 0;
-    for (unsigned i = 0; i < sizeof(IRP); i++) ((uint8_t*)irp)[i] = 0;
-
-    irp->CurrentStack = &irp->StackLocation;
-    irp->StackCount = 1;
-    PIO_STACK_LOCATION s = irp->CurrentStack;
+    PIO_STACK_LOCATION s = IoGetNextIrpStackLocation(irp);
     s->MajorFunction = IRP_MJ_READ;
     s->DeviceObject  = dev;
     s->Parameters.Read.Length = len;
-
-    if (len) irp->SystemBuffer = kmalloc(len);
+    if (len) irp->AssociatedIrp.SystemBuffer = kmalloc(len);
     irp->UserBuffer = buf;
     return irp;
 }
 
 // IRP simples (sem buffers) para IRP_MJ_CREATE / IRP_MJ_CLOSE / IRP_MJ_CLEANUP / etc.
 PIRP io_build_request(uint8_t major, PDEVICE_OBJECT dev) {
-    PIRP irp = (PIRP)kmalloc(sizeof(IRP));
+    PIRP irp = io_alloc_irp(1);
     if (!irp) return 0;
-    for (unsigned i = 0; i < sizeof(IRP); i++) ((uint8_t*)irp)[i] = 0;
-    irp->CurrentStack = &irp->StackLocation;
-    irp->StackCount = 1;
-    irp->CurrentStack->MajorFunction = major;
-    irp->CurrentStack->DeviceObject  = dev;
+    PIO_STACK_LOCATION s = IoGetNextIrpStackLocation(irp);
+    s->MajorFunction = major;
+    s->DeviceObject  = dev;
     return irp;
 }
 
@@ -112,16 +113,18 @@ typedef NTSTATUS (__attribute__((ms_abi)) *DISPATCH_MS)(PDEVICE_OBJECT, PIRP);
 
 NTSTATUS IoCallDriver(PDEVICE_OBJECT dev, PIRP irp) {
     PDRIVER_OBJECT drv = (PDRIVER_OBJECT)dev->DriverObject;
-    uint8_t mj = irp->CurrentStack->MajorFunction;
+    IoSetNextIrpStackLocation(irp);              // avanca: a "next" preenchida vira "current"
+    PIO_STACK_LOCATION s = IoGetCurrentIrpStackLocation(irp);
+    s->DeviceObject = dev;
+    uint8_t mj = s->MajorFunction;
     DISPATCH_MS fn = (DISPATCH_MS)drv->MajorFunction[mj];
     if (!fn) { irp->IoStatus.Status = STATUS_UNSUCCESSFUL; return STATUS_UNSUCCESSFUL; }
-    irp->CurrentStack->DeviceObject = dev;
     return fn(dev, irp);
 }
 
 void io_free_irp(PIRP irp) {
     if (!irp) return;
-    if (irp->SystemBuffer) kfree(irp->SystemBuffer);
+    if (irp->AssociatedIrp.SystemBuffer) kfree(irp->AssociatedIrp.SystemBuffer);
     kfree(irp);
 }
 
@@ -130,41 +133,38 @@ void io_free_irp(PIRP irp) {
 // ============================================================================
 
 PIRP NTAPI IoAllocateIrp_k(uint8_t StackSize, BOOLEAN ChargeQuota) {
-    (void)StackSize; (void)ChargeQuota;
-    PIRP irp = (PIRP)kmalloc(sizeof(IRP));
-    if (!irp) return 0;
-    for (unsigned i = 0; i < sizeof(IRP); i++) ((uint8_t*)irp)[i] = 0;
-    irp->CurrentStack = &irp->StackLocation;
-    irp->StackCount = StackSize ? StackSize : 1;
-    return irp;
+    (void)ChargeQuota;
+    return io_alloc_irp(StackSize);
 }
 void NTAPI IoFreeIrp_k(PIRP Irp) { io_free_irp(Irp); }
 void NTAPI IoInitializeIrp_k(PIRP Irp, USHORT PacketSize, uint8_t StackSize) {
     if (!Irp) return;
-    for (unsigned i = 0; i < PacketSize && i < sizeof(IRP); i++) ((uint8_t*)Irp)[i] = 0;
-    Irp->CurrentStack = &Irp->StackLocation;
-    Irp->StackCount = StackSize ? StackSize : 1;
+    for (unsigned i = 0; i < PacketSize; i++) ((uint8_t*)Irp)[i] = 0;
+    uint8_t sc = StackSize ? StackSize : 1;
+    Irp->Type = 6;
+    Irp->Size = PacketSize;
+    Irp->StackCount = (signed char)sc;
+    Irp->CurrentLocation = (signed char)(sc + 1);
+    Irp->Tail.CurrentStackLocation = (PIO_STACK_LOCATION)(Irp + 1) + sc;
 }
-PIO_STACK_LOCATION NTAPI IoGetCurrentIrpStackLocation_k(PIRP Irp) { return Irp ? Irp->CurrentStack : 0; }
-PIO_STACK_LOCATION NTAPI IoGetNextIrpStackLocation_k(PIRP Irp) { return Irp ? Irp->CurrentStack : 0; }
-void NTAPI IoSkipCurrentIrpStackLocation_k(PIRP Irp) { (void)Irp; }
-void NTAPI IoCopyCurrentIrpStackLocationToNext_k(PIRP Irp) { (void)Irp; }
+PIO_STACK_LOCATION NTAPI IoGetCurrentIrpStackLocation_k(PIRP Irp) { return Irp ? IoGetCurrentIrpStackLocation(Irp) : 0; }
+PIO_STACK_LOCATION NTAPI IoGetNextIrpStackLocation_k(PIRP Irp) { return Irp ? IoGetNextIrpStackLocation(Irp) : 0; }
+void NTAPI IoSkipCurrentIrpStackLocation_k(PIRP Irp) { if (Irp) IoSkipCurrentIrpStackLocation(Irp); }
+void NTAPI IoCopyCurrentIrpStackLocationToNext_k(PIRP Irp) { if (Irp) IoCopyCurrentIrpStackLocationToNext(Irp); }
 void NTAPI IoSetCompletionRoutine_k(PIRP Irp, PIO_COMPLETION_ROUTINE Routine, PVOID Context,
                                     BOOLEAN OnSuccess, BOOLEAN OnError, BOOLEAN OnCancel) {
     (void)OnSuccess; (void)OnError; (void)OnCancel;
-    if (Irp && Irp->CurrentStack) {
-        Irp->CurrentStack->CompletionRoutine = (void*)Routine;
-        Irp->CurrentStack->Context = Context;
-    }
+    PIO_STACK_LOCATION s = Irp ? IoGetCurrentIrpStackLocation(Irp) : 0;
+    if (s) { s->CompletionRoutine = (void*)Routine; s->Context = Context; }
 }
 NTSTATUS NTAPI IoCallDriver_ms(PDEVICE_OBJECT dev, PIRP irp) { return IoCallDriver(dev, irp); }
 void NTAPI IoCompleteRequest_k(PIRP Irp, uint8_t PriorityBoost) {
     (void)PriorityBoost;
     if (!Irp) return;
-    // Dispara CompletionRoutine se houver.
-    if (Irp->CurrentStack && Irp->CurrentStack->CompletionRoutine) {
-        PIO_COMPLETION_ROUTINE r = (PIO_COMPLETION_ROUTINE)Irp->CurrentStack->CompletionRoutine;
-        r(Irp->CurrentStack->DeviceObject, Irp, Irp->CurrentStack->Context);
+    PIO_STACK_LOCATION s = IoGetCurrentIrpStackLocation(Irp);
+    if (s && s->CompletionRoutine) {
+        PIO_COMPLETION_ROUTINE r = (PIO_COMPLETION_ROUTINE)s->CompletionRoutine;
+        r(s->DeviceObject, Irp, s->Context);
     }
 }
 BOOLEAN NTAPI IoCancelIrp_k(PIRP Irp) {
@@ -181,8 +181,9 @@ PIRP NTAPI IoBuildAsynchronousFsdRequest_k(ULONG MajorFunction, PDEVICE_OBJECT D
     else if (MajorFunction == IRP_MJ_READ) irp = io_build_read(DeviceObject, Buffer, Length);
     else irp = io_build_request((uint8_t)MajorFunction, DeviceObject);
     if (irp && StartingOffset) {
-        if (MajorFunction == IRP_MJ_WRITE) irp->CurrentStack->Parameters.Write.ByteOffset = (uint64_t)StartingOffset->QuadPart;
-        else if (MajorFunction == IRP_MJ_READ) irp->CurrentStack->Parameters.Read.ByteOffset = (uint64_t)StartingOffset->QuadPart;
+        PIO_STACK_LOCATION s = IoGetNextIrpStackLocation(irp);
+        if (MajorFunction == IRP_MJ_WRITE) s->Parameters.Write.ByteOffset = (uint64_t)StartingOffset->QuadPart;
+        else if (MajorFunction == IRP_MJ_READ) s->Parameters.Read.ByteOffset = (uint64_t)StartingOffset->QuadPart;
     }
     if (IoStatusBlock) irp->IoStatus = *IoStatusBlock;
     return irp;
@@ -287,6 +288,25 @@ void KiDeviceStackSelfTest(void) {
     else
         kputs("[devstack-test] FALHOU\n");
     IoDetachDevice_k(&lower);
+}
+
+// Prova de boot (Fase 1b): build IOCTL IRP -> avanca (como IoCallDriver) ->
+// le a "current" e confere os campos (layout NT: SystemBuffer em AssociatedIrp,
+// stack location traseira via Tail.CurrentStackLocation).
+void KiIrpSelfTest(void) {
+    static int in = 0x1234, out = 0;
+    PIRP irp = io_build_ioctl(0xDEAD, 0, &in, sizeof(in), &out, sizeof(out));
+    if (!irp) { kputs("[irp-test] FALHOU (sem IRP)\n"); return; }
+    IoSetNextIrpStackLocation(irp);                              // como o IoCallDriver faz
+    PIO_STACK_LOCATION s = IoGetCurrentIrpStackLocation(irp);
+    int ok = s && s->MajorFunction == IRP_MJ_DEVICE_CONTROL
+             && s->Parameters.DeviceIoControl.IoControlCode == 0xDEAD
+             && s->Parameters.DeviceIoControl.InputBufferLength == sizeof(in)
+             && irp->AssociatedIrp.SystemBuffer
+             && *(int*)irp->AssociatedIrp.SystemBuffer == 0x1234;
+    if (ok) kputs("[irp-test] IRP build+advance+read (layout NT: Tail.CurrentStackLocation@0xB8) OK\n");
+    else    kputs("[irp-test] FALHOU\n");
+    io_free_irp(irp);
 }
 
 // ===== Symbolic links =====

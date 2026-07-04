@@ -98,13 +98,13 @@ static NTSTATUS __attribute__((ms_abi)) ntfs_close(PDEVICE_OBJECT dev, PIRP irp)
 // ---------------------------------------------------------------------------
 static NTSTATUS __attribute__((ms_abi)) ntfs_read(PDEVICE_OBJECT dev, PIRP irp) {
     NTFS_VOLUME_EXT* ext = (NTFS_VOLUME_EXT*)dev->DeviceExtension;
-    PIO_STACK_LOCATION s = irp->CurrentStack;
+    PIO_STACK_LOCATION s = IoGetCurrentIrpStackLocation(irp);
     ULONG len = s->Parameters.Read.Length;
     uint64_t off = s->Parameters.Read.ByteOffset;
     uint64_t rec = s->Parameters.Read.Key;
     if (rec == 0 && ext) rec = ext->cur_file_record;
 
-    if (rec == 0 || !irp->SystemBuffer || len == 0) {
+    if (rec == 0 || !irp->AssociatedIrp.SystemBuffer || len == 0) {
         irp->IoStatus.Status = STATUS_UNSUCCESSFUL;
         irp->IoStatus.Information = 0;
         return STATUS_UNSUCCESSFUL;
@@ -112,7 +112,7 @@ static NTSTATUS __attribute__((ms_abi)) ntfs_read(PDEVICE_OBJECT dev, PIRP irp) 
     kputs("[ntfs.sys] IRP_MJ_READ: MFT #"); kput_dec(rec);
     kputs(" offset="); kput_dec(off); kputs(" len="); kput_dec(len); kputc('\n');
 
-    uint32_t n = ntfs_read_file(rec, off, irp->SystemBuffer, len);
+    uint32_t n = ntfs_read_file(rec, off, irp->AssociatedIrp.SystemBuffer, len);
     if (ext) ext->cur_read_offset = off + n;
     irp->IoStatus.Status = STATUS_SUCCESS;
     irp->IoStatus.Information = n;
@@ -129,13 +129,13 @@ static NTSTATUS __attribute__((ms_abi)) ntfs_read(PDEVICE_OBJECT dev, PIRP irp) 
 // ---------------------------------------------------------------------------
 static NTSTATUS __attribute__((ms_abi)) ntfs_write(PDEVICE_OBJECT dev, PIRP irp) {
     NTFS_VOLUME_EXT* ext = (NTFS_VOLUME_EXT*)dev->DeviceExtension;
-    PIO_STACK_LOCATION s = irp->CurrentStack;
+    PIO_STACK_LOCATION s = IoGetCurrentIrpStackLocation(irp);
     ULONG len = s->Parameters.Write.Length;
     uint64_t off = s->Parameters.Write.ByteOffset;
     uint64_t rec = s->Parameters.Write.Key;
     if (rec == 0 && ext) rec = ext->cur_file_record;
 
-    if (rec == 0 || !irp->SystemBuffer || len == 0) {
+    if (rec == 0 || !irp->AssociatedIrp.SystemBuffer || len == 0) {
         irp->IoStatus.Status = STATUS_UNSUCCESSFUL;
         irp->IoStatus.Information = 0;
         return STATUS_UNSUCCESSFUL;
@@ -145,7 +145,7 @@ static NTSTATUS __attribute__((ms_abi)) ntfs_write(PDEVICE_OBJECT dev, PIRP irp)
 
     // set_eof=0 (sobrescrita/extensao automatica se passar do fim); parent=0
     // (NtWriteFile nao sabe o diretorio pai — atualiza so o $DATA do arquivo).
-    uint32_t n = ntfs_write_file(rec, off, irp->SystemBuffer, len, /*set_eof*/0, /*parent*/0);
+    uint32_t n = ntfs_write_file(rec, off, irp->AssociatedIrp.SystemBuffer, len, /*set_eof*/0, /*parent*/0);
     if (ext) ext->cur_read_offset = off + n;
     irp->IoStatus.Status = (n > 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
     irp->IoStatus.Information = n;
@@ -160,12 +160,12 @@ static NTSTATUS __attribute__((ms_abi)) ntfs_write(PDEVICE_OBJECT dev, PIRP irp)
 // ---------------------------------------------------------------------------
 static NTSTATUS __attribute__((ms_abi)) ntfs_directory_control(PDEVICE_OBJECT dev, PIRP irp) {
     NTFS_VOLUME_EXT* ext = (NTFS_VOLUME_EXT*)dev->DeviceExtension;
-    PIO_STACK_LOCATION s = irp->CurrentStack;
+    PIO_STACK_LOCATION s = IoGetCurrentIrpStackLocation(irp);
     ULONG outlen = s->Parameters.Read.Length;   // tamanho do buffer de saida
     uint64_t dirrec = ext ? ext->dir_record : NTFS_MFT_ROOT;
     if (dirrec == 0) dirrec = NTFS_MFT_ROOT;
 
-    if (!irp->SystemBuffer || outlen < sizeof(NTFS_DIR_ENTRY_OUT)) {
+    if (!irp->AssociatedIrp.SystemBuffer || outlen < sizeof(NTFS_DIR_ENTRY_OUT)) {
         irp->IoStatus.Status = STATUS_UNSUCCESSFUL;
         irp->IoStatus.Information = 0;
         return STATUS_UNSUCCESSFUL;
@@ -181,7 +181,7 @@ static NTSTATUS __attribute__((ms_abi)) ntfs_directory_control(PDEVICE_OBJECT de
         return irp->IoStatus.Status;
     }
 
-    NTFS_DIR_ENTRY_OUT* o = (NTFS_DIR_ENTRY_OUT*)irp->SystemBuffer;
+    NTFS_DIR_ENTRY_OUT* o = (NTFS_DIR_ENTRY_OUT*)irp->AssociatedIrp.SystemBuffer;
     o->mft_record = d.hit.mft_record;
     o->is_dir = (uint32_t)d.hit.is_dir;
     o->pad = 0;

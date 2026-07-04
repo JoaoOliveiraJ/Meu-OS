@@ -32,6 +32,7 @@
 #include "cm/registry.h"
 #include "ke/sync.h"
 #include "ke/dpc.h"                 // FASE FUNDACAO (Item 2): DPC real
+#include "ke/timer.h"               // FASE FUNDACAO (Item 6): KTIMER real
 #include "ex/pool.h"
 #include "ps/systhread.h"
 #include "ke/amd64/kpcr.h"          // FASE 7.2: KPCR/GS_BASE
@@ -598,13 +599,8 @@ __attribute__((ms_abi)) static int NT_vsprintf_s(char* buf, SIZE_T sz, const cha
 
 // ---- Ke* faltantes (no-ops seguros) ----
 // NT_KeInitializeDpc removido — KeInitializeDpc agora e real (KeInitializeDpc_k em ke/dpc.c, Item 2).
-__attribute__((ms_abi)) static void NT_KeInitializeTimer(PVOID Timer) {
-    if (Timer) { for (int i = 0; i < 64; i++) ((uint8_t*)Timer)[i] = 0; }
-}
-__attribute__((ms_abi)) static BOOLEAN NT_KeSetTimer(PVOID Timer, LARGE_INTEGER Due, PVOID Dpc) {
-    (void)Timer; (void)Due; (void)Dpc; return 0;
-}
-__attribute__((ms_abi)) static BOOLEAN NT_KeCancelTimer(PVOID Timer) { (void)Timer; return 1; }
+// NT_KeInitializeTimer/NT_KeSetTimer/NT_KeCancelTimer removidos — KTIMER agora
+// e real (ke/timer.c, Item 6, flag-gated: no modo legado volta ao antigo).
 __attribute__((ms_abi)) static void NT_KeInitializeApc(PVOID Apc, PVOID Thread, KPROCESSOR_MODE Env, PVOID K, PVOID R, PVOID N, KPROCESSOR_MODE M, PVOID Ctx) {
     (void)Thread; (void)Env; (void)K; (void)R; (void)N; (void)M; (void)Ctx;
     if (Apc) { for (int i = 0; i < 80; i++) ((uint8_t*)Apc)[i] = 0; }
@@ -1105,9 +1101,9 @@ static const struct { const char* name; void* fn; } g_ntexports[] = {
     EX("swprintf",                     NT_swprintf_s),
     // Ke* extras
     EX("KeInitializeDpc",              KeInitializeDpc_k),
-    EX("KeInitializeTimer",            NT_KeInitializeTimer),
-    EX("KeSetTimer",                   NT_KeSetTimer),
-    EX("KeCancelTimer",                NT_KeCancelTimer),
+    EX("KeInitializeTimer",            KeInitializeTimer_k),
+    EX("KeSetTimer",                   KeSetTimer_k),
+    EX("KeCancelTimer",                KeCancelTimer_k),
     EX("KeInitializeApc",              NT_KeInitializeApc),
     EX("KeInsertQueueApc",             NT_KeInsertQueueApc),
     EX("KeInitializeMutant",           NT_KeInitializeMutant),
@@ -1231,6 +1227,11 @@ static const struct { const char* name; void* fn; } g_ntexports[] = {
     EX("KeInsertQueueDpc",                 KeInsertQueueDpc_k),
     EX("KeRemoveQueueDpc",                 KeRemoveQueueDpc_k),
     EX("KeSetImportanceDpc",               KeSetImportanceDpc_k),
+    // FASE FUNDACAO (Item 6): KTIMER real. Init/Set/Cancel repontados no lugar;
+    // Ex/ReadState append-only.
+    EX("KeInitializeTimerEx",              KeInitializeTimerEx_k),
+    EX("KeSetTimerEx",                     KeSetTimerEx_k),
+    EX("KeReadStateTimer",                 KeReadStateTimer_k),
 
     { 0, 0 }
 };

@@ -438,6 +438,8 @@ void isr_handler(struct regs* r) {
         if (ki_current_cpu_index() == 0) {
             g_ticks++;
             mm_kuser_tick();
+            extern void KiTimerTick(void);
+            KiTimerTick();          // FASE FUNDACAO (Item 6): expira timers (signal+wake+DPC)
         }
         apic_eoi();
         // FASE FUNDACAO (Item 3 gating): so preempta se IRQL < DISPATCH_LEVEL(2)

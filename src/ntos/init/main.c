@@ -964,6 +964,9 @@ static void sched_start_demo_threads(void) {
     // FASE FUNDACAO (Item 5): auto-teste de block+wake (2 threads worker reais).
     extern void ki_wait_selftest_spawn(void);
     ki_wait_selftest_spawn();
+    // FASE FUNDACAO (Item 6): auto-teste do KTIMER (worker arma timer e bloqueia nele).
+    extern void KiTimerSelfTestSpawn(void);
+    KiTimerSelfTestSpawn();
 
     __atomic_store_n(&g_p4_active, 1, __ATOMIC_SEQ_CST);   // liga a preempcao no timer ISR
     kputs("[sched] preempcao LIGADA (g_p4_active=1). Timer 0xD1 escalona agora.\n");
@@ -1122,6 +1125,9 @@ void kmain(uint32_t mb_info) {
     // FASE FUNDACAO (Item 2): inicializa o subsistema de DPC (fila per-CPU).
     extern void KiInitializeDpcSubsystem(void);
     KiInitializeDpcSubsystem();
+    // FASE FUNDACAO (Item 6): subsistema KTIMER (lista de timers armados).
+    extern void KiInitializeTimerSubsystem(void);
+    KiInitializeTimerSubsystem();
     // FASE 7.7: CR4 + XCR0. Habilita OSXSAVE (e xsetbv XCR0=0x7 = X87+SSE+AVX
     // quando suportado) e CR4.SMEP/UMIP/PCIDE quando o CPU expoe. CADA bit e
     // gateado por CPUID antes de ser setado: bit reservado em CR4 = #GP no boot.

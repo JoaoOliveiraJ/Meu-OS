@@ -39,7 +39,9 @@ Ordem noturna: **4 → 1 → 3 → [2] → parada segura**. Deferidos p/ supervi
 
 | 2 | DPC (fila per-CPU + drena no KeLowerIrql) | ✅ | ✅ idêntico (CPUID x3, C0000365) | preempção viva (51 beats) | DPC disparou inline OK | 7acfb37 |
 | 0a | Reentrância do swap (irq_save/restore) | ✅ | ✅ idêntico | preempção viva (60 beats) | — | 4aec7e6 |
-| 5 | Waits bloqueantes reais (gated) + fix terminate-freeze | ✅ | ✅ idêntico (CPUID x3, C0000365) | preempção viva (48 beats) | **block+wake ACORDOU OK** | (este) |
+| 5 | Waits bloqueantes reais (gated) + fix terminate-freeze | ✅ | ✅ idêntico (CPUID x3, C0000365) | preempção viva (48 beats) | **block+wake ACORDOU OK** | 9aacf68 |
+| flag | `g_ke_legacy_mode` + retrofit waits | ✅ | ✅ (auto-legacy p/ pintok) | — | wait-test real OK | dfd7026 |
+| 6 | KTIMER real (flag-gated) | ✅ | ✅ idêntico (CPUID x3, C0000365) | 45 beats | **timer EXPIROU→OK** | (este) |
 
 **Sessão retomada ("Continua").** pintok **não** usa `KeWaitForSingleObject`/`KeInitializeEvent` (baseline) → Item 5 gated por contexto (só threads worker reais bloqueiam; contexto boot/idle, onde o pintok roda, mantém auto-resolve). O auto-teste provou block+wake ponta-a-ponta, e de bônus corrigiu um **freeze latente de término de thread** (`cli;hlt` → `yield`).
 

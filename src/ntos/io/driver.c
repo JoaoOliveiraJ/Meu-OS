@@ -129,6 +129,12 @@ static PDRIVER_OBJECT driver_build_and_entry(const char* drv_name, const void* i
     }
     pe_bind_imports(base, ntkrnl_resolve);          // resolve imports do ntoskrnl
 
+    // GATE 2 do pintok.sys: registra a base de carga REAL no s_mods[] do loader,
+    // para ZwQuerySystemInformation(SystemModuleInformation/Ex) reportar este
+    // .sys com ImageBase correto (drivers pintok.sys enumeram a si mesmos e ao
+    // ntoskrnl pela lista de modulos, e depois validam por base/tamanho).
+    ldr_module_set_base(drv_name, base);
+
     PDRIVER_OBJECT drv = (PDRIVER_OBJECT)ObCreateObject(OB_TYPE_DRIVER, sizeof(DRIVER_OBJECT), 0);
     if (!drv) { kputs("[io] sem memoria para o DRIVER_OBJECT\n"); if (out_st) *out_st = STATUS_UNSUCCESSFUL; return 0; }
     drv->Type        = 4;                       // IO_TYPE_DRIVER
@@ -163,6 +169,39 @@ static PDRIVER_OBJECT driver_build_and_entry(const char* drv_name, const void* i
         drv->DriverExtension = dx;
     }
     drv->DriverSize = pi.size_image;
+
+    // FASE 7.14: DriverObject->DriverSection = KLDR_DATA_TABLE_ENTRY minima. Drivers reais
+    // (pintok.sys) leem DriverSection->FullDllName MUITO cedo p/ derivar o proprio diretorio de
+    // imagem (monta o path do log: '%s%s\Logs\%s_%s%s') e fazem self-locate por DllBase/
+    // SizeOfImage no bloco de integridade. Sem DriverSection o deref de NULL->FullDllName.Buffer
+    // faulta (CR2~0x50), o PF-recovery mapeia pagina zero -> FullDllName vazia -> self-locate
+    // falha -> bail 0xC0000365. Espelha o KLDR do emulador (DllBase/EntryPoint/SizeOfImage/
+    // FullDllName='\SystemRoot\system32\drivers\<nome>' / BaseDllName='<nome>').
+    {
+        typedef struct { LIST_ENTRY InLoad, InMem, InInit; PVOID DllBase, EntryPoint;
+                         uint64_t SizeOfImage; UNICODE_STRING FullDllName, BaseDllName; } KLDR_MIN;
+        static WCHAR full_w[96]; static WCHAR base_w[40];
+        const char* fp = "\\SystemRoot\\system32\\drivers\\";
+        int fi = 0; while (fp[fi] && fi < 60) { full_w[fi] = (WCHAR)fp[fi]; fi++; }
+        const char* bn = drv_name ? d_basename(drv_name) : "pintok.sys";
+        int bi = 0; while (bn[bi] && fi < 94 && bi < 38) { full_w[fi++] = (WCHAR)bn[bi]; base_w[bi] = (WCHAR)bn[bi]; bi++; }
+        full_w[fi] = 0; base_w[bi] = 0;
+        KLDR_MIN* kldr = (KLDR_MIN*)kmalloc(sizeof(KLDR_MIN));
+        if (kldr) {
+            for (unsigned k = 0; k < sizeof(KLDR_MIN); k++) ((uint8_t*)kldr)[k] = 0;
+            kldr->InLoad.Flink = kldr->InLoad.Blink = &kldr->InLoad;   // self-link (driver pode andar)
+            kldr->InMem.Flink  = kldr->InMem.Blink  = &kldr->InMem;
+            kldr->InInit.Flink = kldr->InInit.Blink = &kldr->InInit;
+            kldr->DllBase = base; kldr->EntryPoint = entry; kldr->SizeOfImage = pi.size_image;
+            kldr->FullDllName.Buffer = full_w;
+            kldr->FullDllName.Length = (USHORT)(fi * 2);
+            kldr->FullDllName.MaximumLength = (USHORT)((fi + 1) * 2);
+            kldr->BaseDllName.Buffer = base_w;
+            kldr->BaseDllName.Length = (USHORT)(bi * 2);
+            kldr->BaseDllName.MaximumLength = (USHORT)((bi + 1) * 2);
+            drv->DriverSection = kldr;
+        }
+    }
 
     // FASE 7.11: monta um RegistryPath valido para passar ao DriverEntry, como
     // faz o I/O Manager do NT real. Formato: \Registry\Machine\System\CurrentControlSet\Services\<NomeSemSys>
@@ -212,8 +251,11 @@ static PDRIVER_OBJECT driver_build_and_entry(const char* drv_name, const void* i
     extern uint64_t cpuid_intercept_count(void);
     extern uint64_t rdtsc_intercept_count(void);
     extern uint64_t rdmsr_intercept_count(void);
+    // FASE 7.14: neutralizacao do bloco anti-VM (int 0x20/iretq/syscall) do pintok.sys.
+    extern uint64_t antivm_neutralize_count(void);
     kputs("[io] chamando DriverEntry...\n");
     g_pintok_trace = 1;
+    uint64_t antivm_before = antivm_neutralize_count();
     uint64_t cpuid_before = cpuid_intercept_count();
     g_intercept_cpuid = 1;
     // Liga TF na RFLAGS atual modificando o valor empilhado e re-popando.
@@ -237,10 +279,12 @@ static PDRIVER_OBJECT driver_build_and_entry(const char* drv_name, const void* i
     uint64_t cpuid_after = cpuid_intercept_count();
     uint64_t rdtsc_n    = rdtsc_intercept_count();
     uint64_t rdmsr_n    = rdmsr_intercept_count();
-    if (cpuid_after > cpuid_before || rdtsc_n || rdmsr_n) {
+    uint64_t antivm_n   = antivm_neutralize_count() - antivm_before;
+    if (cpuid_after > cpuid_before || rdtsc_n || rdmsr_n || antivm_n) {
         kputs("[io] intercept totals: CPUID x"); kput_dec(cpuid_after - cpuid_before);
         kputs("  RDTSC x"); kput_dec(rdtsc_n);
         kputs("  RDMSR x"); kput_dec(rdmsr_n);
+        kputs("  ANTIVM x"); kput_dec(antivm_n);   // int/iretq/syscall neutralizados
         kputs("\n");
     }
     kputs("[io] DriverEntry retornou status="); kput_hex((uint32_t)st);

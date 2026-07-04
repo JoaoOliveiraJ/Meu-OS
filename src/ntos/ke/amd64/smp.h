@@ -23,5 +23,18 @@ uint8_t  smp_apic_id_of(int cpu_index);
 uint32_t smp_ap_alive_count(void);
 int      smp_ap_seen(uint8_t apic_id);
 
+// 1 se ALGUM AP desmascarou seu LVT timer local e portanto participa do
+// escalonamento preemptivo (recebe ticks 0xD1 e roda ki_quantum_end). Enquanto
+// 0, so o BSP escalona — threads NAO devem ser fixadas em CPUs != 0.
+int      smp_ap_timer_online(void);
+
+// --- Worker core do AP (paralelismo real sob TCG, sem o timer local) ---------
+// smp_ap_working(): 1 se o AP entrou no seu worker loop (2o core executando).
+// smp_ap_heartbeat(): contador que SO avanca se o AP esta rodando instrucoes.
+// smp_ap_compute(): ultimo resultado do trabalho de ALU do AP (hash LCG).
+int      smp_ap_working(void);
+uint64_t smp_ap_heartbeat(void);
+uint64_t smp_ap_compute(void);
+
 // Entry C dos APs (chamada pelo ap_trampoline.asm em modo 64-bit).
 void     ap_entry(void);

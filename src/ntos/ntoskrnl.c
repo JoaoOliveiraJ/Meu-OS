@@ -24,6 +24,7 @@
 // ============================================================================
 #include "ntddk.h"
 #include "ntoskrnl.h"
+#include "ldr/loader.h"      // GATE 2: ldr_get_module_count/info p/ SystemModuleInformation
 #include "io/io.h"
 #include "ob/object.h"
 #include "ex/callbacks.h"
@@ -84,6 +85,7 @@ __attribute__((ms_abi)) ULONG KeGetCurrentProcessorNumberEx_k(void* ProcNumber);
 extern void kputs(const char* s);
 extern void kputc(char c);
 extern void kput_hex(uint64_t v);
+extern void kput_dec(uint64_t v);
 
 // FASE 7.10: tracer global declarado cedo p/ todas as funcoes usarem.
 volatile int g_pintok_trace = 0;
@@ -290,11 +292,108 @@ __attribute__((ms_abi)) static PVOID NT_MmGetSystemRoutineAddress(PUNICODE_STRIN
     return r;
 }
 
+// ============================================================================
+//  GATE 2 do pintok.sys (pintok.sys) — SystemModuleInformation / ...Ex.
+//
+//  Layout de RTL_PROCESS_MODULE_INFORMATION_EX (uma entrada = 0x140 bytes), tal
+//  como o pintok.sys consome (confirmado no emulador unicorn, build_module_list_ex):
+//
+//    +0x00  USHORT NextOffset            (0x140 p/ todas menos a ultima = 0)
+//    +0x08  RTL_PROCESS_MODULE_INFORMATION BaseInfo {
+//    +0x08    PVOID  Section
+//    +0x10    PVOID  MappedBase
+//    +0x18    PVOID  ImageBase           <-- base de carga (VA)
+//    +0x20    ULONG  ImageSize           <-- SizeOfImage
+//    +0x24    ULONG  Flags
+//    +0x28    USHORT LoadOrderIndex
+//    +0x2A    USHORT InitOrderIndex
+//    +0x2C    USHORT LoadCount
+//    +0x2E    USHORT OffsetToFileName    <-- byte offset do basename dentro de FullPathName
+//    +0x30    UCHAR  FullPathName[256]   <-- "\\SystemRoot\\system32\\<...>" ANSI
+//    }
+//    +0x138 ULONG ImageChecksum / +0x13C ULONG TimeDateStamp (zeramos)
+//
+//  O cabecalho do buffer (RTL_PROCESS_MODULES / ...Ex) e:
+//    +0x00 ULONG NumberOfModules; depois o array de entradas.
+//  Confirmado pelo padrao de 2 chamadas: buffer NULL -> STATUS_INFO_LENGTH_MISMATCH
+//  + *ReturnLength = tamanho total; depois buffer dimensionado -> preenche.
+// ============================================================================
+#define VG_MODENTRY_SIZE   0x140u
+#define VG_MOD_HDR_SIZE    0x10u     /* ULONG NumberOfModules + padding p/ alinhar entradas */
+
+// Prefixo de caminho NT que o pintok.sys espera ver ("\SystemRoot\system32\..."). O
+// basename real do modulo (ex.: "pintok.sys") e anexado; OffsetToFileName aponta
+// pra ele. Drivers .sys ficam em ...\drivers\, mas o pintok.sys so usa o basename
+// (OffsetToFileName) para comparar nomes, entao um prefixo unico basta.
+static void vg_build_module_path(char* dst /*>=256*/, const char* basename, USHORT* off_out) {
+    static const char* pfx = "\\SystemRoot\\system32\\";
+    int i = 0;
+    while (pfx[i] && i < 200) { dst[i] = pfx[i]; i++; }
+    USHORT ofn = (USHORT)i;
+    int j = 0;
+    while (basename && basename[j] && i < 255) { dst[i++] = basename[j++]; }
+    dst[i] = 0;
+    if (off_out) *off_out = ofn;
+}
+
+// Monta o blob completo (header + N entradas) em 'out' (cap = outcap bytes).
+// Retorna o tamanho total necessario (independe de outcap; se outcap for menor,
+// nao escreve — usado p/ a 1a chamada de dimensionamento). 'ntoskrnl_first'
+// garante que a entrada 0 seja o ntoskrnl (o pintok.sys assume modulo[0] = kernel).
+static ULONG vg_build_module_list(uint8_t* out, ULONG outcap) {
+    int n = ldr_get_module_count();
+    if (n <= 0) n = 0;
+    ULONG total = VG_MOD_HDR_SIZE + (ULONG)n * VG_MODENTRY_SIZE;
+    if (!out || outcap < total) return total;
+
+    // zera tudo primeiro (campos nao usados ficam 0).
+    for (ULONG z = 0; z < total; z++) out[z] = 0;
+    *(ULONG*)(out + 0) = (ULONG)n;                       // NumberOfModules
+
+    uint8_t* e = out + VG_MOD_HDR_SIZE;
+    for (int i = 0; i < n; i++, e += VG_MODENTRY_SIZE) {
+        uint64_t base = 0; uint32_t size = 0; const char* name = 0;
+        ldr_get_module_info(i, &base, &size, &name);
+        // tamanho realista: o pintok.sys valida que as funcoes resolvidas caem DENTRO
+        // de [ImageBase, ImageBase+ImageSize). Se o PE nao deu SizeOfImage,
+        // usa um default generoso.
+        if (size == 0) size = 0x300000u;
+
+        *(uint16_t*)(e + 0x00) = (uint16_t)((i < n - 1) ? VG_MODENTRY_SIZE : 0);  // NextOffset
+        *(uint64_t*)(e + 0x18) = base;                   // ImageBase
+        *(uint32_t*)(e + 0x20) = size;                   // ImageSize
+        *(uint16_t*)(e + 0x28) = (uint16_t)i;            // LoadOrderIndex
+        *(uint16_t*)(e + 0x2C) = 1;                      // LoadCount
+        USHORT ofn = 0;
+        vg_build_module_path((char*)(e + 0x30), name ? name : "unknown.sys", &ofn);
+        *(uint16_t*)(e + 0x2E) = ofn;                    // OffsetToFileName
+    }
+    return total;
+}
+
 // ZwQuerySystemInformation: drivers usam pra checar VBS/HVCI/SecureBoot/etc.
 __attribute__((ms_abi)) static NTSTATUS NT_ZwQuerySystemInformation(ULONG cls, PVOID buf, ULONG buflen, PULONG ret) {
     if (g_pintok_trace) {
         kputs("  [trace] ZwQuerySystemInformation(class=0x"); kput_hex(cls);
         kputs(" buflen="); kput_hex(buflen); kputs(")\n");
+    }
+    // GATE 2 do pintok.sys: enumeracao de modulos carregados (class 11 e 0x4D=77).
+    // Padrao de 2 chamadas: buffer NULL/pequeno -> STATUS_INFO_LENGTH_MISMATCH +
+    // *ReturnLength = tamanho; depois buffer dimensionado -> preenche o array.
+    if (cls == SystemModuleInformation || cls == SystemModuleInformationEx) {
+        ULONG need = vg_build_module_list(0, 0);         // so dimensiona
+        if (ret) *ret = need;
+        if (!buf || buflen < need) {
+            if (g_pintok_trace) { kputs("    [QSI modlist] need=0x"); kput_hex(need); kputs(" (INFO_LENGTH_MISMATCH)\n"); }
+            return STATUS_INFO_LENGTH_MISMATCH;
+        }
+        ULONG wrote = vg_build_module_list((uint8_t*)buf, buflen);
+        if (ret) *ret = wrote;
+        if (g_pintok_trace) {
+            kputs("    [QSI modlist] mods="); kput_dec(ldr_get_module_count());
+            kputs(" wrote=0x"); kput_hex(wrote); kputs("\n");
+        }
+        return STATUS_SUCCESS;
     }
     // Implementacao MINIMA p/ classes mais consultadas:
     if (cls == SystemBasicInformation) {
@@ -412,10 +511,88 @@ __attribute__((ms_abi)) static int NT_strncpy_s(char* dst, SIZE_T dstSize, const
     dst[i] = 0;
     return STATUS_SUCCESS;
 }
-__attribute__((ms_abi)) static int NT_snprintf_s_stub(char* buf, SIZE_T sz, SIZE_T cnt, const char* fmt, ...) {
-    (void)cnt; (void)fmt;
-    if (buf && sz) buf[0] = 0;
-    return 0;
+// ---- printf REAL (wide + narrow) -----------------------------------------
+// O stub vazio antigo quebrava TODA string que o driver monta com swprintf_s
+// (nome de arquivo de log, mensagens, paths) -> divergencia que fazia o pintok.sys
+// bailar cedo. Implementacao real: %d %i %u %x %X %p %s %S %c %% com width,
+// zero-pad, flag '-' e modificadores h/l/ll. [fidelidade — implementacao real]
+#include <stdarg.h>
+typedef __builtin_ms_va_list ms_va_list;   // va_list estilo Win64 (driver chama com ms_abi)
+__attribute__((ms_abi)) static int vfmt_core(void* out, SIZE_T cap, const void* fmt, ms_va_list ap, int wide) {
+    SIZE_T oi = 0, fi = 0;
+#define VF_PUT(ch) do { if (cap && oi + 1 < cap) { if (wide) ((uint16_t*)out)[oi]=(uint16_t)(ch); else ((char*)out)[oi]=(char)(ch); } oi++; } while(0)
+    for (;;) {
+        uint32_t c = wide ? ((const uint16_t*)fmt)[fi] : (uint8_t)((const char*)fmt)[fi];
+        if (!c) break;
+        fi++;
+        if (c != '%') { VF_PUT(c); continue; }
+        int zero = 0, left = 0, width = 0, lenmod = 0;   // lenmod: 1=h 2=l 3=ll
+        for (;;) { uint32_t f = wide ? ((const uint16_t*)fmt)[fi] : (uint8_t)((const char*)fmt)[fi];
+                   if (f=='0'){zero=1;fi++;} else if (f=='-'){left=1;fi++;} else break; }
+        for (;;) { uint32_t d = wide ? ((const uint16_t*)fmt)[fi] : (uint8_t)((const char*)fmt)[fi];
+                   if (d>='0'&&d<='9'){width=width*10+(int)(d-'0');fi++;} else break; }
+        for (;;) { uint32_t m = wide ? ((const uint16_t*)fmt)[fi] : (uint8_t)((const char*)fmt)[fi];
+                   if (m=='h'){lenmod=1;fi++;} else if (m=='l'){lenmod=(lenmod==2)?3:2;fi++;}
+                   else if (m=='w'){fi++;} else break; }
+        uint32_t cv = wide ? ((const uint16_t*)fmt)[fi] : (uint8_t)((const char*)fmt)[fi];
+        if (cv) fi++;
+        int isneg = 0, base = 10, upper = 0; uint64_t uv = 0;
+        switch (cv) {
+            case 'd': case 'i': { int64_t v = (lenmod>=3)?va_arg(ap,int64_t):(int64_t)va_arg(ap,int32_t);
+                if (lenmod==1) v=(int16_t)v; if (v<0){isneg=1;uv=(uint64_t)(-v);} else uv=(uint64_t)v; break; }
+            case 'u': { uint64_t v=(lenmod>=3)?va_arg(ap,uint64_t):(uint64_t)va_arg(ap,uint32_t);
+                if (lenmod==1) v=(uint16_t)v; uv=v; break; }
+            case 'x': case 'X': { uint64_t v=(lenmod>=3)?va_arg(ap,uint64_t):(uint64_t)va_arg(ap,uint32_t);
+                if (lenmod==1) v=(uint16_t)v; uv=v; base=16; upper=(cv=='X'); break; }
+            case 'p': { uv=(uint64_t)va_arg(ap,void*); base=16; width=16; zero=1; break; }
+            case 'c': { VF_PUT(va_arg(ap,uint32_t)); continue; }
+            case 's': case 'S': {
+                int argwide = (cv=='S') ? !wide : wide;
+                const void* sp = va_arg(ap, void*);
+                if (!sp) { const char* nn="(null)"; for (int k=0;nn[k];k++) VF_PUT(nn[k]); continue; }
+                for (SIZE_T si=0;;si++) { uint32_t sc = argwide ? ((const uint16_t*)sp)[si] : (uint8_t)((const char*)sp)[si];
+                    if (!sc) break; VF_PUT(sc); } continue; }
+            case '%': VF_PUT('%'); continue;
+            case 0: goto vf_done;
+            default: VF_PUT('%'); VF_PUT(cv); continue;
+        }
+        const char* digs = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+        char rev[24]; int rn = 0;
+        if (!uv) rev[rn++]='0'; else while (uv){ rev[rn++]=digs[uv%base]; uv/=base; }
+        int pad = width - rn - (isneg?1:0); if (pad<0) pad=0;
+        if (!left && !zero) while (pad-->0) VF_PUT(' ');
+        if (isneg) VF_PUT('-');
+        if (!left && zero) while (pad-->0) VF_PUT('0');
+        while (rn>0) VF_PUT(rev[--rn]);
+        if (left) while (pad-->0) VF_PUT(' ');
+    }
+vf_done:
+    if (cap) { SIZE_T t = oi < cap ? oi : cap-1; if (wide) ((uint16_t*)out)[t]=0; else ((char*)out)[t]=0; }
+#undef VF_PUT
+    // Dump do PLAINTEXT formatado (antes do pintok.sys cifrar p/ o ZwWriteFile) — revela os
+    // checkpoints/IDs numericos e a versao que o pintok.sys loga. O ULTIMO antes do bail = estagio da falha.
+    if (g_pintok_trace && out) {
+        kputs("  [pintok.syslog] '");
+        SIZE_T m = oi < 180 ? oi : 180;
+        for (SIZE_T k = 0; k < m; k++) { char c = wide ? (char)((uint16_t*)out)[k] : ((char*)out)[k];
+                                         kputc((c >= 32 && c < 127) ? c : '.'); }
+        kputs("'\n");
+    }
+    return (int)oi;
+}
+// Wide (swprintf_s / _snwprintf): buf, count, fmt, ...
+__attribute__((ms_abi)) static int NT_swprintf_s(uint16_t* b, SIZE_T cnt, const uint16_t* fmt, ...) {
+    ms_va_list ap; __builtin_ms_va_start(ap, fmt); int r = vfmt_core(b, cnt, fmt, ap, 1); __builtin_ms_va_end(ap); return r;
+}
+__attribute__((ms_abi)) static int NT_vswprintf_s(uint16_t* b, SIZE_T cnt, const uint16_t* fmt, ms_va_list ap) {
+    return vfmt_core(b, cnt, fmt, ap, 1);
+}
+// Narrow (_snprintf_s): buf, size, count, fmt, ...   (count ignorado; size limita)
+__attribute__((ms_abi)) static int NT_snprintf_s(char* buf, SIZE_T sz, SIZE_T cnt, const char* fmt, ...) {
+    (void)cnt; ms_va_list ap; __builtin_ms_va_start(ap, fmt); int r = vfmt_core(buf, sz, fmt, ap, 0); __builtin_ms_va_end(ap); return r;
+}
+__attribute__((ms_abi)) static int NT_vsprintf_s(char* buf, SIZE_T sz, const char* fmt, ms_va_list ap) {
+    return vfmt_core(buf, sz, fmt, ap, 0);
 }
 
 // ---- Ke* faltantes (no-ops seguros) ----
@@ -442,10 +619,22 @@ __attribute__((ms_abi)) static void NT_KeInitializeMutant(PVOID Mutant, BOOLEAN 
     if (Mutant) { for (int i = 0; i < 64; i++) ((uint8_t*)Mutant)[i] = 0; }
 }
 __attribute__((ms_abi)) static BOOLEAN NT_KeAreAllApcsDisabled(void) { return 0; }
-__attribute__((ms_abi)) static void NT_KeIpiGenericCall(PVOID Routine, uintptr_t Ctx) { (void)Routine; (void)Ctx; }
+// REAL KeIpiGenericCall(BroadcastFunction, Context) roda o worker em TODOS os cores e
+// retorna o valor dele. Single-CPU: roda sincronamente 1x. pintok.sys passa o worker do setup/
+// timing por-core (Context=0) e espera que ele rode + retorne. No-op deixava o buffer
+// por-CPU sem montar -> bail downstream. [GATE 3 da init do pintok.sys]
+__attribute__((ms_abi)) static uintptr_t NT_KeIpiGenericCall(PVOID Routine, uintptr_t Ctx) {
+    if (g_pintok_trace) { kputs("  [trace] KeIpiGenericCall Routine=0x"); kput_hex((uint64_t)Routine); kputs(" Ctx=0x"); kput_hex(Ctx); kputs("\n"); }
+    uintptr_t rv = Routine ? ((__attribute__((ms_abi)) uintptr_t(*)(uintptr_t))Routine)(Ctx) : 0;
+    if (g_pintok_trace) { kputs("  [trace] KeIpiGenericCall worker retornou=0x"); kput_hex(rv); kputs("\n"); }
+    return rv;
+}
 __attribute__((ms_abi)) static KIRQL NT_KfRaiseIrql(KIRQL NewIrql) { (void)NewIrql; return PASSIVE_LEVEL; }
-__attribute__((ms_abi)) static NTSTATUS NT_KeRegisterBugCheckReasonCallback(PVOID Record, PVOID Cb, ULONG Reason, PVOID Component) {
-    (void)Record; (void)Cb; (void)Reason; (void)Component; return STATUS_SUCCESS;
+// REAL KeRegisterBugCheckReasonCallback retorna BOOLEAN (TRUE se registrou), nao NTSTATUS.
+// pintok.sys le esse BOOLEAN e bail com STATUS_NOT_FOUND se for FALSE — STATUS_SUCCESS
+// (=0) era lido como FALSE. Retornar TRUE (1). [GATE 1 da init do pintok.sys; ver pintok.sys-INIT-NOTES.md]
+__attribute__((ms_abi)) static BOOLEAN NT_KeRegisterBugCheckReasonCallback(PVOID Record, PVOID Cb, ULONG Reason, PVOID Component) {
+    (void)Record; (void)Cb; (void)Reason; (void)Component; return 1;
 }
 __attribute__((ms_abi)) static BOOLEAN NT_KeDeregisterBugCheckReasonCallback(PVOID Record) { (void)Record; return 1; }
 __attribute__((ms_abi)) static void NT_KeQuerySystemTimePrecise(PLARGE_INTEGER t) {
@@ -512,19 +701,47 @@ __attribute__((ms_abi)) static void NT_IoQueueWorkItem(PVOID WI, PVOID Routine, 
     (void)WI; (void)Type;
     if (Routine) ((void(NTAPI*)(PVOID,PVOID))Routine)(0, Ctx);    // executa inline (sem scheduler)
 }
+// pintok.sys abre um arquivo de LOG via IoCreateFileEx no inicio da DriverEntry e bail
+// (0xC0000365 STATUS_FAILED_DRIVER_ENTRY) se nao conseguir. ZwWriteFile ja descarta com
+// SUCCESS, entao basta um handle fake + IOSB de sucesso pra o logging "funcionar". [GATE 1.5 do pintok.sys]
 __attribute__((ms_abi)) static NTSTATUS NT_IoCreateFileEx(PHANDLE h, ACCESS_MASK a, POBJECT_ATTRIBUTES oa, PIO_STATUS_BLOCK io, PLARGE_INTEGER sz, ULONG fa, ULONG sh, ULONG d, ULONG co, PVOID ea, ULONG ealen, ULONG ck, PVOID ctx) {
-    (void)a; (void)oa; (void)io; (void)sz; (void)fa; (void)sh; (void)d; (void)co; (void)ea; (void)ealen; (void)ck; (void)ctx;
-    if (h) *h = 0;
-    return STATUS_NOT_IMPLEMENTED;
+    (void)a; (void)sz; (void)fa; (void)sh; (void)d; (void)co; (void)ea; (void)ealen; (void)ck; (void)ctx;
+    static uintptr_t s_iocf = 0x4000;
+    uintptr_t hh = (s_iocf += 4);                                // handle distinto por open (evita colisao)
+    if (g_pintok_trace) {
+        kputs("  [trace] IoCreateFileEx");
+        if (oa) { PUNICODE_STRING nm = *(PUNICODE_STRING*)((uint8_t*)oa + 0x10);
+                  if (nm && nm->Buffer && nm->Length) { kputs(" '");
+                      for (int k = 0; k < nm->Length/2 && k < 160; k++) kputc((char)nm->Buffer[k]); kputc('\''); } }
+        kputs(" -> SUCCESS h=0x"); kput_hex(hh); kputs("\n");
+    }
+    if (h) *h = (HANDLE)hh;
+    if (io) { io->Status = STATUS_SUCCESS; io->Information = 1; } // FILE_OPENED
+    return STATUS_SUCCESS;
 }
 __attribute__((ms_abi)) static NTSTATUS NT_ZwReadFile_stub(HANDLE h, HANDLE e, PVOID rt, PVOID c, PIO_STATUS_BLOCK io, PVOID buf, ULONG len, PLARGE_INTEGER off, PULONG key) {
-    (void)h; (void)e; (void)rt; (void)c; (void)off; (void)key;
+    (void)e; (void)rt; (void)c; (void)off; (void)key;
+    // Retorna 'len' bytes ZERADOS com SUCESSO (em vez de EOF). pintok.sys le 1 byte do
+    // pintok.sysbootstatus.dat (o status do boot anterior); EOF era lido como erro -> bail
+    // 0xC0000365. Byte 0 = status "limpo" (boot anterior OK) -> pintok.sys prossegue. [fidelidade]
+    if (g_pintok_trace) { kputs("  [trace] ZwReadFile h=0x"); kput_hex((uint64_t)h); kputs(" len="); kput_dec(len); kputs(" -> SUCCESS(zeros)\n"); }
     if (buf && len) for (ULONG i = 0; i < len; i++) ((uint8_t*)buf)[i] = 0;
-    if (io) { io->Status = STATUS_END_OF_FILE; io->Information = 0; }
-    return STATUS_END_OF_FILE;
+    if (io) { io->Status = STATUS_SUCCESS; io->Information = len; }
+    return STATUS_SUCCESS;
 }
 __attribute__((ms_abi)) static NTSTATUS NT_ZwWriteFile_stub(HANDLE h, HANDLE e, PVOID rt, PVOID c, PIO_STATUS_BLOCK io, PVOID buf, ULONG len, PLARGE_INTEGER off, PULONG key) {
-    (void)h; (void)e; (void)rt; (void)c; (void)buf; (void)off; (void)key;
+    (void)e; (void)rt; (void)c; (void)off; (void)key;
+    // Dump do CONTEUDO do log do pintok.sys — e o proprio diagnostico dele (porque vai falhar).
+    if (g_pintok_trace) {
+        kputs("  [LOG] '");
+        if (buf && len) {
+            ULONG n = len < 240 ? len : 240;
+            int wide = (len >= 2 && ((uint8_t*)buf)[1] == 0 && ((uint8_t*)buf)[0] != 0);
+            if (wide) { for (ULONG k = 0; k < n/2; k++) { char ch = (char)((uint16_t*)buf)[k]; kputc((ch>=32&&ch<127)?ch:'.'); } }
+            else      { for (ULONG k = 0; k < n;   k++) { char ch = ((char*)buf)[k];            kputc((ch>=32&&ch<127)?ch:'.'); } }
+        }
+        kputs("'\n");
+    }
     if (io) { io->Status = STATUS_SUCCESS; io->Information = len; }
     return STATUS_SUCCESS;
 }
@@ -539,7 +756,30 @@ __attribute__((ms_abi)) static NTSTATUS NT_ZwOpenDirectoryObject(PHANDLE h, ACCE
     if (h) *h = (HANDLE)0xD180D170;
     return STATUS_SUCCESS;
 }
-__attribute__((ms_abi)) static void NT_RtlTimeToTimeFields(PLARGE_INTEGER t, PVOID f) { (void)t; (void)f; }
+// RtlTimeToTimeFields REAL: 100ns desde 1601-01-01 -> TIME_FIELDS{Year,Month,Day,Hour,
+// Minute,Second,Milliseconds,Weekday} (SHORT cada). O no-op deixava lixo no timestamp
+// do nome de arquivo de log do pintok.sys. [fidelidade — implementacao real]
+__attribute__((ms_abi)) static void NT_RtlTimeToTimeFields(PLARGE_INTEGER t, PVOID f) {
+    if (!t || !f) return;
+    int64_t time100 = t->QuadPart; if (time100 < 0) time100 = 0;
+    int64_t totalSec = time100 / 10000000LL;
+    int msec = (int)((time100 / 10000LL) % 1000);
+    int64_t days = totalSec / 86400LL;
+    int sod = (int)(totalSec % 86400LL);
+    int16_t* tf = (int16_t*)f;
+    int weekday = (int)((days + 1) % 7); if (weekday < 0) weekday += 7;   // 1601-01-01 = segunda
+    int year = 1601;
+    for (;;) { int leap = ((year%4==0 && year%100!=0) || year%400==0); int diy = leap ? 366 : 365;
+               if (days >= diy) { days -= diy; year++; } else break; }
+    int leap = ((year%4==0 && year%100!=0) || year%400==0);
+    static const int md[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    int mon = 0;
+    for (; mon < 12; mon++) { int dim = md[mon] + ((mon==1 && leap) ? 1 : 0);
+                              if (days >= dim) days -= dim; else break; }
+    tf[0] = (int16_t)year;     tf[1] = (int16_t)(mon + 1);  tf[2] = (int16_t)(days + 1);
+    tf[3] = (int16_t)(sod/3600); tf[4] = (int16_t)((sod%3600)/60); tf[5] = (int16_t)(sod%60);
+    tf[6] = (int16_t)msec;     tf[7] = (int16_t)weekday;
+}
 __attribute__((ms_abi)) static NTSTATUS NT_RtlDuplicateUnicodeString(ULONG flag, PUNICODE_STRING src, PUNICODE_STRING dst) {
     if (g_pintok_trace) {
         kputs("  [trace] RtlDuplicateUnicodeString flag="); kput_hex(flag);
@@ -857,11 +1097,14 @@ static const struct { const char* name; void* fn; } g_ntexports[] = {
     EX("wcscmp",                       NT_wcscmp),
     EX("wcscpy_s",                     NT_strncpy_s),    // fallback p/ versao wide
     EX("wcscat_s",                     NT_strncpy_s),
-    EX("_snprintf_s",                  NT_snprintf_s_stub),
-    EX("vsprintf_s",                   NT_snprintf_s_stub),
-    EX("swprintf_s",                   NT_snprintf_s_stub),
-    EX("vswprintf_s",                  NT_snprintf_s_stub),
-    EX("_vsnwprintf",                  NT_snprintf_s_stub),
+    EX("_snprintf_s",                  NT_snprintf_s),
+    EX("vsprintf_s",                   NT_vsprintf_s),
+    EX("swprintf_s",                   NT_swprintf_s),
+    EX("vswprintf_s",                  NT_vswprintf_s),
+    EX("_vsnwprintf",                  NT_vswprintf_s),
+    EX("_snwprintf",                   NT_swprintf_s),
+    EX("_snwprintf_s",                 NT_swprintf_s),
+    EX("swprintf",                     NT_swprintf_s),
     // Ke* extras
     EX("KeInitializeDpc",              NT_KeInitializeDpc),
     EX("KeInitializeTimer",            NT_KeInitializeTimer),
@@ -1000,15 +1243,78 @@ static int already_missed(const char* fn) {
     return 0;
 }
 
-void* ntkrnl_resolve(const char* dll, const char* fn) {
-    (void)dll;
+// ----------------------------------------------------------------------------
+//  Resolvedor multi-DLL (driver_import_resolver).
+//
+//  pe_bind_imports passa o NOME da DLL de cada import descriptor (ex.:
+//  "ntoskrnl.exe", "hal.dll", "CI.dll", "cng.sys", "ksecdd.sys", "FLTMGR.SYS").
+//  Antes, ntkrnl_resolve ignorava 'dll' e resolvia tudo da mesma tabela plana —
+//  funciona porque no modelo do MeuOS o "kernel" e uma unica imagem e g_ntexports
+//  agrega ntoskrnl+hal+CI+cng+fltmgr. Agora dispatchamos por DLL para:
+//    (a) logar a origem correta (diagnostico do GATE 6: hal/CI/cng);
+//    (b) permitir tabelas especificas por DLL no futuro sem tocar no resto;
+//    (c) tratar nomes "decorados" do HAL (Hal*) e variaveis de dispatch table.
+//
+//  pintok.sys (pintok.sys) importa majoritariamente do ntoskrnl, mas o GATE 6 mostra
+//  que ele tambem valida hal.dll, CI.dll e cng.sys — todos resolvem aqui.
+// ----------------------------------------------------------------------------
+
+// Igualdade case-insensitive de nomes de DLL (o PE pode trazer "CI.dll",
+// "ci.dll", "FLTMGR.SYS", etc. — a comparacao do loader e por bytes).
+static int dll_ieq(const char* a, const char* b) {
+    while (*a && *b) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca + 32);
+        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb + 32);
+        if (ca != cb) return 0;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+// Busca um export na tabela plana g_ntexports[] (ntoskrnl+hal+CI+cng+fltmgr+...).
+static void* nt_lookup(const char* fn) {
     for (int i = 0; g_ntexports[i].name; i++)
         if (streq(g_ntexports[i].name, fn)) return g_ntexports[i].fn;
+    return 0;
+}
 
-    // export desconhecido: loga 1x e devolve o stub (NAO devolve 0, p/ que o
-    // pe_bind_imports nao loge "import nao resolvido" e o driver carregue).
+// Categoria da DLL — usada so p/ log/diagnostico (todas caem na mesma tabela).
+static const char* dll_category(const char* dll) {
+    if (!dll)                              return "ntoskrnl";
+    if (dll_ieq(dll, "ntoskrnl.exe"))      return "ntoskrnl";
+    if (dll_ieq(dll, "ntkrnlpa.exe"))      return "ntoskrnl";
+    if (dll_ieq(dll, "hal.dll"))           return "hal";
+    if (dll_ieq(dll, "CI.dll"))            return "ci";
+    if (dll_ieq(dll, "cng.sys"))           return "cng";
+    if (dll_ieq(dll, "ksecdd.sys"))        return "ksecdd";
+    if (dll_ieq(dll, "FLTMGR.SYS"))        return "fltmgr";
+    if (dll_ieq(dll, "ndis.sys"))          return "ndis";
+    if (dll_ieq(dll, "netio.sys"))         return "netio";
+    if (dll_ieq(dll, "WDFLDR.SYS"))        return "wdf";
+    return "other";
+}
+
+// Resolvedor unificado, ciente da DLL de origem. Despacha por nome de DLL e
+// resolve da tabela agregada; loga a origem e cai num stub seguro se faltar.
+void* driver_import_resolver(const char* dll, const char* fn) {
+    void* r = nt_lookup(fn);
+    if (r) return r;
+
+    // Nao achou pelo nome exato. Tenta variantes comuns de decoracao:
+    //  - HAL: algumas versoes exportam "HalpXxx"/"x86BiosXxx"; ignoramos prefixo.
+    //  - alias C-runtime (memcpy/memset ja na tabela). Aqui so o fallback.
+    // (Mantido simples: a tabela plana ja cobre os 217 nomes do pintok.sys.)
+
     if (!already_missed(fn)) {
-        kputs("[ntex] stub generico p/ '"); kputs(fn); kputs("' (no-op, retorna 0)\n");
+        kputs("[ntex] ("); kputs(dll_category(dll)); kputs(") stub generico p/ '");
+        kputs(fn); kputs("' (no-op, retorna 0)\n");
     }
     return (void*)generic_zero_stub;
+}
+
+// Compat: ntkrnl_resolve continua sendo o ponto de entrada usado por
+// driver.c/loader.c. Agora apenas encaminha pro resolvedor multi-DLL.
+void* ntkrnl_resolve(const char* dll, const char* fn) {
+    return driver_import_resolver(dll, fn);
 }

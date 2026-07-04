@@ -159,6 +159,10 @@ void mm_map_kuser_shared_data(void) {
     *(uint32_t*)(data + 0x26C) = 10;           // NtMajorVersion
     *(uint32_t*)(data + 0x270) = 0;            // NtMinorVersion
     *(uint32_t*)(data + 0x2D4) = 65536;        // NumberOfPhysicalPages (256 MiB)
+    // 0x030 NtSystemRoot (WCHAR[260]) = L"C:\Windows". pintok.sys faz wcslen() disso e monta
+    // um path com ele; campo vazio (zeros) quebrava o path -> bail. [GATE 5-prereq do pintok.sys]
+    { static const uint16_t kSysRoot[] = { 'C',':','\\','W','i','n','d','o','w','s',0 };
+      for (int i = 0; i <= 10; i++) *(uint16_t*)(data + 0x30 + i*2) = kSysRoot[i]; }
 
     pt[pt_idx] = data_phys | PG_PRESENT | PG_RW;
     g_kuser_page = (uint64_t*)data_phys;
@@ -411,6 +415,11 @@ int mm_probe_read_u32(volatile uint32_t* va, uint32_t* out_value) {
 // periodicamente — pode ser do handler do PIT (IRQ0). Sem isso o tick fica fixo.
 void mm_kuser_tick(void) {
     if (!g_kuser_page) return;
+    // Durante o single-step do DriverEntry (g_intercept_cpuid=1) o TSC fake esta CONGELADO.
+    // Se o tempo do KUSD (0x014/0x100) continuar avancando a cada IRQ, o pintok.sys ve relogio
+    // de parede andando contra TSC parado = inconsistencia tipica de VM. Congela junto. [anti-VM]
+    extern volatile int g_intercept_cpuid;
+    if (g_intercept_cpuid) return;
     uint8_t* data = (uint8_t*)g_kuser_page;
     uint64_t ms = g_ticks * 10;
     *(uint32_t*)(data + 0x014) = (uint32_t)ms;       // TickCount.LowPart

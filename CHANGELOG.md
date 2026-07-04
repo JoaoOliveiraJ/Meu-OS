@@ -4,6 +4,143 @@ Todas as mudanças relevantes do projeto. Formato baseado em
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.0/) e
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.11.0] - 2026-07-04 — GUI moderna (Windows 10/11) + multitarefa preemptiva + SMP
+
+### Adicionado — Interface gráfica true-color
+
+- **Camada de desenho 32 bpp** no win32k (antes tudo passava por uma paleta de
+  16 cores do mode13h). Novas primitivas em `gpu.c`:
+  - `gpu_gradient_v` — gradiente vertical (uma cor por linha; barato em tela cheia)
+  - `gpu_blend_rect` — alpha-blend (base de sombras / "acrílico" da taskbar)
+  - `gpu_get_pixel` — leitura de pixel para composição
+- **Compositor Windows 10/11** (`win32kshell.c`, caminho `win32k_shell_compose_full`):
+  - Wallpaper com gradiente azul (duas metades, brilho no meio)
+  - Janelas com **drop-shadow**, caption em **gradiente de acento** (foco) e
+    título 2× nítido, área cliente branca (#F3F3F3), borda de acento
+  - Botões de legenda **[_] [ ] [X]** (X com hover vermelho #E81123)
+  - **Taskbar acrílica** (blend escuro), botão Iniciar (logo de 4 ladrilhos),
+    botões de app com realce de acento, **relógio HH:MM:SS ao vivo**
+  - **System tray de SMP**: chips dos 2 núcleos + heartbeat do AP ao vivo
+- Caption bar subiu para 28px (`TITLE_H`); título desenhado UMA vez (fim do
+  texto duplicado). App content agora é publicado (present) quando o message
+  loop fica ocioso, e **re-invalidado (WM_PAINT)** após cada compose.
+
+### Corrigido — Cursor do mouse invisível
+
+- Trocado o cursor de HARDWARE do virtio-gpu por um **cursor de SOFTWARE** com
+  save-under (`win32kbase.c`: `cursor_show`/`cursor_hide`/`win32k_cursor_repaint`).
+  Motivo: o cursor de HW do virtio-gpu só aparece com `-display gtk,gl=on` no host
+  Windows; sem isso ele fica **invisível**. O cursor de software é desenhado no
+  próprio framebuffer, então aparece em QUALQUER modo de display.
+- Fluidez preservada: `gpu_present_rect` / `virtio_gpu_present_rect` publicam SÓ o
+  retângulo do cursor a cada movimento (nada de recompor a tela inteira). Logs de
+  transfer/flush ficam silenciosos nesse caminho (não floodam a serial).
+
+### Adicionado — Multitarefa preemptiva (scheduler MP RETOMADO)
+
+- **Pilar 4 religado**: o LVT timer do BSP volta a rodar (relógio/`g_ticks` ao
+  vivo) e a preempção (`ki_quantum_end`) é ativada com `g_p4_active=1`.
+- **KTHREADs de kernel reais** escalonadas por quantum via `KiSwapContext`:
+  3 workers de demonstração + 1 thread de **refresh do desktop** (relógio ao
+  vivo, ~2 Hz) + o fluxo do boot/desktop (idle thread).
+- Correção no `sched.c`: a thread idle (que hospeda o fluxo do boot/desktop)
+  agora participa do rodízio — antes seria inanida pelos workers e o desktop
+  nunca subiria.
+- Preempção é ligada **só quando o shell persistente (explorer.exe) sobe**, então
+  todo o carregamento pesado de drivers/apps roda a toda velocidade.
+
+### Adicionado — SMP (2º núcleo em paralelo REAL)
+
+- O **AP (CPU 1)** roda um worker loop dedicado que executa trabalho de ALU real
+  (hash LCG) e publica um **heartbeat** em memória compartilhada. O BSP lê e
+  mostra na taskbar — o número só cresce se o 2º núcleo está executando ao mesmo
+  tempo. Prova de SMP genuíno (dois cores simultâneos).
+- **Limitação documentada**: sob QEMU TCG (sem WHPX/KVM neste host), desmascarar
+  um SEGUNDO LAPIC timer periódico congela deterministicamente o BSP no boot
+  (confirmado por teste). Por isso o AP não usa o timer local — não há preempção
+  por-core no 2º núcleo. Em hardware real / WHPX bastaria `apic_unmask_timer_local()`
+  em `ap_entry` (o `ki_quantum_end` já roda em qualquer CPU).
+
+## [0.10.0] - 2026-06-26 — pintok.sys DECIFRADO
+
+ (``/`pintok.sys`) decifrado
+byte-a-byte por emulação isolada com Unicorn**. Não é mais "decoy / parede de
+design" — pintok.sys é uma pintok.sys funcional COMPLETA com callbacks ativos,
+inspeção de processos, indexação por BootIdentifier GUID, persistence via
+registry (`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\BuildGUIDEx`).
+
+### Adicionado
+
+- **`pintok.sys-GATE-CHAIN.md`** — Gate do DriverEntry desmontado byte-a-byte:
+  - Input em `[rsp+0x560] = 0x8298d4856579546b`
+  - Cadeia: `~ROL(input, 19)` → mux MBA `(A | x) & (B | ~x)` → `~esi[31:0]` = accumulator
+  - Accumulator `0xa7db5aad` (bit 2 = 1) → status `0xC0000022 ACCESS_DENIED`
+  - Imul gate: `0x140c3e6de imul rax, rdx` onde rdx = bit2 flag derivada
+  - **FLAG_ZERO injection**: `rdx ← 0` no imul → RAX=0 SUCCESS limpo
+  - Lifecycle completo (DriverEntry + Egg + DriverUnload) emulado: 6.83M instrs
+
+- **`pintok.sys-pintok.sys-MAP.md`** — Mapa completo do pintok.sys:
+  - 4 callbacks registrados (`PsSetCreate{Process,Thread,LoadImage}Notify*`)
+  - ProcessNotifyEx: 786K instrs com inspeção real (PsGetProcess*, ZwOpenKey,
+    RtlRandomEx × 64, ZwSetValueKey, `ZwQuerySystemInformation(0x5A)` =
+    SystemBootEnvironmentInformation, KeStackAttachProcess, KeUnstackDetachProcess)
+  - **DESCOBERTA CRUCIAL**: pintok.sys indexa state por `BootIdentifier GUID` —
+    explica anti-VM (snapshot reverte = mesmo GUID = replay detection)
+  - **DESCOBERTA CRUCIAL**: pintok.sys USURPA `HKLM\SOFTWARE\Microsoft\Windows NT\
+    CurrentVersion\BuildGUIDEx` para state criptografado (REG_BINARY)
+  - Inner Thread handler `0x1400d3493` (CLEAN code, sem VMProtect!) decifrado:
+    XOR-decryption + range checks + detection bit BTS em `[rip - 0x270fb]`
+  - Encrypted fn ptr tables em `IB+0xb65f0/0xb62d0/0xb6668` (populated runtime)
+  - 64 chamadas RtlRandomEx = 256 bytes entropy per process create
+
+- **`EMU-INJECTION-COOKBOOK.md`** — Reference completo do `scratchpad/emu.py`:
+  - 30+ env vars documentadas (FAKE_PROCESS_NAME, FAKE_BOOT_GUID, FAKE_REG_DATA, etc)
+  - Stages do CONTINUE_PAST_DE + INVOKE_CALLBACKS (7-state machine)
+  - HLE side-effects: KEVENT, KTIMER, KDPC, ExCreateCallback, etc.
+  - Hooks PSCALL_REGISTER (flip rdx low byte → pintok.sys REGISTRA), REGISTER_VIA_REMOVE,
+    INVOKE_BUGCHECK
+  - Receita ready-to-go pra reproduzir todos os achados
+
+- **`MEUOS-pintok.sys-READY-RECIPE.md`** — Checklist pro MeuOS:
+  - 69 APIs ntoskrnl via IAT
+  - 217 APIs resolved-by-name via export table
+  - 5 hard walls (anti-VM timing, self-hash, BootIdentifier, registry, EPROCESS)
+  - Lista de callbacks que pintok.sys vai registrar
+  - Sinais de validação no log
+
+- **`scratchpad/emu.py`** v30+: ~600 linhas adicionais com:
+  - Side-effects reais (Ps*Notify*, Cm*, Ob*, Io*, Ke*, Ex*)
+  - PSCALL_WATCH + PSCALL_REGISTER (flipa rdx pra REGISTER, não Remove)
+  - REGISTER_VIA_REMOVE (PsRemove* re-interpretado como Register no HLE)
+  - CONTINUE_PAST_DE (DriverEntry → Egg → DriverUnload pipeline)
+  - INVOKE_CALLBACKS (4 callbacks invocados com synthetic args)
+  - INVOKE_BUGCHECK (5º callback invocado)
+  - HLE realista de PsGetProcessImageFileName/SessionId/SectionBaseAddress
+  - HLE de ZwOpenKey/QueryValueKey/SetValueKey (loga key + value paths)
+  - HLE de ZwQuerySystemInformation class 0x5A (BootIdentifier GUID)
+  - FAKE_REG_DATA injection (2-stage size query + buffer read)
+  - DriverObject post-mortem dump (DriverUnload addr, MajorFunction, KTIMER state)
+  - 233-ptr resolved-fn scan + nearest-export mapping
+
+### Confirmado
+
+- **pintok.sys não precisa de vgc.exe** pra fazer detection (intuição inicial do LO confirmada)
+- pintok.sys em **isolation registra 4 callbacks** + executa toda a inspeção real,
+  mas não TOMA ações (ZwTerminate, BugCheck) porque whitelists/state encrypted
+  ficam zeradas — requer Riot-signed blob no registry
+- O caminho pro MeuOS é claro: implementar APIs + GUID estável + registry +
+  EPROCESS realista; ou injetar FLAG_ZERO via hook (cheating mas funcional)
+
+### Limitações honestas
+
+- Em isolação **pintok.sys não chama** `ObRegisterCallbacks`, `CmRegisterCallback`,
+  `IoCreateDevice` (estão atrás de um gate upstream que requer Riot provisioning)
+- Process name (svchost.exe, Valorant.exe, Cheat Engine.exe) **não muda
+  comportamento** em isolation — tabela de comparação é zerada
+- Egg export é near-noop em isolation (10.9K instrs, retorna 0)
+- BCryptVerifySignature NUNCA é chamado em isolation (verification blob path
+  unreachable)
+
 ## [0.9.0] - 2026-06-22
 
 Nona versão. **Stack Windows 10/11 essencialmente completo** — 6 sub-fases

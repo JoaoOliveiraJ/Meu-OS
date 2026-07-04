@@ -7,6 +7,7 @@
 #include "serial/serial.h"
 #include "input/keyboard.h"
 #include "input/mouse/mouse.h"   // FASE 11: driver PS/2 do mouse (IRQ12)
+#include "input/virtio_input.h"  // FASE 14: tablet ABSOLUTA (virtio-input) — cursor visivel
 #include "ke/amd64/gdt.h"
 #include "ke/amd64/idt.h"
 #include "ke/amd64/pic.h"
@@ -24,6 +25,7 @@
 #include "hal/disk.h"
 #include "filesystems/ntfs/ntfs.h"
 #include "ldr/loader.h"
+#include "ldr/pe_export_image.h"   // GATE 2/5/6 do pintok.sys: ntoskrnl.exe sintetico parseavel
 #include "io/driver.h"
 #include "ob/object.h"
 #include "io/io.h"
@@ -858,6 +860,111 @@ static int proof_pillar4_scheduler(void) {
     return 0;
 }
 
+// ============================================================================
+//  MULTITAREFA PREEMPTIVA — threads de kernel de demonstracao.
+//
+//  Sao KTHREADs reais escalonadas pelo scheduler MP (ke/sched.c): o APIC timer
+//  (0xD1) chama ki_quantum_end a cada tick e faz KiSwapContext entre elas, o
+//  fluxo do boot (idle thread) e — quando o AP esta online — o outro core.
+//
+//  Cada worker DORME (sti;hlt) entre ticks e acorda ~1x/segundo para logar seu
+//  progresso + em qual CPU esta rodando. Baixo custo, e prova visdivel no log
+//  que ha varias threads vivas sendo preemptadas (igual ao Windows).
+// ============================================================================
+static volatile uint64_t g_worker_beats[4];
+
+static void kdemo_worker(void* arg) {
+    uint64_t id   = (uint64_t)(uintptr_t)arg;
+    uint64_t next = g_ticks + 100;                 // ~1 s @ 100 Hz
+    kputs("[kthread] worker "); kput_dec(id);
+    kputs(" vivo (CPU "); kput_dec(ki_current_cpu_index()); kputs(")\n");
+    for (;;) {
+        __asm__ volatile ("sti; hlt");             // dorme ate o proximo tick
+        if (g_ticks >= next) {
+            next = g_ticks + 100;
+            g_worker_beats[id & 3]++;
+            kputs("[kthread] worker "); kput_dec(id);
+            kputs(" beat "); kput_dec(g_worker_beats[id & 3]);
+            kputs(" @CPU "); kput_dec(ki_current_cpu_index());
+            kputs(" (ticks="); kput_dec(g_ticks); kputs(")\n");
+            // worker 0 tambem reporta o 2o core (AP): heartbeat + resultado da
+            // computacao paralela. O heartbeat cresce MUITO por segundo — prova
+            // de que o AP roda instrucoes ao mesmo tempo que este BSP.
+            if (id == 0 && smp_ap_working()) {
+                kputs("[smp]   CPU1(AP) rodando EM PARALELO: heartbeat=");
+                kput_dec(smp_ap_heartbeat());
+                kputs(" compute=0x"); kput_hex(smp_ap_compute()); kputc('\n');
+            }
+        }
+    }
+}
+
+// Thread de REFRESH do desktop: recompoe a tela ~2x/s. Faz o relogio da taskbar
+// (HH:MM:SS) avancar em tempo real e mantem a UI viva sem depender de eventos de
+// input — igual ao Windows, onde o shell tem um timer que atualiza a bandeja. E'
+// uma KTHREAD de kernel escalonada como as demais: prova que o scheduler roda
+// trabalho REAL (nao so contadores).
+extern void win32k_refresh_taskbar(void);
+extern int  win32k_was_active(void);
+static void kdesktop_refresh(void* arg) {
+    (void)arg;
+    uint64_t next = g_ticks + 50;
+    kputs("[kthread] desktop-refresh vivo (relogio/taskbar ao vivo)\n");
+    for (;;) {
+        __asm__ volatile ("sti; hlt");            // dorme ate o proximo tick
+        if (g_ticks >= next) {
+            next = g_ticks + 50;                  // ~2 Hz
+            if (win32k_was_active()) win32k_refresh_taskbar();
+        }
+    }
+}
+
+// Cria as threads de demonstracao e LIGA a preempcao (g_p4_active=1). A partir
+// daqui o timer do BSP escalona idle<->workers. cpu_affinity=-1 => round-robin
+// entre os CPUs online (se o AP entrou no scheduler, ele tambem recebe threads).
+extern volatile int g_p4_active;
+extern int smp_ap_timer_online(void);   // 1 se o LVT timer do AP foi desmascarado
+
+// Substring simples (para detectar o shell persistente pelo nome do modulo).
+static int name_contains(const char* s, const char* needle) {
+    if (!s || !needle) return 0;
+    for (; *s; s++) {
+        const char* a = s; const char* b = needle;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (!*b) return 1;
+    }
+    return 0;
+}
+
+static int s_sched_started = 0;
+static void sched_start_demo_threads(void) {
+    if (s_sched_started) return;            // idempotente (chamado 1x)
+    s_sched_started = 1;
+    kputs("\n=== Multitarefa preemptiva: criando KTHREADs de kernel ===\n");
+    int online   = g_ki_cpu_count;
+    int ap_ready = smp_ap_timer_online();   // so o AP com timer ligado escalona
+    kputs("[sched] CPUs no scheduler: "); kput_dec((uint64_t)online);
+    kputs("  AP com timer/escalonavel: "); kputs(ap_ready ? "sim" : "nao"); kputc('\n');
+
+    // So podemos FIXAR uma thread num CPU se aquele CPU realmente recebe ticks
+    // (senao a thread fica presa na ready queue dele). O BSP (CPU 0) sempre
+    // escalona. O AP (CPU 1) so quando seu LVT timer foi desmascarado.
+    int aff_cpu1 = (online >= 2 && ap_ready) ? 1 : 0;
+
+    ki_thread_t* w0 = ki_create_thread(kdemo_worker, (void*)(uintptr_t)0, 8, 0);
+    ki_thread_t* w1 = ki_create_thread(kdemo_worker, (void*)(uintptr_t)1, 8, aff_cpu1);
+    ki_thread_t* w2 = ki_create_thread(kdemo_worker, (void*)(uintptr_t)2, 8, 0);
+    // Thread de refresh do desktop (relogio ao vivo) — fixa no BSP (dona do FB).
+    ki_thread_t* wr = ki_create_thread(kdesktop_refresh, 0, 9, 0);
+    if (w0) ki_ready_thread(w0);
+    if (w1) ki_ready_thread(w1);
+    if (w2) ki_ready_thread(w2);
+    if (wr) ki_ready_thread(wr);
+
+    __atomic_store_n(&g_p4_active, 1, __ATOMIC_SEQ_CST);   // liga a preempcao no timer ISR
+    kputs("[sched] preempcao LIGADA (g_p4_active=1). Timer 0xD1 escalona agora.\n");
+}
+
 void kmain(uint32_t mb_info) {
     vga_init();
     serial_init();
@@ -993,16 +1100,15 @@ void kmain(uint32_t mb_info) {
               "Reativar com p4_proof_enabled=1 apos consertar o swap MP.\n");
     }
 
-    // QUIESCE do APIC timer (ver FUTURE.md) — parte de COMPLETAR a pausa da
-    // fundacao SMP/scheduler. Com o Pilar 4 desacoplado, mascaramos o LVT timer
-    // do BSP aqui. O timer ISR (0xD1) chama mm_kuser_tick() a cada tick; rodando
-    // concorrente com o init pos-P3 (mm_map_kuser_shared_data etc.) sob TCG, a
-    // re-entrancia travava o boot ANTES do desktop. Mascarado, g_ticks congela
-    // (relogio estatico) mas o boot ALCANCA o desktop. O IO-APIC permanece ATIVO
-    // — o IRQ12 do mouse continua roteavel. REATIVAR este timer (e o do AP em
-    // ap_entry) faz parte de RETOMAR o scheduler MP (Pilar 4).
-    apic_mask_timer_local();
-    kputs("[apic] LVT timer do BSP MASCARADO (quiesce p/ pausa da fundacao; g_ticks congela; IO-APIC segue ativo)\n");
+    // FUNDACAO SMP/scheduler REATIVADA: o LVT timer do BSP fica LIGADO.
+    // O timer ISR (0xD1) alimenta g_ticks + mm_kuser_tick a cada tick (100 Hz) —
+    // e' o relogio do sistema (a taskbar mostra HH:MM:SS avancando em tempo real).
+    // A PREEMPCAO (ki_quantum_end no timer) so entra quando g_p4_active=1, ligado
+    // mais abaixo por sched_start_demo_threads(), ja com todos os subsistemas
+    // e o desktop prontos — assim nao ha swap de contexto durante o init fragil.
+    // (mm_kuser_tick e' um write trivial de 3 dwords; a "re-entrancia" da versao
+    // anterior era um diagnostico equivocado — o tick e' inofensivo.)
+    kputs("[apic] LVT timer do BSP ATIVO (relogio/g_ticks correndo; preempcao liga adiante)\n");
 
     hal_cpu_init();        // FASE 7: CPUID -> vendor/family/model + features (cpu.c)
     // FASE 7.7: CR4 + XCR0. Habilita OSXSAVE (e xsetbv XCR0=0x7 = X87+SSE+AVX
@@ -1182,6 +1288,21 @@ void kmain(uint32_t mb_info) {
     kputs("[mouse] smoke test: cursor final em ("); kput_dec((uint64_t)win32k_cursor_x());
     kputc(','); kput_dec((uint64_t)win32k_cursor_y()); kputs(")\n");
 
+    // FASE 14 — Tablet ABSOLUTA (virtio-input). O mouse PS/2 relativo numa janela
+    // do QEMU nao tem "mouse integration" (o host captura/grab o ponteiro e
+    // ESCONDE o cursor; o eixo X ainda satura em -127). Um dispositivo ABSOLUTO
+    // faz o QEMU sair do grab -> o cursor de HW do virtio-gpu aparece e segue o
+    // mouse, e o guest le coords absolutas p/ hit-test/cliques. Depende de
+    // win32k_init (resolucao) ja' ter rodado p/ a escala abs->pixels.
+    virtio_input_init();
+
+    // NOTA sobre a multitarefa preemptiva: o AP (2o core) JA esta rodando seu
+    // worker loop em paralelo desde o P3 (nao afeta a velocidade do BSP). As
+    // KTHREADs de kernel do BSP + a preempcao (g_p4_active) sao ligadas so quando
+    // o SHELL PERSISTENTE (explorer.exe) vai subir — assim todo o carregamento
+    // pesado de drivers/apps roda a TODA velocidade, e o multitarefa entra em
+    // cena com o desktop pronto. Ver sched_start_demo_threads() no laco abaixo.
+
     // --- Carrega os binarios Windows passados pelo boot (modulos Multiboot) ---
     // Nada e hardcoded: roda QUALQUER PE passado. Detecta pelo Subsystem:
     // NATIVE(1) -> driver .sys (executiva NT);  senao -> aplicativo .exe (Win32).
@@ -1192,6 +1313,14 @@ void kmain(uint32_t mb_info) {
         uint32_t mods_count = *(volatile uint32_t*)(uintptr_t)(mb_info + 20);
         uint32_t mods_addr  = *(volatile uint32_t*)(uintptr_t)(mb_info + 24);
         kputs("[boot] modulos: "); kput_dec(mods_count); kputc('\n');
+
+        // GATE 2/5/6 do pintok.sys: registra PRIMEIRO um "ntoskrnl.exe"
+        // sintetico com export table parseavel (as 217 funcoes que o pintok.sys resolve
+        // por parse manual da export directory, nao pela IAT). Tem que ser o
+        // modulo[0] da lista que ZwQuerySystemInformation(SystemModuleInformation
+        // /Ex) devolve — o pintok.sys assume modulo[0] = kernel e soma os RVAs da export
+        // table a essa ImageBase. Ver src/ntos/ldr/pe_export_image.c.
+        ldr_register_ntoskrnl_export_image();
 
         // Passo 1: registra TODOS os modulos por nome (as DLLs ficam disponiveis).
         for (uint32_t i = 0; i < mods_count; i++) {
@@ -1209,6 +1338,10 @@ void kmain(uint32_t mb_info) {
                 kputs("\n[boot] driver de kernel: "); kputs(path); kputc('\n');
                 driver_load(path, bytes);
             } else if (ldr_match_ext(path, ".exe")) {
+                // Antes de subir o SHELL persistente (explorer.exe), LIGA a
+                // multitarefa preemptiva: todo o carregamento pesado ja rodou a
+                // toda velocidade; agora as KTHREADs coexistem com o desktop.
+                if (name_contains(path, "explorer")) sched_start_demo_threads();
                 kputs("\n[boot] aplicativo: "); kputs(path); kputc('\n');
                 ldr_run(path, bytes);
             }
@@ -1217,6 +1350,11 @@ void kmain(uint32_t mb_info) {
     } else {
         kputs("[boot] nenhum modulo. Rode:  .\\run.ps1\n");
     }
+
+    // Fallback: se nenhum explorer.exe estava na lista (ldr_run dele nunca
+    // retorna quando presente), liga a multitarefa aqui — assim o desktop tem
+    // as KTHREADs + relogio ao vivo mesmo sem o shell persistente.
+    sched_start_demo_threads();
 
     // --- FASE 2/6: se alguma app GUI ja tomou a tela (guiapp/desktop), o estado
     // final do framebuffer ja e a GUI — PULAMOS a demo estatica da Fase 1 (senao
@@ -1267,5 +1405,8 @@ void kmain(uint32_t mb_info) {
     // aqui com IF=0 — por isso o `hlt` puro CONGELAVA tudo (mouse/teclado mortos
     // apesar do desktop ja composto na tela). `sti; hlt` garante IF=1 e acorda a
     // CPU a cada IRQ pra servir o handler. (Padrao canonico de idle loop NT/x86.)
-    for (;;) __asm__ volatile ("sti; hlt");   // ocioso: tudo acontece via interrupcoes
+    for (;;) {
+        __asm__ volatile ("sti; hlt");   // ocioso: tudo acontece via interrupcoes
+        virtio_input_poll();             // drena a tablet absoluta (sem IRQ wired)
+    }
 }

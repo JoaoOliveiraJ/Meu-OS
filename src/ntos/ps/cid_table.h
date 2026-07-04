@@ -7,7 +7,7 @@
 //  entrada nessa tabela mapeia um Client ID (HANDLE truncado a 32-bit que
 //  contem PID ou TID) -> ponteiro p/ EPROCESS ou ETHREAD.
 //
-//  Drivers reais (anti-cheat, EDR, rootkits) tipicamente fazem UMA das duas:
+//  Drivers reais (pintok.sys, EDR, rootkits) tipicamente fazem UMA das duas:
 //   1) Chamam PsLookupProcessByProcessId(pid, &eproc) — varre a tabela.
 //   2) "Reach-around": dereferenciam PspCidTable diretamente, andam pela
 //      hash table NT (3 niveis), e obtem o EPROCESS sem chamar API. Isso

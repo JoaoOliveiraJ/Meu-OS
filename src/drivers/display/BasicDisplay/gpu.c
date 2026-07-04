@@ -204,6 +204,84 @@ void gpu_present(void) {
     if (s_backend == GPU_BACKEND_VGPU) virtio_gpu_present();
 }
 
+void gpu_present_rect(int x, int y, int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (w <= 0 || h <= 0) return;
+    // Bochs VBE: LFB MMIO ja propaga; so o virtio-gpu precisa do transfer/flush.
+    if (s_backend == GPU_BACKEND_VGPU)
+        virtio_gpu_present_rect((uint32_t)x, (uint32_t)y, (uint32_t)w, (uint32_t)h);
+}
+
+// ----------------------------------------------------------------------------
+//  Primitivas TRUE-COLOR — usadas pela UI moderna (win32k shell). Escrevem
+//  direto no framebuffer 32 bpp; sem efeito nos backends que nao expoem LFB.
+// ----------------------------------------------------------------------------
+uint32_t gpu_get_pixel(int x, int y) {
+    if (!gpu_active()) return 0;
+    if (x < 0 || y < 0) return 0;
+    if ((uint32_t)x >= gpu_w_active() || (uint32_t)y >= gpu_h_active()) return 0;
+    uint8_t* fb = gpu_fb_active();
+    uint32_t* row = (uint32_t*)(fb + (uint32_t)y * gpu_pitch_active());
+    return row[x] & 0x00FFFFFFu;
+}
+
+void gpu_gradient_v(int x, int y, int w, int h, uint32_t top, uint32_t bottom) {
+    if (!gpu_active()) return;
+    if (w <= 0 || h <= 0) return;
+    int x0 = x < 0 ? 0 : x;
+    int y0 = y < 0 ? 0 : y;
+    int x1 = x + w; if (x1 > (int)gpu_w_active()) x1 = (int)gpu_w_active();
+    int y1 = y + h; if (y1 > (int)gpu_h_active()) y1 = (int)gpu_h_active();
+    if (x1 <= x0 || y1 <= y0) return;
+
+    uint8_t*  fb    = gpu_fb_active();
+    uint32_t  pitch = gpu_pitch_active();
+    int tr = (int)((top    >> 16) & 0xFF), tg = (int)((top    >> 8) & 0xFF), tb = (int)(top    & 0xFF);
+    int br = (int)((bottom >> 16) & 0xFF), bg = (int)((bottom >> 8) & 0xFF), bb = (int)(bottom & 0xFF);
+    int span = (h > 1) ? (h - 1) : 1;   // divisor da interpolacao
+
+    for (int yy = y0; yy < y1; yy++) {
+        int t = yy - y;                 // posicao relativa a origem do gradiente
+        if (t < 0) t = 0; else if (t > span) t = span;
+        int r = tr + (br - tr) * t / span;
+        int g = tg + (bg - tg) * t / span;
+        int b = tb + (bb - tb) * t / span;
+        uint32_t v = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+        uint32_t* rowp = (uint32_t*)(fb + (uint32_t)yy * pitch);
+        for (int xx = x0; xx < x1; xx++) rowp[xx] = v;
+    }
+}
+
+void gpu_blend_rect(int x, int y, int w, int h, uint32_t rgb, uint8_t alpha) {
+    if (!gpu_active()) return;
+    if (w <= 0 || h <= 0 || alpha == 0) return;
+    if (alpha >= 255) { gpu_fill_rect(x, y, w, h, rgb); return; }
+    int x0 = x < 0 ? 0 : x;
+    int y0 = y < 0 ? 0 : y;
+    int x1 = x + w; if (x1 > (int)gpu_w_active()) x1 = (int)gpu_w_active();
+    int y1 = y + h; if (y1 > (int)gpu_h_active()) y1 = (int)gpu_h_active();
+    if (x1 <= x0 || y1 <= y0) return;
+
+    uint8_t*  fb    = gpu_fb_active();
+    uint32_t  pitch = gpu_pitch_active();
+    int sr = (int)((rgb >> 16) & 0xFF), sg = (int)((rgb >> 8) & 0xFF), sb = (int)(rgb & 0xFF);
+    int a  = (int)alpha, ia = 255 - (int)alpha;
+
+    for (int yy = y0; yy < y1; yy++) {
+        uint32_t* rowp = (uint32_t*)(fb + (uint32_t)yy * pitch);
+        for (int xx = x0; xx < x1; xx++) {
+            uint32_t d = rowp[xx];
+            int dr = (int)((d >> 16) & 0xFF), dg = (int)((d >> 8) & 0xFF), db = (int)(d & 0xFF);
+            int r = (sr * a + dr * ia) / 255;
+            int g = (sg * a + dg * ia) / 255;
+            int b = (sb * a + db * ia) / 255;
+            rowp[xx] = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+        }
+    }
+}
+
 // ----------------------------------------------------------------------------
 //  Cursor de HARDWARE. So o backend virtio-gpu tem cursor queue. No Bochs VBE
 //  nao ha — devolvemos 0 e o win32k cai no sprite de software (recompose).

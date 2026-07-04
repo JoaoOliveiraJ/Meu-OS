@@ -378,6 +378,7 @@ typedef enum _SECTION_INHERIT { ViewShare = 1, ViewUnmap = 2 } SECTION_INHERIT;
 #define SystemModuleInformation               11
 #define SystemHandleInformation               16
 #define SystemFirmwareTableInformation        76
+#define SystemModuleInformationEx             77   /* 0x4D — RTL_PROCESS_MODULE_INFORMATION_EX[] */
 #define SystemCodeIntegrityInformation        103
 #define SystemSecureBootPolicyInformation     144
 #define SystemVsmProtectionInformation        152

@@ -14,12 +14,7 @@ param(
     [int]$TimeoutSec = 0,
     [string[]]$Modules,
     [switch]$Screendump,
-    [int]$QmpPort = 4444,
-    # FASE 14 — usa o display GTK com OpenGL (-display gtk,gl=on). O caminho de
-    # compose GL do QEMU desenha o cursor de HW do virtio-gpu como um OVERLAY de
-    # textura, contornando o limite/nao-render do "window cursor" do GTK 2D no
-    # host Windows. Use se o cursor de HW nao aparecer no display 2D padrao.
-    [switch]$Gl
+    [int]$QmpPort = 4444
 )
 
 $ErrorActionPreference = 'Stop'
@@ -62,9 +57,7 @@ if (-not $Modules -or $Modules.Count -eq 0) {
                     'conhello.exe', 'test32.exe', 'sysinfo.exe', 'pipeserver.exe', 'pipeclient.exe',
                     'cmd.exe', 'guiapp.exe', 'dxdemo.exe', 'd3d11demo.exe',
                     'csrss.exe', 'winlogon.exe', 'win10ui.exe',
-                    'desktop.exe',
-                    'explorer.exe') {   # POR ULTIMO: shell ring-3 persistente
-                                        # (nao sai; segura o boot no seu loop)
+                    'desktop.exe') {
         $p = Join-Path $build $d
         if (Test-Path $p) { $Modules += $p }
     }
@@ -101,7 +94,7 @@ $qargs = @('-kernel', 'kernel.bin', '-m', '256', '-no-reboot', '-serial', 'stdio
            # TCG multi-thread (1 host thread por vCPU). Sem isso o TCG e' single-
            # threaded round-robin: um vCPU em loop tight faz o outro starvado.
            # Necessario para SMP em qualquer host sem KVM (Windows headless).
-           '-accel', 'tcg,thread=multi',
+           '-accel', 'whpx',
            # v0.9.0+ fix: -vga none remove o std-vga (Bochs) primario para que
            # o virtio-gpu seja o UNICO display PCI — assim a janela do QEMU
            # mostra o desktop renderizado via virtio-gpu (era invisivel antes
@@ -125,18 +118,9 @@ $qargs = @('-kernel', 'kernel.bin', '-m', '256', '-no-reboot', '-serial', 'stdio
            # (vendor=0x1B36 device=0x000D no QEMU). Sem dispositivos USB
            # ligados (-usbdevice ... seria opcional); o controller em si
            # ja basta para o stub registrar 1 HCD via usbport.
-           '-device', 'qemu-xhci,id=xhci0',
-           # FASE 14 (cursor absoluto): um virtio-tablet-pci (virtio-input,
-           # vendor=0x1AF4 device=0x1052). O driver virtio_input.c o leva a
-           # DRIVER_OK; ai o QEMU passa a tratar a tablet como ponteiro ATIVO
-           # (modo ABSOLUTO) e PARA de capturar (grab) o mouse. Sem isso o
-           # cursor de HW do virtio-gpu fica invisivel (o grab esconde o cursor
-           # da janela) e o eixo X satura (dx=-127). e' como uma VM Windows real
-           # roda no QEMU: HID absoluto -> cursor visivel + posicao p/ cliques.
-           '-device', 'virtio-tablet-pci')
+           '-device', 'qemu-xhci,id=xhci0')
 if ($initrd)   { $qargs += @('-initrd', $initrd) }
 if ($Headless) { $qargs += @('-display', 'none') }
-elseif ($Gl)   { $qargs += @('-display', 'gtk,gl=on') }   # cursor de HW via overlay GL
 # FASE GPU: -Screendump abre QMP via TCP e, apos o boot, manda 'screendump' p/
 # capturar o framebuffer em build\screen.ppm (prova visual). Exige -Headless +
 # -TimeoutSec; o screendump roda em paralelo, aguarda alguns segundos de boot

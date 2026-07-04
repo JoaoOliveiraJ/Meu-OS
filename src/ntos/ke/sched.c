@@ -308,11 +308,16 @@ void ki_quantum_end(void) {
         return;
     }
 
-    // Recoloca current no fim da ready (a menos que seja idle/terminated/waiting).
-    if (!is_idle &&
-        cur->state != KI_THREAD_TERMINATED &&
+    // Recoloca current no fim da ready. IMPORTANTE: a thread "idle" desta CPU
+    // e', na pratica, o FLUXO DO BOOT/desktop (kmain roda sobre o contexto do
+    // idle ate bloquear em NtUserGetMessage). Se ela NAO voltasse a fila, as
+    // threads worker encheriam a ready queue e o boot NUNCA mais rodaria — o
+    // desktop jamais subiria. Entao a idle TAMBEM participa do rodizio (so nao
+    // reinserimos threads terminadas/esperando). Quando so a idle esta pronta,
+    // o "next == cur" acima ja evita swap desnecessario (idle segue em hlt).
+    if (cur->state != KI_THREAD_TERMINATED &&
         cur->state != KI_THREAD_WAITING) {
-        cur->state = KI_THREAD_READY;
+        if (!is_idle) cur->state = KI_THREAD_READY;   // idle mantem estado RUNNING
         list_insert_tail(&p->ready_head, &cur->ready_link);
     }
 

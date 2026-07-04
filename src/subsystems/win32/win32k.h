@@ -134,6 +134,12 @@ void      win32k_inject_demo_input(const char* s);
 // WM_LBUTTONDOWN/UP / WM_RBUTTONDOWN/UP para a janela que esta debaixo do
 // cursor. 'buttons' = bitmask MOUSE_BTN_LEFT/RIGHT/MIDDLE (ver mouse.h).
 void      win32k_on_mouse_event(int32_t dx, int32_t dy, uint32_t buttons);
+// FASE 14 — Roteia um evento de mouse ABSOLUTO (vindo do virtio-tablet): a
+// posicao ja vem em pixels da tela (nao delta). Atualiza o cursor (com clamp),
+// faz hit-test e posta WM_MOUSE*/botoes. NAO mexe no cursor de HW (em modo
+// absoluto o HOST o desenha na posicao do ponteiro). 'buttons' = bit0=L bit1=R
+// bit2=M (mesma convencao do PS/2).
+void      win32k_on_mouse_abs(int32_t x, int32_t y, uint32_t buttons);
 // FASE 11 — Posicao atual do cursor (em pixels da tela), atualizada pelo
 // roteamento de eventos do mouse. Usados pelas syscalls NtUserGet/SetCursorPos.
 int32_t   win32k_cursor_x(void);

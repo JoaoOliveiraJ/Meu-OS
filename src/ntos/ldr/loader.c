@@ -63,6 +63,40 @@ const void* ldr_get_module_bytes(const char* name) {
     return (i >= 0) ? s_mods[i].bytes : 0;
 }
 
+// ---- Enumeracao de modulos (GATE 2 do pintok.sys) ----------------------------
+int ldr_get_module_count(void) { return s_nmods; }
+
+int ldr_get_module_info(int i, uint64_t* out_base, uint32_t* out_size, const char** out_name) {
+    if (i < 0 || i >= s_nmods) return 0;
+    if (out_name) *out_name = s_mods[i].name;
+    // Base de carga: a VA mapeada se ja foi carregado; senao o ponteiro dos
+    // bytes brutos (identidade — o kernel mapeia 1 GiB 1:1, entao um driver
+    // ainda nao "carregado" mas com bytes na RAM ainda tem um endereco valido).
+    uint64_t base = s_mods[i].base
+                  ? (uint64_t)(uintptr_t)s_mods[i].base
+                  : (uint64_t)(uintptr_t)s_mods[i].bytes;
+    if (out_base) *out_base = base;
+    // SizeOfImage lido do optional header do PE (offset 0x3C -> e_lfanew;
+    // +4 PE sig +20 file header = optional header; SizeOfImage @ +0x38 do opt).
+    uint32_t size = 0;
+    const uint8_t* f = (const uint8_t*)s_mods[i].bytes;
+    if (f) {
+        uint32_t e = *(const uint32_t*)(f + 0x3C);
+        // valida 'PE\0\0' antes de ler o opt header (evita lixo).
+        if (*(const uint32_t*)(f + e) == 0x00004550u) {
+            const uint8_t* opt = f + e + 4 + 20;
+            size = *(const uint32_t*)(opt + 0x38);   // SizeOfImage (PE32 e PE32+ no mesmo offset)
+        }
+    }
+    if (out_size) *out_size = size;
+    return 1;
+}
+
+void ldr_module_set_base(const char* name, void* base) {
+    int i = find_mod(name);
+    if (i >= 0) s_mods[i].base = base;
+}
+
 // resolve um import (dll!fn) -> endereco, carregando a DLL se preciso
 static void* ldr_resolve(const char* dll, const char* fn) {
     void* base = ldr_load(dll);

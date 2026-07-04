@@ -17,7 +17,8 @@ NTSTATUS io_create_device(PDRIVER_OBJECT drv, ULONG ext_size, const char* name,
     dev->Type = 3;
     dev->Size = (SHORT)sizeof(DEVICE_OBJECT);
     dev->DriverObject = drv;
-    dev->Flags = type;
+    dev->DeviceType = type;            // Fase 1a: era 'dev->Flags = type' (bug: Flags != DeviceType)
+    dev->StackSize  = 1;               // dispositivo nao-anexado: 1 nivel
     dev->DeviceExtension = ext_size ? (void*)(dev + 1) : 0;
     if (drv) { dev->NextDevice = drv->DeviceObject; drv->DeviceObject = dev; }  // cadeia do driver
 

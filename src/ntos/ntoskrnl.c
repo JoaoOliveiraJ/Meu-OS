@@ -1215,6 +1215,10 @@ static const struct { const char* name; void* fn; } g_ntexports[] = {
     EX("FltSendMessage",                   fltmgr_FltSendMessage),
     EX("FltSetCallbackDataDirty",          fltmgr_FltSetCallbackDataDirty),
 
+    // FASE FUNDACAO (Item 4): stall real por TSC. Append-only (nao reordenar).
+    // KeQueryPerformanceCounter ja esta acima (linha ~960); so o corpo mudou.
+    EX("KeStallExecutionProcessor",        KeStallExecutionProcessor_k),
+
     { 0, 0 }
 };
 

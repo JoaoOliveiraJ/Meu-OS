@@ -32,8 +32,9 @@ Referência do plano: `C:\Users\joao\.claude\plans\lovely-baking-whale.md`.
 |---|------|-------|-----------------|----------|-------|--------|
 | — | setup/baseline | ✅ | — (baseline) | pausada | — | 2e652e9 |
 | 4 | Stall/PerfCounter (TSC) | ✅ | ✅ idêntico (CPUID x3, C0000365) | — | TSC=3.09GHz OK | 5557e5b |
-| 1 | IRQL real (gs:[0x60]+CR8) | ✅ | ✅ idêntico | — | — (probe depois) | (este) |
+| 1 | IRQL real (gs:[0x60]+CR8) | ✅ | ✅ idêntico | — | — (probe depois) | b11fa80 |
+| 3 | Spinlocks reais + gating preempção | ✅ | ✅ idêntico (sem halt) | preempção viva (66 beats) | — | (este) |
 
-Ordem noturna: **4 → 1 → 3 → 0a → 2**. Deferidos p/ supervisão: 0b (reestrutura idle), 5 (waits), 6 (KTIMER), 7 (Ex), trilha I/O.
+Ordem noturna: **4 → 1 → 3 → [2] → parada segura**. Deferidos p/ supervisão (tocam contexto de troca ou trajetória do pintok): **0a+5** (reentrância do swap + waits — são uma unidade, testar juntas com você acordado), **6** (KTIMER), **7** (Ex), **trilha I/O** inteira. Motivo: mexer no caminho de context-switch (`ki_swap_context`) ou tornar `KeWait` bloqueante sem supervisão é o maior risco à trajetória do pintok.
 
-(em progresso — Item 3: spinlocks reais)
+(em progresso — Item 2: DPC)

@@ -123,6 +123,8 @@ typedef struct _KEVENT     { DISPATCHER_HEADER Header; }      KEVENT, *PKEVENT;
 typedef struct _KSEMAPHORE { DISPATCHER_HEADER Header; LONG Limit; } KSEMAPHORE, *PKSEMAPHORE;
 typedef struct _KMUTEX     { DISPATCHER_HEADER Header; LIST_ENTRY MutantListEntry; PVOID OwnerThread; UCHAR Abandoned; UCHAR ApcDisable; } KMUTEX, *PKMUTEX;
 typedef ULONGLONG KSPIN_LOCK, *PKSPIN_LOCK;
+// FASE FUNDACAO (Item 3) — handle de queued spinlock (in-stack).
+typedef struct _KLOCK_QUEUE_HANDLE { PKSPIN_LOCK LockPtr; KIRQL OldIrql; } KLOCK_QUEUE_HANDLE, *PKLOCK_QUEUE_HANDLE;
 
 // Argumentos do KeWaitForSingleObject / KeDelayExecutionThread.
 typedef enum _KWAIT_REASON {

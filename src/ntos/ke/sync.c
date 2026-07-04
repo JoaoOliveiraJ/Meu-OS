@@ -85,20 +85,47 @@ NTSTATUS NTAPI KeDelayExecutionThread_k(KPROCESSOR_MODE WaitMode, BOOLEAN Alerta
     return STATUS_SUCCESS;
 }
 
-// SpinLocks em UP sem preempcao: armazenam um flag interno; sem race com IRQ.
+// ============================================================================
+//  FASE FUNDACAO (Item 3) — spinlocks reais: atomico (xchg) + raise IRQL a
+//  DISPATCH no acquire, restore no release. Livre de deadlock porque o ISR do
+//  timer NAO preempta em IRQL>=DISPATCH (gating em isr.c) -> o holder nunca e'
+//  trocado enquanto segura. KSPIN_LOCK e ULONGLONG (0=livre,1=preso). UP-correto
+//  e MP-ready. pintok nao usa spinlock (baseline) -> inerte p/ ele.
+// ============================================================================
+static inline void ki_spin_acquire(PKSPIN_LOCK L) {
+    while (__atomic_exchange_n(L, 1ULL, __ATOMIC_ACQUIRE) != 0)
+        while (__atomic_load_n(L, __ATOMIC_RELAXED)) __asm__ volatile ("pause");
+}
+static inline void ki_spin_release(PKSPIN_LOCK L) {
+    __atomic_store_n(L, 0ULL, __ATOMIC_RELEASE);
+}
 void NTAPI KeInitializeSpinLock_k(PKSPIN_LOCK SpinLock) {
     if (g_pintok_trace) kputs("  [trace] KeInitializeSpinLock\n");
-    if (SpinLock) *SpinLock = 0;
+    if (SpinLock) __atomic_store_n(SpinLock, 0ULL, __ATOMIC_RELEASE);
 }
 KIRQL NTAPI KeAcquireSpinLockRaiseToDpc_k(PKSPIN_LOCK SpinLock) {
-    if (SpinLock) *SpinLock = 1;
-    return PASSIVE_LEVEL;   // OldIrql
+    KIRQL old; KeRaiseIrql_k(DISPATCH_LEVEL, &old);
+    if (SpinLock) ki_spin_acquire(SpinLock);
+    return old;
 }
 void NTAPI KeReleaseSpinLock_k(PKSPIN_LOCK SpinLock, KIRQL OldIrql) {
-    (void)OldIrql; if (SpinLock) *SpinLock = 0;
+    if (SpinLock) ki_spin_release(SpinLock);
+    KeLowerIrql_k(OldIrql);
 }
-void NTAPI KeAcquireSpinLockAtDpcLevel_k(PKSPIN_LOCK SpinLock) { if (SpinLock) *SpinLock = 1; }
-void NTAPI KeReleaseSpinLockFromDpcLevel_k(PKSPIN_LOCK SpinLock) { if (SpinLock) *SpinLock = 0; }
+void NTAPI KeAcquireSpinLockAtDpcLevel_k(PKSPIN_LOCK SpinLock) { if (SpinLock) ki_spin_acquire(SpinLock); }
+void NTAPI KeReleaseSpinLockFromDpcLevel_k(PKSPIN_LOCK SpinLock) { if (SpinLock) ki_spin_release(SpinLock); }
+// Variantes adicionais (append-only na tabela EX).
+void NTAPI KeAcquireSpinLock_k(PKSPIN_LOCK SpinLock, KIRQL* OldIrql) {
+    KIRQL o = KeAcquireSpinLockRaiseToDpc_k(SpinLock); if (OldIrql) *OldIrql = o;
+}
+KIRQL NTAPI KfAcquireSpinLock_k(PKSPIN_LOCK SpinLock) { return KeAcquireSpinLockRaiseToDpc_k(SpinLock); }
+void NTAPI KfReleaseSpinLock_k(PKSPIN_LOCK SpinLock, KIRQL OldIrql) { KeReleaseSpinLock_k(SpinLock, OldIrql); }
+void NTAPI KeAcquireInStackQueuedSpinLock_k(PKSPIN_LOCK SpinLock, PKLOCK_QUEUE_HANDLE H) {
+    if (H) { H->LockPtr = SpinLock; H->OldIrql = KeAcquireSpinLockRaiseToDpc_k(SpinLock); }
+}
+void NTAPI KeReleaseInStackQueuedSpinLock_k(PKLOCK_QUEUE_HANDLE H) {
+    if (H) KeReleaseSpinLock_k(H->LockPtr, H->OldIrql);
+}
 
 // ============================================================================
 //  FASE FUNDACAO (Item 1) — IRQL real. Espelhado em gs:[0x60] (KPCR.Irql, que

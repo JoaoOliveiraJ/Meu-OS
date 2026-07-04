@@ -460,6 +460,18 @@ void isr_handler(struct regs* r) {
         return;
     }
 
+    // FASE FUNDACAO (trilha I/O, Fase 3): modelo de interrupcao. Se ha um
+    // KINTERRUPT registrado neste vetor, despacha o ISR do driver (em DIRQL) e
+    // encerra. Senao, cai na cadeia hardcoded abaixo (teclado/mouse/timer legado
+    // seguem intocados). NAO toca o bloco anti-VM (#DB, tratado la em cima).
+    {
+        extern int ke_interrupt_dispatch(uint64_t vector);
+        if (ke_interrupt_dispatch(r->int_no)) {
+            if (apic_active()) apic_eoi(); else pic_eoi((int)(r->int_no - 32));
+            return;
+        }
+    }
+
     // IRQs PIC ou IO-APIC redirects (vetores 0x20..0x2F).
     uint64_t irq = r->int_no - 32;
     if (irq == 0) {

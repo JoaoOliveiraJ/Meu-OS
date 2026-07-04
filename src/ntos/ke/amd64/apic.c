@@ -197,31 +197,31 @@ void apic_init(void) {
     kputs("[apic] PIC 8259 desligado; APIC ativo (timer 0xD1, kbd IO-APIC 0x21, mouse IRQ12 IO-APIC 0x2C)\n");
 }
 
-void ioapic_set_irq(uint8_t gsi, uint8_t vector, uint8_t apic_id) {
+// FASE FUNDACAO (trilha I/O, Fase 3): versao completa com polaridade/trigger/mask.
+//  Low 32 bits: [7:0]=vector [10:8]=delivery(000=fixed) [11]=dest(0=phys)
+//               [13]=polarity(1=active-low) [15]=trigger(1=level) [16]=mask.
+void ioapic_set_irq_ex(uint8_t gsi, uint8_t vector, uint8_t apic_id, int level, int active_low, int masked) {
     if (!s_ioapic) return;
-    // IOREDTBL[gsi] -> regs 0x10+gsi*2 (low) e 0x10+gsi*2+1 (high).
     uint8_t reg_low  = (uint8_t)(0x10 + gsi * 2);
     uint8_t reg_high = (uint8_t)(reg_low + 1);
-
-    // Low 32 bits:
-    //  bits 7..0   = vector
-    //  bits 10..8  = delivery mode (000 = fixed)
-    //  bit 11      = destination mode (0 = physical)
-    //  bit 12      = delivery status (RO)
-    //  bit 13      = polarity (0 = active high)
-    //  bit 14      = remote IRR (RO)
-    //  bit 15      = trigger mode (0 = edge)
-    //  bit 16      = mask (1 = mask). Comecamos UNMASKED.
-    uint32_t low  = (uint32_t)vector;     // resto zero = fixed/phys/active-hi/edge/unmasked
+    uint32_t low  = (uint32_t)vector;
+    if (active_low) low |= (1u << 13);
+    if (level)      low |= (1u << 15);
+    if (masked)     low |= (1u << 16);
     uint32_t high = (uint32_t)apic_id << 24;
-
     // Spec: programar HIGH antes de LOW pra evitar entrega com destino errado.
     ioapic_write(reg_high, high);
     ioapic_write(reg_low,  low);
-
     kputs("[apic] IO-APIC redir IRQ"); kput_dec(gsi);
     kputs(" -> vector "); kput_hex(vector);
-    kputs(" dest_cpu "); kput_dec(apic_id); kputc('\n');
+    kputs(" dest_cpu "); kput_dec(apic_id);
+    kputs(level ? " level" : " edge");
+    kputs(active_low ? " activelow" : " activehi");
+    kputs(masked ? " masked" : " unmasked"); kputc('\n');
+}
+// Compat: comportamento antigo (edge, active-high, UNMASKED) — kbd/mouse legado.
+void ioapic_set_irq(uint8_t gsi, uint8_t vector, uint8_t apic_id) {
+    ioapic_set_irq_ex(gsi, vector, apic_id, 0, 0, 0);
 }
 
 // ============================================================================

@@ -1131,6 +1131,9 @@ void kmain(uint32_t mb_info) {
     // FASE FUNDACAO (Item 6): subsistema KTIMER (lista de timers armados).
     extern void KiInitializeTimerSubsystem(void);
     KiInitializeTimerSubsystem();
+    // FASE FUNDACAO (trilha I/O, Fase 3): modelo de interrupcao (tabela por-vetor).
+    extern void ke_interrupt_init(void);
+    ke_interrupt_init();
     // FASE 7.7: CR4 + XCR0. Habilita OSXSAVE (e xsetbv XCR0=0x7 = X87+SSE+AVX
     // quando suportado) e CR4.SMEP/UMIP/PCIDE quando o CPU expoe. CADA bit e
     // gateado por CPUID antes de ser setado: bit reservado em CR4 = #GP no boot.
@@ -1170,6 +1173,9 @@ void kmain(uint32_t mb_info) {
     // FASE FUNDACAO (Item 2): prova rapida do DPC (gs/KPCR ja prontos apos kpcr_init).
     extern void KiDpcSelfTest(void);
     KiDpcSelfTest();
+    // FASE FUNDACAO (trilha I/O, Fase 3): prova do modelo de interrupcao.
+    extern void KiInterruptSelfTest(void);
+    KiInterruptSelfTest();
 
     // --- FASE 10.1: detecta virtio-gpu (modern, virtio 1.1) ---
     // Caminha PCI capabilities, mapeia common/notify/isr/device cfg fora da

@@ -140,6 +140,19 @@ typedef struct _KDPC {
 } KDPC, *PKDPC;
 typedef void (NTAPI *PKDEFERRED_ROUTINE)(PKDPC Dpc, PVOID Ctx, PVOID Arg1, PVOID Arg2);
 
+// FASE FUNDACAO (Item 6) — KTIMER. Dispatcher object; ao expirar sinaliza
+// (acorda waiters) e opcionalmente enfileira um DPC. Header.Type: 8=notificacao
+// (fica sinalizado), 9=sincronizacao (auto-reset).
+typedef struct _KTIMER {
+    DISPATCHER_HEADER Header;         // +0x00
+    LARGE_INTEGER     DueTime;        // +0x18 — reproposito: tick alvo (g_ticks)
+    LIST_ENTRY        TimerListEntry; // +0x20  (Flink==0 => fora da lista)
+    PVOID             Dpc;            // +0x30  (KDPC*, opcional)
+    LONG              Period;         // +0x38  (ms; 0 = one-shot)
+    LONG              _pad;           // +0x3C
+} KTIMER, *PKTIMER;
+typedef enum _TIMER_TYPE { NotificationTimer = 0, SynchronizationTimer = 1 } TIMER_TYPE;
+
 // Argumentos do KeWaitForSingleObject / KeDelayExecutionThread.
 typedef enum _KWAIT_REASON {
     Executive = 0, FreePage, PageIn, PoolAllocation, DelayExecution, Suspended,

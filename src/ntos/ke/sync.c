@@ -23,9 +23,9 @@ static inline uint64_t sc_irq_save(void) { uint64_t f; __asm__ volatile ("pushfq
 static inline void sc_irq_restore(uint64_t f) { __asm__ volatile ("push %0; popfq" :: "r"(f) : "memory", "cc"); }
 // Consome o sinal conforme o tipo do objeto ao satisfazer um wait.
 static void sc_consume(PDISPATCHER_HEADER hdr) {
-    if (hdr->Type == NotificationEvent) return;              // permanece sinalizado
+    if (hdr->Type == NotificationEvent || hdr->Type == 8 /*TimerNotification*/) return;  // fica sinalizado
     if (hdr->Type == 5 /*SemaphoreObject*/) { if (hdr->SignalState > 0) hdr->SignalState--; return; }
-    hdr->SignalState = 0;                                    // SynchronizationEvent / Mutant
+    hdr->SignalState = 0;                                    // SyncEvent / Mutant / SyncTimer(9)
 }
 
 void NTAPI KeInitializeEvent_k(PKEVENT Event, EVENT_TYPE Type, BOOLEAN State) {

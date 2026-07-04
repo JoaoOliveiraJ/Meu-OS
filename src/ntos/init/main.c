@@ -1380,7 +1380,7 @@ void kmain(uint32_t mb_info) {
             const char* path  = (const char*)(uintptr_t)m[2];
             if (ldr_match_ext(path, ".sys")) {
                 kputs("\n[boot] driver de kernel: "); kputs(path); kputc('\n');
-                driver_load(path, bytes);
+                driver_load(path, bytes);   // exercita I/O real internamente (antes do Unload)
             } else if (ldr_match_ext(path, ".exe")) {
                 // Antes de subir o SHELL persistente (explorer.exe), LIGA a
                 // multitarefa preemptiva: todo o carregamento pesado ja rodou a

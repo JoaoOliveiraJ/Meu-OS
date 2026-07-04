@@ -360,6 +360,15 @@ void driver_load(const char* name, const void* image) {
     if (e) { e->laststatus = st; e->state = DRV_STATE_STOPPED; e->object = 0; e->base = 0; }
 
     if (drv && st == STATUS_SUCCESS) {
+        // TESTE REAL: com o driver carregado e o DriverEntry ja retornado (kernel
+        // em modo real, g_pintok_trace=0), exercita I/O de verdade no device que
+        // ele criou — ANTES do Unload apagar o device. Prova que um driver Windows
+        // real PROCESSA IRP (write/read chegam ao dispatch e sao completados), nao
+        // so carrega. No-op se o driver nao criou device. (pintok nunca cai aqui:
+        // ele retorna != STATUS_SUCCESS, entao seu caminho fica intocado.)
+        extern void KiExerciseDriverIO(PDRIVER_OBJECT);
+        KiExerciseDriverIO(drv);
+
         // Sucesso: NT chamaria DriverUnload aqui se este fosse caminho de teste.
         // Mantemos o comportamento atual (descarrega no boot p/ deixar STOPPED).
         driver_call_unload(drv);

@@ -49,6 +49,9 @@ int             g_ki_cpu_count = 0;
 // Dispatcher lock: aproximacao single lock. NT real tem per-PRCB.
 static volatile int s_dispatcher_lock = 0;
 
+// FASE FUNDACAO (Item 5) — lista global de threads esperando (link via wait_link).
+static ki_list_entry_t s_wait_list;
+
 static void disp_lock(void)   { while (__atomic_test_and_set(&s_dispatcher_lock, __ATOMIC_ACQUIRE)) __asm__ volatile ("pause"); }
 static void disp_unlock(void) { __atomic_clear(&s_dispatcher_lock, __ATOMIC_RELEASE); }
 
@@ -115,9 +118,11 @@ void ki_thread_startup(void) {
     __asm__ volatile ("sti");
     ki_thread_t* t = ki_current_thread();
     if (t && t->entry) t->entry(t->arg);
-    // Quando entry retorna: termina a thread.
+    // Quando entry retorna: termina a thread. FASE FUNDACAO (Item 5): CEDE a CPU
+    // p/ sempre — NAO usa cli;hlt (que congelaria o CPU0 com IF=0, matando a
+    // preempcao e o scheduler). ki_quantum_end nunca re-enfileira TERMINATED.
     if (t) t->state = KI_THREAD_TERMINATED;
-    for (;;) __asm__ volatile ("cli; hlt");  // sem PsTerminate; idle forever
+    for (;;) ki_yield_processor();
 }
 
 // --- ki_init_processor: chamado pelo BSP em kmain e pelo AP em ap_entry --
@@ -164,6 +169,13 @@ void ki_init_processor(uint32_t cpu_index, uint32_t apic_id) {
     p->cpu_index = cpu_index;
     p->online    = 1;
     s_apic_to_cpu[apic_id & 0xFF] = (uint8_t)cpu_index;
+
+    // Item 5: inicializa a lista de espera global uma vez (no BSP). Stores
+    // discretos p/ nao virarem SIMD (mesma causa-raiz do PRCB).
+    if (cpu_index == 0) {
+        __atomic_store_n((void**)&s_wait_list.next, &s_wait_list, __ATOMIC_RELEASE);
+        __atomic_store_n((void**)&s_wait_list.prev, &s_wait_list, __ATOMIC_RELEASE);
+    }
 
     // Ponteiros que serao zerados: DISCRETOS para nao virarem movdqu.
     __atomic_store_n((void**)&p->current_thread, (void*)0, __ATOMIC_RELEASE);
@@ -374,4 +386,60 @@ void ki_ipi_reschedule(void) {
     ki_thread_t* cur = ki_current_thread();
     if (cur) cur->quantum = 0;
     ki_quantum_end();
+}
+
+// ============================================================================
+//  FASE FUNDACAO (Item 5) — waits bloqueantes reais (infinito).
+//
+//  ki_can_block(): so bloqueia se ha scheduler ativo (g_p4_active) E a thread
+//  corrente e' uma worker real (NAO a idle/boot — onde o pintok roda). Assim o
+//  pintok mantem o "auto-resolve" e nunca trava.
+//  Corretude sleep/wakeup: o caller (KeWait) segura cli da checagem do sinal
+//  ate ki_yield; em UP nada interpoe entre marcar WAITING e o swap. O
+//  ki_quantum_end salva/restaura IF por-thread (Item 0a), entao o swap sob cli
+//  e' seguro. O waker (KeSetEvent) move os waiters de volta p/ ready.
+// ============================================================================
+int ki_can_block(void) {
+    extern volatile int g_p4_active;
+    if (!g_p4_active) return 0;
+    uint32_t cpu = ki_current_cpu_index();
+    ki_thread_t* cur = g_ki_prcb[cpu].current_thread;
+    return (cur && cur != g_ki_prcb[cpu].idle_thread) ? 1 : 0;
+}
+
+void ki_block_current(void* obj) {
+    uint32_t cpu = ki_current_cpu_index();
+    ki_thread_t* cur = g_ki_prcb[cpu].current_thread;
+    if (!cur) return;
+    disp_lock();
+    cur->wait_object = obj;
+    list_insert_tail(&s_wait_list, &cur->wait_link);
+    cur->state = KI_THREAD_WAITING;
+    disp_unlock();
+}
+
+int ki_wake(void* obj, int wake_all) {
+    ki_thread_t* batch[16];
+    int n = 0;
+    uint64_t f = irq_save();
+    disp_lock();
+    ki_list_entry_t* e = s_wait_list.next;
+    while (e && e != &s_wait_list && n < 16) {
+        ki_list_entry_t* nx = e->next;
+        ki_thread_t* t = (ki_thread_t*)((uint8_t*)e - offsetof(ki_thread_t, wait_link));
+        if (t->wait_object == obj) {
+            e->prev->next = e->next;
+            e->next->prev = e->prev;
+            e->next = e->prev = 0;
+            t->wait_object = 0;
+            batch[n++] = t;
+            if (!wake_all) break;
+        }
+        e = nx;
+    }
+    disp_unlock();
+    irq_restore(f);
+    // ki_ready_thread seta READY + enfileira (toma o disp_lock por dentro).
+    for (int i = 0; i < n; i++) ki_ready_thread(batch[i]);
+    return n;
 }

@@ -38,9 +38,10 @@ Referência do plano: `C:\Users\joao\.claude\plans\lovely-baking-whale.md`.
 Ordem noturna: **4 → 1 → 3 → [2] → parada segura**. Deferidos p/ supervisão (tocam contexto de troca ou trajetória do pintok): **0a+5** (reentrância do swap + waits — são uma unidade, testar juntas com você acordado), **6** (KTIMER), **7** (Ex), **trilha I/O** inteira. Motivo: mexer no caminho de context-switch (`ki_swap_context`) ou tornar `KeWait` bloqueante sem supervisão é o maior risco à trajetória do pintok.
 
 | 2 | DPC (fila per-CPU + drena no KeLowerIrql) | ✅ | ✅ idêntico (CPUID x3, C0000365) | preempção viva (51 beats) | DPC disparou inline OK | 7acfb37 |
-| 0a | Reentrância do swap (irq_save/restore) | ✅ | ✅ idêntico | preempção viva (60 beats) | — | (este) |
+| 0a | Reentrância do swap (irq_save/restore) | ✅ | ✅ idêntico | preempção viva (60 beats) | — | 4aec7e6 |
+| 5 | Waits bloqueantes reais (gated) + fix terminate-freeze | ✅ | ✅ idêntico (CPUID x3, C0000365) | preempção viva (48 beats) | **block+wake ACORDOU OK** | (este) |
 
-**Sessão retomada ("Continua").** pintok **não** usa `KeWaitForSingleObject`/`KeInitializeEvent` (verificado no baseline) → Item 5 (waits reais) será **gated por contexto** (só threads worker reais bloqueiam; contexto boot/idle, onde o pintok roda, mantém o auto-resolve). Próximos: Item 5 (waits), Item 6 (KTIMER), Item 7 (Ex).
+**Sessão retomada ("Continua").** pintok **não** usa `KeWaitForSingleObject`/`KeInitializeEvent` (baseline) → Item 5 gated por contexto (só threads worker reais bloqueiam; contexto boot/idle, onde o pintok roda, mantém auto-resolve). O auto-teste provou block+wake ponta-a-ponta, e de bônus corrigiu um **freeze latente de término de thread** (`cli;hlt` → `yield`). Próximos: Item 6 (KTIMER), Item 7 (primitivos Ex).
 
 ---
 

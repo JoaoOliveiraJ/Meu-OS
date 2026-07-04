@@ -4,12 +4,28 @@
 //  estado e (se infinite) retornam STATUS_SUCCESS imediato (modo "auto-resolve").
 // ============================================================================
 #include "ke/sync.h"
+#include "ke/sched.h"      // Item 5: ki_create_thread/ki_ready_thread p/ o auto-teste
 
 extern void kputs(const char* s);
 extern void kputc(char c);
 extern void kput_hex(uint64_t v);
 extern volatile uint64_t g_ticks;   // PIT 100 Hz (cpu/pit.c)
 extern volatile int g_pintok_trace;
+
+// FASE FUNDACAO (Item 5) — waits bloqueantes: usam o scheduler (ke/sched.c).
+extern int  ki_can_block(void);
+extern void ki_block_current(void* obj);
+extern int  ki_wake(void* obj, int wake_all);
+extern void ki_yield_processor(void);
+extern void NTAPI KeStallExecutionProcessor_k(ULONG MicroSeconds);
+static inline uint64_t sc_irq_save(void) { uint64_t f; __asm__ volatile ("pushfq; pop %0; cli" : "=r"(f) :: "memory"); return f; }
+static inline void sc_irq_restore(uint64_t f) { __asm__ volatile ("push %0; popfq" :: "r"(f) : "memory", "cc"); }
+// Consome o sinal conforme o tipo do objeto ao satisfazer um wait.
+static void sc_consume(PDISPATCHER_HEADER hdr) {
+    if (hdr->Type == NotificationEvent) return;              // permanece sinalizado
+    if (hdr->Type == 5 /*SemaphoreObject*/) { if (hdr->SignalState > 0) hdr->SignalState--; return; }
+    hdr->SignalState = 0;                                    // SynchronizationEvent / Mutant
+}
 
 void NTAPI KeInitializeEvent_k(PKEVENT Event, EVENT_TYPE Type, BOOLEAN State) {
     if (g_pintok_trace) {
@@ -27,6 +43,8 @@ LONG NTAPI KeSetEvent_k(PKEVENT Event, KPRIORITY Increment, BOOLEAN Wait) {
     if (!Event) return 0;
     LONG prev = Event->Header.SignalState;
     Event->Header.SignalState = 1;
+    // Item 5: acorda waiters. NotificationEvent acorda TODOS; Synchronization UM.
+    ki_wake(&Event->Header, Event->Header.Type == NotificationEvent ? 1 : 0);
     return prev;
 }
 LONG NTAPI KeResetEvent_k(PKEVENT Event) {
@@ -46,29 +64,45 @@ NTSTATUS NTAPI KeWaitForSingleObject_k(PVOID Object, KWAIT_REASON Reason, KPROCE
                                        BOOLEAN Alertable, PLARGE_INTEGER Timeout) {
     (void)Reason; (void)Mode; (void)Alertable;
     if (!Object) return STATUS_INVALID_PARAMETER;
-    // Se ja sinalizado, retorna sucesso. Senao, sem scheduler, "auto-resolve":
-    // tratamos como sucesso (o driver continua). Caminho seguro p/ headless.
     PDISPATCHER_HEADER hdr = (PDISPATCHER_HEADER)Object;
-    if (hdr->SignalState) {
-        // Eventos de sincronizacao (auto-reset) zeram o estado apos um waiter pegar.
-        if (hdr->Type == SynchronizationEvent) hdr->SignalState = 0;
-        return STATUS_SUCCESS;
+    for (;;) {
+        uint64_t f = sc_irq_save();          // cli: checagem do sinal + bloqueio atomicos (UP)
+        if (hdr->SignalState) { sc_consume(hdr); sc_irq_restore(f); return STATUS_SUCCESS; }
+        if (Timeout && Timeout->QuadPart == 0) { sc_irq_restore(f); return STATUS_TIMEOUT; }  // poll
+        // Sem sinal. Bloqueio real SO p/ espera infinita (Timeout==NULL) de uma
+        // thread worker real. Timeout finito OU contexto idle/boot (pintok):
+        // auto-resolve (comportamento atual — nunca trava).
+        if (Timeout != 0 || !ki_can_block()) { sc_irq_restore(f); return STATUS_SUCCESS; }
+        ki_block_current(hdr);               // WAITING + insere na lista de espera
+        ki_yield_processor();                // swap; volta quando acordado
+        sc_irq_restore(f);                   // reabilita IF; re-loop re-checa o sinal
     }
-    // Timeout 0 = poll: retorna TIMEOUT sem bloquear.
-    if (Timeout && Timeout->QuadPart == 0) return STATUS_TIMEOUT;
-    // TODO: implementar bloqueio real quando houver escalonador. Por ora, sucesso.
-    return STATUS_SUCCESS;
 }
 NTSTATUS NTAPI KeWaitForMultipleObjects_k(ULONG Count, PVOID Object[], WAIT_TYPE WaitType,
                                           KWAIT_REASON Reason, KPROCESSOR_MODE Mode,
                                           BOOLEAN Alertable, PLARGE_INTEGER Timeout, PVOID WaitBlockArray) {
-    (void)WaitBlockArray;
-    for (ULONG i = 0; i < Count; i++) {
-        NTSTATUS st = KeWaitForSingleObject_k(Object[i], Reason, Mode, Alertable, Timeout);
-        if (WaitType == WaitAny && NT_SUCCESS(st)) return STATUS_SUCCESS;
-        if (WaitType == WaitAll && !NT_SUCCESS(st)) return st;
+    (void)Reason; (void)Mode; (void)Alertable; (void)Timeout; (void)WaitBlockArray;
+    // Poll (multi-objeto NAO bloqueia nesta fase — evita travar em Object[0]).
+    // Bloqueio multi-objeto real vem com o wait-block array (fase posterior).
+    uint64_t f = sc_irq_save();
+    if (WaitType == WaitAny) {
+        for (ULONG i = 0; i < Count; i++) {
+            PDISPATCHER_HEADER h = (PDISPATCHER_HEADER)Object[i];
+            if (h && h->SignalState) { sc_consume(h); sc_irq_restore(f); return STATUS_SUCCESS; }
+        }
+    } else {   // WaitAll
+        ULONG sig = 0;
+        for (ULONG i = 0; i < Count; i++) {
+            PDISPATCHER_HEADER h = (PDISPATCHER_HEADER)Object[i];
+            if (h && h->SignalState) sig++;
+        }
+        if (sig == Count) {
+            for (ULONG i = 0; i < Count; i++) sc_consume((PDISPATCHER_HEADER)Object[i]);
+            sc_irq_restore(f); return STATUS_SUCCESS;
+        }
     }
-    return STATUS_SUCCESS;
+    sc_irq_restore(f);
+    return STATUS_SUCCESS;   // auto-resolve (nada satisfeito)
 }
 NTSTATUS NTAPI KeDelayExecutionThread_k(KPROCESSOR_MODE WaitMode, BOOLEAN Alertable, PLARGE_INTEGER Interval) {
     (void)WaitMode; (void)Alertable;
@@ -176,12 +210,14 @@ LONG NTAPI KeReleaseMutex_k(PKMUTEX Mutex, BOOLEAN Wait) {
     if (!Mutex) return 0;
     LONG prev = Mutex->Header.SignalState;
     Mutex->Header.SignalState = 1;
+    Mutex->OwnerThread = 0;
+    ki_wake(&Mutex->Header, 0);   // Item 5: acorda um waiter
     return prev;
 }
 
 void NTAPI KeInitializeSemaphore_k(PKSEMAPHORE Sem, LONG Count, LONG Limit) {
     if (!Sem) return;
-    Sem->Header.Type = 1;
+    Sem->Header.Type = 5;   // SemaphoreObject (evita colisao com SynchronizationEvent=1)
     Sem->Header.SignalState = Count;
     Sem->Limit = Limit;
 }
@@ -190,6 +226,7 @@ LONG NTAPI KeReleaseSemaphore_k(PKSEMAPHORE Sem, KPRIORITY Inc, LONG Adj, BOOLEA
     if (!Sem) return 0;
     LONG prev = Sem->Header.SignalState;
     Sem->Header.SignalState += Adj;
+    ki_wake(&Sem->Header, 1);   // Item 5: acorda waiters disponiveis (cada um consome 1)
     return prev;
 }
 
@@ -206,3 +243,31 @@ ULONGLONG NTAPI KeQueryInterruptTime_k(void) {
     return (ULONGLONG)g_ticks * 100000ULL;
 }
 ULONG NTAPI KeQueryTimeIncrement_k(void) { return 100000UL; }   // 10 ms em unidades de 100 ns
+
+// ============================================================================
+//  FASE FUNDACAO (Item 5) — auto-teste de block+wake com 2 threads worker.
+//  waiter bloqueia (infinito) num SynchronizationEvent; signaler espera ~50ms
+//  (garante que o waiter bloqueou) e sinaliza. Se "ACORDOU" aparecer na serial,
+//  o bloqueio real + wake funcionam. Se so "vai bloquear" aparecer, o waiter
+//  ficou preso (isolado — nao trava o resto do sistema).
+// ============================================================================
+static KEVENT s_wt_evt;
+static void wt_waiter(void* a) {
+    (void)a;
+    kputs("[wait-test] waiter: vai bloquear em KeWaitForSingleObject (infinito)...\n");
+    KeWaitForSingleObject_k(&s_wt_evt, 0, 0, 0, 0);
+    kputs("[wait-test] waiter: ACORDOU -> block+wake real OK\n");
+}
+static void wt_signaler(void* a) {
+    (void)a;
+    KeStallExecutionProcessor_k(50000);   // ~50 ms
+    kputs("[wait-test] signaler: KeSetEvent (acorda o waiter)\n");
+    KeSetEvent_k(&s_wt_evt, 0, 0);
+}
+void ki_wait_selftest_spawn(void) {
+    KeInitializeEvent_k(&s_wt_evt, SynchronizationEvent, 0);
+    ki_thread_t* a = ki_create_thread(wt_waiter, 0, 8, 0);
+    ki_thread_t* b = ki_create_thread(wt_signaler, 0, 8, 0);
+    if (a) ki_ready_thread(a);
+    if (b) ki_ready_thread(b);
+}

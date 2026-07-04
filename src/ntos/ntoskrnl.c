@@ -1276,6 +1276,13 @@ static const struct { const char* name; void* fn; } g_ntexports[] = {
     EX("HalAllocateCommonBuffer",          HalAllocateCommonBuffer),
     EX("HalFreeCommonBuffer",              HalFreeCommonBuffer),
 
+    // INC 6 (Frente 1) — variantes fastcall que drivers WDK reais importam: o macro
+    // IoCompleteRequest() do wdm.h expande p/ IofCompleteRequest, e IoCallDriver() p/
+    // IofCallDriver. Ambas ja sao NTAPI(=ms_abi=fastcall no x64). APPEND-ONLY (antes
+    // do sentinela). pintok nao importa nenhuma das duas (verificado nos imports dele).
+    EX("IofCompleteRequest",               IoCompleteRequest_k),
+    EX("IofCallDriver",                    IoCallDriver_ms),
+
     { 0, 0 }
 };
 

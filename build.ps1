@@ -86,7 +86,8 @@ if (Test-Path $hello32) {
 foreach ($drv in @(
         @{ src = 'mydriver.c';    out = 'mydriver.sys';    base = '0x1200000' },
         @{ src = 'ioctldriver.c'; out = 'ioctldriver.sys'; base = '0x1400000' },
-        @{ src = 'calller.c';     out = 'calller.sys';     base = '0x3A00000' })) {
+        @{ src = 'calller.c';     out = 'calller.sys';     base = '0x3A00000' },
+        @{ src = 'wdmdemo.c';     out = 'wdmdemo.sys';     base = '0x1600000' })) {
     $sp = Join-Path $ex $drv.src
     if (Test-Path $sp) {
         Write-Host "[exemplo] apps\$($drv.src) -> build\$($drv.out) (.sys driver)"

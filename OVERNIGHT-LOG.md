@@ -59,6 +59,9 @@ Achado: `IO_STACK_LOCATION` já está NT-correto; correções de layout só melh
 | 6 | Round-trip completo de IOCTL por um driver (mini-driver kernel: `MajorFunction[IRP_MJ_DEVICE_CONTROL]` → `IoCallDriver` → dispatch lê current → escreve SystemBuffer → `IoCompleteRequest`) | ✅ | ✅ idêntico | 8/8 self-tests | 2d94a56 |
 | 4 | PnP mínimo: `pnp_start_function_driver` lê `DriverExtension.AddDevice`, cria PDO, chama AddDevice (driver cria FDO + anexa), envia `IRP_MJ_PNP`/`IRP_MN_START_DEVICE`. `DRIVER_EXTENSION` em ntddk.h (AddDevice@0x08). Legado (AddDevice=NULL) = no-op | ✅ | ✅ idêntico | 9/9 self-tests | (este) |
 
+### 🎉 DRIVER WDM REAL RODANDO (`wdmdemo.sys`)
+Escrito um driver WDM real (`apps/wdmdemo.c` → `wdmdemo.sys`, PE 7168 bytes, compilado pelo toolchain, **não** hardcoded). Carregado sozinho (`run.ps1 -Modules build\wdmdemo.sys`): `DriverEntry` roda, cria device+symlink, dispara system thread; o worker (modo real pós-DriverEntry) **bloqueia num `KeWaitForSingleObject` num KTIMER de 1s e é acordado de verdade**, usa fast mutex, enfileira DPC. Sem halt. É o objetivo original: um driver Windows real exercitando a fundação real. (DMA/KeStall ficaram fora do driver por não estarem na import lib do MinGW — já provados pelos kernel self-tests; import lib completa da ntoskrnl = follow-up.)
+
 ### ✅✅ TRILHA DE DRIVERS I/O COMPLETA (Fases 1a,1b,2,3,4,5,6)
 **9/9 self-tests num boot**: int-test, devstack-test, dma-test, irp-test, drv-irp-test, pnp-test, ex-test, wait-test, timer-test. Pintok intacto o tempo todo. Um driver WDM genérico agora tem tudo: criar device (layout NT), **processar IRP** (layout NT), device stacks, `IoConnectInterrupt` (ISR em DIRQL), DMA, PnP (AddDevice+START_DEVICE), + fundação Ke completa. Wire de `pnp_start_function_driver`/START_DEVICE no caminho de load (driver.c) = passo futuro quando houver function driver real (driver.c fica intocado — pintok-safe).
 

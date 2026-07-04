@@ -1263,6 +1263,13 @@ static const struct { const char* name; void* fn; } g_ntexports[] = {
     EX("KeDisconnectInterrupt",            KeDisconnectInterrupt_k),
     EX("KeSynchronizeExecution",           KeSynchronizeExecution_k),
     EX("HalGetInterruptVector",            HalGetInterruptVector),
+    // trilha I/O Fase 2: device stacks (append-only, flag-gated p/ pintok).
+    EX("IoAttachDeviceToDeviceStack",      IoAttachDeviceToDeviceStack_k),
+    EX("IoAttachDeviceToDeviceStackSafe",  IoAttachDeviceToDeviceStackSafe_k),
+    EX("IoDetachDevice",                   IoDetachDevice_k),
+    EX("IoGetAttachedDevice",              IoGetAttachedDevice_k),
+    EX("IoGetAttachedDeviceReference",     IoGetAttachedDeviceReference_k),
+    EX("IoGetLowerDeviceObject",           IoGetLowerDeviceObject_k),
 
     { 0, 0 }
 };

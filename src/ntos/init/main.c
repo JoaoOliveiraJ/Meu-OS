@@ -1176,6 +1176,9 @@ void kmain(uint32_t mb_info) {
     // FASE FUNDACAO (trilha I/O, Fase 3): prova do modelo de interrupcao.
     extern void KiInterruptSelfTest(void);
     KiInterruptSelfTest();
+    // FASE FUNDACAO (trilha I/O, Fase 2): prova de device stacks.
+    extern void KiDeviceStackSelfTest(void);
+    KiDeviceStackSelfTest();
 
     // --- FASE 10.1: detecta virtio-gpu (modern, virtio 1.1) ---
     // Caminha PCI capabilities, mapeia common/notify/isr/device cfg fora da

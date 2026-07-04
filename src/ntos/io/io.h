@@ -22,6 +22,15 @@ PIRP     io_build_write(PDEVICE_OBJECT dev, void* buf, ULONG len);   // IRP_MJ_W
 PIRP     io_build_read(PDEVICE_OBJECT dev, void* buf, ULONG len);    // IRP_MJ_READ
 PIRP     io_build_request(uint8_t major, PDEVICE_OBJECT dev);   // IRP_MJ_CREATE/CLOSE/etc.
 NTSTATUS IoCallDriver(PDEVICE_OBJECT dev, PIRP irp);
+
+// FASE FUNDACAO (trilha I/O, Fase 2) — device stacks.
+PDEVICE_OBJECT NTAPI IoGetAttachedDevice_k(PDEVICE_OBJECT dev);
+PDEVICE_OBJECT NTAPI IoGetAttachedDeviceReference_k(PDEVICE_OBJECT dev);
+PDEVICE_OBJECT NTAPI IoAttachDeviceToDeviceStack_k(PDEVICE_OBJECT Source, PDEVICE_OBJECT Target);
+NTSTATUS       NTAPI IoAttachDeviceToDeviceStackSafe_k(PDEVICE_OBJECT Source, PDEVICE_OBJECT Target, PDEVICE_OBJECT* AttachedTo);
+void           NTAPI IoDetachDevice_k(PDEVICE_OBJECT Target);
+PDEVICE_OBJECT NTAPI IoGetLowerDeviceObject_k(PDEVICE_OBJECT dev);
+void KiDeviceStackSelfTest(void);
 void     io_free_irp(PIRP irp);
 
 // =====================================================================

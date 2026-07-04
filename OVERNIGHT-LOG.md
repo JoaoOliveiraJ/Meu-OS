@@ -52,7 +52,8 @@ Achado: `IO_STACK_LOCATION` já está NT-correto; correções de layout só melh
 | fase | o que | build | pintok | fundação | commit |
 |------|-------|-------|--------|----------|--------|
 | 1a | DEVICE_OBJECT → offsets NT (`DeviceExtension@0x40`, `DeviceType@0x48`, `sizeof 0xB8`) + `_Static_assert` + fix bug Flags/type | ✅ | ✅ idêntico | 4/4 | 3f5afe2 |
-| 3 | Modelo de interrupção: `KINTERRUPT`/`IoConnectInterrupt`/`IoDisconnectInterrupt`/`KeSynchronizeExecution`/`HalGetInterruptVector` + `ioapic_set_irq_ex` (level/active-low/mask) + early-out no ISR (antes da cadeia legada) | ✅ | ✅ idêntico | 3/3 | (este) |
+| 3 | Modelo de interrupção: `KINTERRUPT`/`IoConnectInterrupt`/`IoDisconnectInterrupt`/`KeSynchronizeExecution`/`HalGetInterruptVector` + `ioapic_set_irq_ex` (level/active-low/mask) + early-out no ISR (antes da cadeia legada) | ✅ | ✅ idêntico | 3/3 | 418707f |
+| 2 | Device stacks: `IoAttachDeviceToDeviceStack(Safe)`/`IoDetachDevice`/`IoGetAttachedDevice(Reference)`/`IoGetLowerDeviceObject` (flag-gated; side-table p/ lower device) | ✅ | ✅ idêntico | 4/4 + devstack | (este) |
 
 `int-test` prova o chain `IoConnectInterrupt`→`int`→`isr_handler`→dispatch→ISR do driver **em DIRQL**. Nomes fora da lista do pintok → efeito zero. kbd/mouse/timer legado intocados. **Pendente**: Fase 1b (reescrita IRP, 72 sites), Fase 2 (device stacks), Fase 4 (PnP), Fase 5 (DMA), Fase 6 (drivers de teste WDM).
 

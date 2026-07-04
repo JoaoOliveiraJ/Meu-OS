@@ -33,6 +33,7 @@ PDEVICE_OBJECT NTAPI IoGetLowerDeviceObject_k(PDEVICE_OBJECT dev);
 void KiDeviceStackSelfTest(void);
 void KiIrpSelfTest(void);
 void KiDriverIrpSelfTest(void);
+void KiCompletionSelfTest(void);   // INC 4: walk de conclusao em 2 niveis
 // Exercita I/O real (WRITE+READ) no device que 'drv' criou (drv->DeviceObject).
 struct _DRIVER_OBJECT;
 void KiExerciseDriverIO(struct _DRIVER_OBJECT* drv);

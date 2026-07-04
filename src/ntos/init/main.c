@@ -1191,6 +1191,9 @@ void kmain(uint32_t mb_info) {
     // FASE FUNDACAO (trilha I/O, Fase 4): prova de PnP (AddDevice + START_DEVICE).
     extern void KiPnpSelfTest(void);
     KiPnpSelfTest();
+    // INC 4 (Frente 1): prova do walk de conclusao em 2 niveis (filtro + funcao).
+    extern void KiCompletionSelfTest(void);
+    KiCompletionSelfTest();
 
     // --- FASE 10.1: detecta virtio-gpu (modern, virtio 1.1) ---
     // Caminha PCI capabilities, mapeia common/notify/isr/device cfg fora da

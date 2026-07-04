@@ -436,6 +436,146 @@ void KiDriverIrpSelfTest(void) {
     io_free_irp(irp);
 }
 
+// ============================================================================
+//  INC 4 — Self-test do walk de conclusao em 2 niveis (filtro + funcao).
+//  Prova a maquinaria nova do IoCompleteRequest_k com uma pilha real de 2 drivers:
+//  (a) a rotina de conclusao do filtro dispara 1x, com o status da funcao e o
+//      DeviceObject do filtro (quem a instalou);
+//  (b) SL_INVOKE_ON_SUCCESS-only dispara no sucesso e NAO no erro;
+//  (c) STATUS_MORE_PROCESSING_REQUIRED interrompe o walk e uma nova chamada retoma;
+//  (d) UserIosb recebe o IoStatus no fim do walk.
+// ============================================================================
+extern void NTAPI KeInitializeEvent_k(PKEVENT, EVENT_TYPE, BOOLEAN);
+extern LONG NTAPI KeReadStateEvent_k(PKEVENT);
+
+static volatile int            s_cmpl_fired;
+static volatile NTSTATUS       s_cmpl_status;
+static volatile PDEVICE_OBJECT s_cmpl_dev;
+static volatile int            s_cmpl_force_error;
+static volatile int            s_cmpl_use_mpr;
+static volatile int            s_cmpl_mpr_done;
+static volatile int            s_cmpl_success_only;
+static PDEVICE_OBJECT          s_cmpl_func_dev;
+
+static NTSTATUS __attribute__((ms_abi))
+cmpl_completion(PDEVICE_OBJECT dev, PIRP irp, PVOID ctx) {
+    (void)ctx;
+    s_cmpl_fired++;
+    s_cmpl_status = irp->IoStatus.Status;
+    s_cmpl_dev = dev;
+    if (s_cmpl_use_mpr && !s_cmpl_mpr_done) { s_cmpl_mpr_done = 1; return STATUS_MORE_PROCESSING_REQUIRED; }
+    return STATUS_SUCCESS;
+}
+static NTSTATUS __attribute__((ms_abi))
+cmpl_func_dispatch(PDEVICE_OBJECT dev, PIRP irp) {   // fundo da pilha: completa o IRP
+    (void)dev;
+    irp->IoStatus.Status = s_cmpl_force_error ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS;
+    irp->IoStatus.Information = 7;
+    IoCompleteRequest_k(irp, 0);
+    return irp->IoStatus.Status;
+}
+static NTSTATUS __attribute__((ms_abi))
+cmpl_filter_dispatch(PDEVICE_OBJECT dev, PIRP irp) { // topo: instala rotina e desce
+    (void)dev;
+    IoCopyCurrentIrpStackLocationToNext(irp);
+    IoSetCompletionRoutine_k(irp, cmpl_completion, (PVOID)0,
+                             1, s_cmpl_success_only ? 0 : 1, 1);
+    return IoCallDriver(s_cmpl_func_dev, irp);
+}
+static PIRP cmpl_build2(PDEVICE_OBJECT top_dev) {
+    PIRP irp = io_alloc_irp(2);
+    if (!irp) return 0;
+    PIO_STACK_LOCATION top = IoGetNextIrpStackLocation(irp);
+    top->MajorFunction = IRP_MJ_DEVICE_CONTROL;
+    top->DeviceObject  = top_dev;
+    top->Parameters.DeviceIoControl.IoControlCode = 0xCAFE;
+    return irp;
+}
+
+void KiCompletionSelfTest(void) {
+    static DRIVER_OBJECT fdrv, gdrv;
+    for (unsigned i = 0; i < sizeof(fdrv); i++) ((uint8_t*)&fdrv)[i] = 0;
+    for (unsigned i = 0; i < sizeof(gdrv); i++) ((uint8_t*)&gdrv)[i] = 0;
+    fdrv.MajorFunction[IRP_MJ_DEVICE_CONTROL] = (void*)cmpl_filter_dispatch;
+    gdrv.MajorFunction[IRP_MJ_DEVICE_CONTROL] = (void*)cmpl_func_dispatch;
+    PDEVICE_OBJECT filter_dev = 0;
+    s_cmpl_func_dev = 0;
+    io_create_device(&fdrv, 0, "\\Device\\CmplFilter", 0x22, &filter_dev);
+    io_create_device(&gdrv, 0, "\\Device\\CmplFunc",   0x22, &s_cmpl_func_dev);
+    if (!filter_dev || !s_cmpl_func_dev) { kputs("[cmpl-test] FALHOU (sem device)\n"); return; }
+
+    int pass = 1;
+
+    // (a) rotina do filtro dispara 1x, com o status da funcao (SUCCESS) e o
+    //     DeviceObject do filtro (quem a instalou).
+    s_cmpl_fired = 0; s_cmpl_status = (NTSTATUS)0xDEAD; s_cmpl_dev = 0;
+    s_cmpl_force_error = 0; s_cmpl_use_mpr = 0; s_cmpl_mpr_done = 0; s_cmpl_success_only = 0;
+    { PIRP irp = cmpl_build2(filter_dev);
+      if (!irp) pass = 0;
+      else {
+          IoCallDriver(filter_dev, irp);
+          if (!(s_cmpl_fired == 1 && s_cmpl_status == STATUS_SUCCESS && s_cmpl_dev == filter_dev)) {
+              pass = 0; kputs("[cmpl-test] (a) FALHOU fired="); kput_dec(s_cmpl_fired); kputs("\n");
+          }
+          io_free_irp(irp);
+      }
+    }
+
+    // (b) SL_INVOKE_ON_SUCCESS-only: NAO dispara quando a funcao completa com erro.
+    s_cmpl_success_only = 1;
+    s_cmpl_fired = 0; s_cmpl_force_error = 1; s_cmpl_use_mpr = 0; s_cmpl_mpr_done = 0;
+    { PIRP irp = cmpl_build2(filter_dev);
+      if (!irp) pass = 0;
+      else {
+          IoCallDriver(filter_dev, irp);
+          if (s_cmpl_fired != 0) { pass = 0; kputs("[cmpl-test] (b) FALHOU (disparou no erro)\n"); }
+          io_free_irp(irp);
+      }
+    }
+    s_cmpl_success_only = 0;
+
+    // (c) STATUS_MORE_PROCESSING_REQUIRED interrompe; UserEvent so sinaliza no retomar.
+    static KEVENT evt;
+    KeInitializeEvent_k(&evt, NotificationEvent, 0);
+    s_cmpl_fired = 0; s_cmpl_force_error = 0; s_cmpl_use_mpr = 1; s_cmpl_mpr_done = 0;
+    { PIRP irp = cmpl_build2(filter_dev);
+      if (!irp) pass = 0;
+      else {
+          irp->UserEvent = &evt;
+          IoCallDriver(filter_dev, irp);                 // rotina devolve MPR -> walk para
+          int halted = (s_cmpl_fired == 1 && KeReadStateEvent_k(&evt) == 0);
+          IoCompleteRequest_k(irp, 0);                   // retoma o walk -> finaliza
+          int resumed = (KeReadStateEvent_k(&evt) != 0);
+          if (!(halted && resumed)) {
+              pass = 0; kputs("[cmpl-test] (c) FALHOU halted="); kput_dec(halted);
+              kputs(" resumed="); kput_dec(resumed); kputs("\n");
+          }
+          io_free_irp(irp);
+      }
+    }
+    s_cmpl_use_mpr = 0; s_cmpl_mpr_done = 0;
+
+    // (d) UserIosb recebe o IoStatus (Status+Information) no fim do walk.
+    static IO_STATUS_BLOCK iosb;
+    iosb.Status = (NTSTATUS)0xDEAD; iosb.Information = 0;
+    s_cmpl_fired = 0; s_cmpl_force_error = 0;
+    { PIRP irp = cmpl_build2(filter_dev);
+      if (!irp) pass = 0;
+      else {
+          irp->UserIosb = &iosb;
+          IoCallDriver(filter_dev, irp);
+          if (!(iosb.Status == STATUS_SUCCESS && iosb.Information == 7)) {
+              pass = 0; kputs("[cmpl-test] (d) FALHOU iosb.Status=0x");
+              kput_hex((uint64_t)(uint32_t)iosb.Status); kputs("\n");
+          }
+          io_free_irp(irp);
+      }
+    }
+
+    if (pass)
+        kputs("[cmpl-test] walk 2 niveis: rotina no nivel certo + SL_INVOKE_ON_* + MORE_PROCESSING_REQUIRED + UserIosb/UserEvent OK\n");
+}
+
 // ===== Symbolic links =====
 #define SYMLINK_MAX 32
 typedef struct { char link[64]; char target[64]; int used; } SYMLINK_ENT;

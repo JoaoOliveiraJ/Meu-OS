@@ -391,6 +391,11 @@ typedef struct _IO_STACK_LOCATION {
     uint8_t Flags;
     uint8_t Control;
     union {
+        // Membro generico de 4 ponteiros — e' o maior membro no NT x64 real, o que
+        // leva a uniao a 0x20 e o IO_STACK_LOCATION a 0x48 (offsets do WDK real:
+        // CompletionRoutine@0x38). Drivers de filtro reais setam a rotina inline
+        // nesse offset; sem isto nosso completador leria o offset errado.
+        struct { PVOID Argument1, Argument2, Argument3, Argument4; } Others;
         struct {
             ULONG OutputBufferLength;
             ULONG InputBufferLength;
@@ -407,6 +412,11 @@ typedef struct _IO_STACK_LOCATION {
     void* CompletionRoutine;
     PVOID Context;
 } IO_STACK_LOCATION, *PIO_STACK_LOCATION;
+_Static_assert(__builtin_offsetof(IO_STACK_LOCATION, Parameters) == 0x08, "IO_STACK_LOCATION.Parameters@0x08");
+_Static_assert(__builtin_offsetof(IO_STACK_LOCATION, DeviceObject) == 0x28, "IO_STACK_LOCATION.DeviceObject@0x28");
+_Static_assert(__builtin_offsetof(IO_STACK_LOCATION, CompletionRoutine) == 0x38, "IO_STACK_LOCATION.CompletionRoutine@0x38");
+_Static_assert(__builtin_offsetof(IO_STACK_LOCATION, Context) == 0x40, "IO_STACK_LOCATION.Context@0x40");
+_Static_assert(sizeof(IO_STACK_LOCATION) == 0x48, "sizeof(IO_STACK_LOCATION)==0x48");
 
 // FASE FUNDACAO (trilha I/O, Fase 1b) — IRP com layout NT x64 real. As
 // IO_STACK_LOCATIONs seguem o header (array traseiro); Tail.CurrentStackLocation

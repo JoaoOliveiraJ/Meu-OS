@@ -6,6 +6,7 @@
 extern void kputs(const char* s);
 extern void kputc(char c);
 extern void kput_hex(uint64_t v);
+extern void kput_dec(uint64_t v);
 extern int  ke_legacy_active(void);   // trilha I/O Fase 2: gate p/ pintok (legado -> stub)
 
 // Cria um DEVICE_OBJECT como objeto nomeado no namespace (\Device\...).
@@ -328,6 +329,58 @@ static NTSTATUS __attribute__((ms_abi)) test_ioctl_dispatch(PDEVICE_OBJECT dev, 
     IoCompleteRequest_k(irp, 0);
     return irp->IoStatus.Status;
 }
+// Núcleo do teste: manda um IRP de WRITE e um de READ REAIS pro device 'dev' e
+// reporta o que o driver respondeu. Prova que um driver PROCESSA IRP (roda o
+// dispatch, completa o IRP com status/Information), nao so carrega.
+static void exercise_one_device(PDEVICE_OBJECT dev) {
+    if (!dev || !dev->DriverObject) return;
+    PDRIVER_OBJECT drv = dev->DriverObject;
+    int did_any = 0;
+    // WRITE — so se o driver implementa IRP_MJ_WRITE (senao pularia no dispatch nulo).
+    if (drv->MajorFunction[IRP_MJ_WRITE]) {
+        static char wbuf[8] = { 'M','e','u','O','S','!','!', 0 };
+        PIRP wirp = io_build_write(dev, wbuf, 8);
+        NTSTATUS wst = (NTSTATUS)0xC0000001; uint64_t winfo = 0;
+        if (wirp) { IoCallDriver(dev, wirp); wst = wirp->IoStatus.Status; winfo = wirp->IoStatus.Information; io_free_irp(wirp); }
+        kputs("[real-test] WRITE 8 bytes -> status="); kput_hex((uint64_t)(uint32_t)wst);
+        kputs(" info(bytes)="); kput_dec(winfo); kputs("\n");
+        did_any = 1;
+    }
+    // READ — so se o driver implementa IRP_MJ_READ.
+    if (drv->MajorFunction[IRP_MJ_READ]) {
+        static char rbuf[8];
+        PIRP rirp = io_build_read(dev, rbuf, 8);
+        NTSTATUS rst = (NTSTATUS)0xC0000001; uint64_t rinfo = 0;
+        if (rirp) { IoCallDriver(dev, rirp); rst = rirp->IoStatus.Status; rinfo = rirp->IoStatus.Information; io_free_irp(rirp); }
+        kputs("[real-test] READ  8 bytes -> status="); kput_hex((uint64_t)(uint32_t)rst);
+        kputs(" info(bytes)="); kput_dec(rinfo); kputs("\n");
+        did_any = 1;
+    }
+    if (did_any)
+        kputs("[real-test] >>> o driver REAL processou os IRPs (rodou o dispatch e completou) <<<\n");
+    else
+        kputs("[real-test] (driver nao implementa READ/WRITE — nada a exercitar por aqui)\n");
+}
+
+// Exercita I/O real no primeiro device que 'drv' criou (drv->DeviceObject = cabeça
+// da lista de devices do driver, igual ao NT). GENERICO: vale p/ qualquer driver
+// que criou um device (null.sys, wdmdemo, etc.). No-op se o driver nao criou device.
+// Chamado logo apos o DriverEntry ter sucesso e ANTES do DriverUnload (device vivo).
+void KiExerciseDriverIO(PDRIVER_OBJECT drv) {
+    if (!drv || !drv->DeviceObject) return;   // driver nao criou device -> nada a testar
+    kputs("\n[real-test] === exercitando I/O real no device criado por este driver ===\n");
+    exercise_one_device(drv->DeviceObject);
+}
+
+// Variante por nome (\Device\...): util para exercitar um device ja existente no
+// namespace. No-op se nao existe.
+void KiExerciseDeviceIO(const char* devname) {
+    void* body = ObLookupObject(devname);
+    if (!body) return;                      // device nao existe -> nada a testar
+    kputs("\n[real-test] === exercitando I/O real em '"); kputs(devname); kputs("' ===\n");
+    exercise_one_device((PDEVICE_OBJECT)body);
+}
+
 void KiDriverIrpSelfTest(void) {
     static DRIVER_OBJECT drv;
     for (unsigned i = 0; i < sizeof(drv); i++) ((uint8_t*)&drv)[i] = 0;

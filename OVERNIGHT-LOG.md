@@ -97,3 +97,24 @@ Fluxo de IRP provado ponta-a-ponta (`[irp-test]`: build→advance→read, campos
 - **Trilha I/O inteira** (IRP layout NT, device stacks, `IoConnectInterrupt`, PnP, DMA) + os drivers de teste (`tests/drivers/`).
 
 **Como continuar:** branch isolada, cada item é um commit limpo (revertível), design completo em `C:\Users\joao\.claude\plans\lovely-baking-whale.md`. Nada está quebrado; pior caso, revisar/reverter por commit. Baseline dourado do pintok em `$JOB/tmp/pintok_baseline.log`.
+
+---
+
+## MARCO: driver REAL da Microsoft PROCESSANDO I/O (não só carregando)
+
+Fundação + trilha I/O concluídas (IRP/DEVICE_OBJECT layout NT, device stacks, interrupção, DMA, PnP — 9 self-tests de boot passam). Depois disso, o teste que importa: pegar um **driver Windows REAL** e provar que ele **processa IRP**.
+
+**`null.sys` (Microsoft, 7680 bytes, `\Device\Null`):**
+1. Carregado: relocado de ImageBase `0x1C0000000` → `0x4319000` (.reloc aplicado, 6 relocações).
+2. `DriverEntry` → criou `\Device\Null` (`RtlInitUnicodeString '\Device\Null'`) → retornou `STATUS_SUCCESS`.
+3. **Exercício de I/O real** (`KiExerciseDriverIO`, em `io.c`, chamado de `driver.c` entre o DriverEntry OK e o Unload, com o device ainda vivo e o kernel em modo real `g_pintok_trace=0`):
+   - **WRITE 8 bytes → `STATUS_SUCCESS`, Information=8** — consumiu/descartou os 8 bytes (semântica exata do `\Device\Null`). ✓
+   - **READ 8 bytes → `STATUS_END_OF_FILE` (0xC0000011), Information=0** — leitura do null = EOF. ✓
+
+   Isto é o comportamento **byte-a-byte correto** do `\Device\Null` do Windows real. O driver rodou o dispatch de WRITE e READ, setou `IoStatus.Status/Information` e completou os IRPs.
+
+**Como funciona o teste (genérico, vale p/ qualquer driver):** `KiExerciseDriverIO(drv)` pega `drv->DeviceObject` (cabeça da lista de devices do driver, igual ao NT), e só manda WRITE/READ se o driver implementa esses MajorFunction (senão evita dispatch nulo). Ligado em `driver.c` **dentro do ramo `st==STATUS_SUCCESS`**.
+
+**Segurança do pintok:** o pintok retorna `C0000365` (≠ SUCCESS), então **nunca entra** nesse ramo → intocado. Regressão re-verificada: `[P1]/[P2]/[P3] ==== PROVA PASSOU ====`, `chamando DriverEntry`, `DriverEntry retornou status=0xC0000365`, **sem `Sistema parado`**. Idêntico ao baseline dourado.
+
+Logs: `$JOB/tmp/serial_null.log` (null.sys) e `$JOB/tmp/serial_pintok.log` (regressão).

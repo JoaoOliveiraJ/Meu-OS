@@ -154,19 +154,55 @@ void NTAPI IoSkipCurrentIrpStackLocation_k(PIRP Irp) { if (Irp) IoSkipCurrentIrp
 void NTAPI IoCopyCurrentIrpStackLocationToNext_k(PIRP Irp) { if (Irp) IoCopyCurrentIrpStackLocationToNext(Irp); }
 void NTAPI IoSetCompletionRoutine_k(PIRP Irp, PIO_COMPLETION_ROUTINE Routine, PVOID Context,
                                     BOOLEAN OnSuccess, BOOLEAN OnError, BOOLEAN OnCancel) {
-    (void)OnSuccess; (void)OnError; (void)OnCancel;
-    PIO_STACK_LOCATION s = Irp ? IoGetCurrentIrpStackLocation(Irp) : 0;
-    if (s) { s->CompletionRoutine = (void*)Routine; s->Context = Context; }
+    // NT grava na PROXIMA localizacao (a que o driver de baixo vai usar): a rotina
+    // dispara quando o IRP sobe de volta por ESTE nivel. Control guarda os SL_INVOKE_ON_*.
+    PIO_STACK_LOCATION s = Irp ? IoGetNextIrpStackLocation(Irp) : 0;
+    if (!s) return;
+    s->CompletionRoutine = (void*)Routine;
+    s->Context = Context;
+    s->Control = 0;
+    if (OnSuccess) s->Control |= SL_INVOKE_ON_SUCCESS;
+    if (OnError)   s->Control |= SL_INVOKE_ON_ERROR;
+    if (OnCancel)  s->Control |= SL_INVOKE_ON_CANCEL;
 }
 NTSTATUS NTAPI IoCallDriver_ms(PDEVICE_OBJECT dev, PIRP irp) { return IoCallDriver(dev, irp); }
+
+// Walk REAL de conclusao (igual ao IopfCompleteRequest do NT). Do nivel que
+// completou, sobe em direcao a quem originou; em cada nivel, se o resultado (sucesso/
+// erro/cancel) casa com os bits Control daquele nivel, chama a rotina de conclusao
+// registrada la. Se ela retorna STATUS_MORE_PROCESSING_REQUIRED, para na hora (a
+// rotina assumiu o IRP; nao finaliza). Ao passar do topo, entrega IoStatus em UserIosb
+// e sinaliza UserEvent. NAO libera o IRP — quem originou libera (io_free_irp).
+// Ungated de proposito: pintok nao chama estas APIs (verificado nos imports dele), e
+// gate-ar cairia no caminho legado durante o DriverEntry de qualquer driver real.
+extern LONG NTAPI KeSetEvent_k(PKEVENT Event, KPRIORITY Increment, BOOLEAN Wait);
 void NTAPI IoCompleteRequest_k(PIRP Irp, uint8_t PriorityBoost) {
     (void)PriorityBoost;
     if (!Irp) return;
-    PIO_STACK_LOCATION s = IoGetCurrentIrpStackLocation(Irp);
-    if (s && s->CompletionRoutine) {
-        PIO_COMPLETION_ROUTINE r = (PIO_COMPLETION_ROUTINE)s->CompletionRoutine;
-        r(s->DeviceObject, Irp, s->Context);
+    PIO_STACK_LOCATION sp = IoGetCurrentIrpStackLocation(Irp);
+    for (Irp->CurrentLocation++, Irp->Tail.CurrentStackLocation++;
+         Irp->CurrentLocation <= (signed char)(Irp->StackCount + 1);
+         sp++, Irp->CurrentLocation++, Irp->Tail.CurrentStackLocation++) {
+
+        Irp->PendingReturned = (UCHAR)(sp->Control & SL_PENDING_RETURNED);
+
+        NTSTATUS st = Irp->IoStatus.Status;
+        int invoke = ( NT_SUCCESS(st) && (sp->Control & SL_INVOKE_ON_SUCCESS)) ||
+                     (!NT_SUCCESS(st) && (sp->Control & SL_INVOKE_ON_ERROR))  ||
+                     ( Irp->Cancel    && (sp->Control & SL_INVOKE_ON_CANCEL));
+        if (invoke && sp->CompletionRoutine) {
+            PIO_COMPLETION_ROUTINE r = (PIO_COMPLETION_ROUTINE)sp->CompletionRoutine;
+            // DeviceObject = o device de quem SETOU a rotina (o nivel acima), ou
+            // NULL se ja passamos do topo (rotina do originador).
+            PDEVICE_OBJECT dobj =
+                (Irp->CurrentLocation == (signed char)(Irp->StackCount + 1))
+                    ? 0 : IoGetCurrentIrpStackLocation(Irp)->DeviceObject;
+            NTSTATUS cr = r(dobj, Irp, sp->Context);
+            if (cr == STATUS_MORE_PROCESSING_REQUIRED) return;
+        }
     }
+    if (Irp->UserIosb)  *(PIO_STATUS_BLOCK)Irp->UserIosb = Irp->IoStatus;
+    if (Irp->UserEvent) KeSetEvent_k((PKEVENT)Irp->UserEvent, 0, 0);
 }
 BOOLEAN NTAPI IoCancelIrp_k(PIRP Irp) {
     if (!Irp) return 0;

@@ -311,9 +311,32 @@ static void sys_waitforsingleobject(struct regs* r) {
 // GetProcAddress (LdrGetProcAddress) resolve os exports por cima. Nao le do disco por
 // ora: so modulos passados no boot (Multiboot). rdi=nome; rax=base (0 se falhou).
 extern void* ldr_load(const char* name);
+extern void* ldr_load_image(const char* name, const void* bytes);
+extern void* kmalloc(uint64_t n);
 static void sys_loadlibrary(struct regs* r) {
     const char* name = (const char*)(uintptr_t)r->rdi;
-    void* base = name ? ldr_load(name) : 0;
+    if (!name) { r->rax = 0; return; }
+    // (1) Caminho de DISCO (C:\... ou \Device\Harddisk0\...): FASE 3g — le a DLL do
+    // volume NTFS (data run resident OU nao-residente) p/ um buffer de kernel e mapeia
+    // a partir dos bytes lidos. Prova LoadLibrary a partir de um ARQUIVO no disco.
+    const char* nt = ntfs_fs_registered() ? ntfs_volume_subpath(name) : 0;
+    if (nt) {
+        NTFS_FILE_INFO fi;
+        if (ntfs_resolve_path(nt, &fi) && !fi.is_dir && fi.size) {
+            void* buf = kmalloc(fi.size);
+            if (buf && ntfs_read_file(fi.mft_record, 0, buf, (uint32_t)fi.size) == (uint32_t)fi.size) {
+                void* base = ldr_load_image(name, buf);   // ldr_load_image usa basename(name)
+                kputs("[ldr] LoadLibrary DO DISCO: '"); kputs(name);
+                kputs("' -> base "); kput_hex((uint64_t)(uintptr_t)base); kputc('\n');
+                r->rax = (uint64_t)(uintptr_t)base;
+                return;
+            }
+        }
+        r->rax = 0;   // nao achou/nao leu o arquivo no disco
+        return;
+    }
+    // (2) Modulo de boot registrado (comportamento original — Fase 3f).
+    void* base = ldr_load(name);
     r->rax = (uint64_t)(uintptr_t)base;
 }
 

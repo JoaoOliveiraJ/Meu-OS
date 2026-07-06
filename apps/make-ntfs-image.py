@@ -51,6 +51,8 @@ MFT_REC_RESERVED_END = 24   # 0..23 reservados; arquivos do usuario a partir daq
 MFT_REC_HELLO    = 24       # \hello.txt
 MFT_REC_DIR1     = 25       # \dir1
 MFT_REC_DIR1FILE = 26       # \dir1\file.txt
+MFT_REC_TESTLIB  = 27       # \testlib.dll (NAO-residente: p/ LoadLibrary do disco)
+TESTLIB_LCN      = 32       # LCN dos dados de \testlib.dll (livre, apos a $MFT em LCN 4)
 
 # Tipos de atributo NTFS.
 ATTR_STANDARD_INFORMATION = 0x10
@@ -123,6 +125,44 @@ def make_resident_attr(attr_type, content, name=b'', flags=0, attr_id=0):
     # padding ate content_off
     hdr += b'\x00' * (content_off - len(hdr))
     out = hdr + content
+    out += b'\x00' * (rec_len - len(out))
+    return out
+
+
+def make_nonresident_attr(attr_type, first_lcn, num_clusters, real_size, attr_id=0):
+    """Monta um atributo NAO-RESIDENTE ($DATA) com UM data run contiguo (o leitor do
+    kernel, ntfs_run_for_vcn, espera: header nibble-baixo=tam.length, nibble-alto=
+    tam.offset; length bytes = num clusters; offset bytes = delta de LCN signed).
+    Cabecalho nao-residente = 0x40 bytes; runs comecam no mapping pairs offset (0x40).
+    real_size fica em +0x30 (o leitor le attr_nonresident_size ali)."""
+    def field_bytes(v):
+        b = b''
+        while v > 0:
+            b += bytes([v & 0xFF]); v >>= 8
+        return b if b else b'\x00'
+    len_b = field_bytes(num_clusters)
+    off_b = field_bytes(first_lcn)
+    run = bytes([(len(off_b) << 4) | len(len_b)]) + len_b + off_b + b'\x00'   # +0x00 terminador
+    mp_off = 0x40
+    alloc_size = num_clusters * CLUSTER
+    hdr  = struct.pack('<I', attr_type)          # +0x00 tipo
+    rec_len = (mp_off + len(run) + 7) & ~7
+    hdr += struct.pack('<I', rec_len)            # +0x04 comprimento total
+    hdr += struct.pack('<B', 1)                  # +0x08 NAO-residente = 1
+    hdr += struct.pack('<B', 0)                  # +0x09 name length
+    hdr += struct.pack('<H', 0)                  # +0x0A name offset
+    hdr += struct.pack('<H', 0)                  # +0x0C flags
+    hdr += struct.pack('<H', attr_id)            # +0x0E attribute id
+    hdr += struct.pack('<Q', 0)                  # +0x10 starting VCN
+    hdr += struct.pack('<Q', num_clusters - 1)   # +0x18 last VCN
+    hdr += struct.pack('<H', mp_off)             # +0x20 mapping pairs offset
+    hdr += struct.pack('<H', 0)                  # +0x22 compression unit
+    hdr += struct.pack('<I', 0)                  # +0x24 padding
+    hdr += struct.pack('<Q', alloc_size)         # +0x28 allocated size
+    hdr += struct.pack('<Q', real_size)          # +0x30 real size (data size)
+    hdr += struct.pack('<Q', real_size)          # +0x38 initialized size
+    assert len(hdr) == 0x40, len(hdr)
+    out = hdr + run
     out += b'\x00' * (rec_len - len(out))
     return out
 
@@ -202,8 +242,9 @@ def file_ref(rec_no, seq=1):
     return (seq << 48) | rec_no
 
 
-def build_mft():
-    """Constroi a tabela de registros da MFT (lista de bytes de 1024)."""
+def build_mft(dll_size=0, dll_clusters=0):
+    """Constroi a tabela de registros da MFT (lista de bytes de 1024).
+    Se dll_size>0, inclui \\testlib.dll como arquivo NAO-RESIDENTE (data run)."""
     records = {}
 
     def add_basic(no, name, parent, content, is_dir=False, flags=FILE_ATTR_ARCHIVE):
@@ -230,11 +271,15 @@ def build_mft():
     add_basic(MFT_REC_VOLUME, '$Volume', MFT_REC_ROOT, b'')
     add_basic(MFT_REC_ATTRDEF, '$AttrDef', MFT_REC_ROOT, b'')
 
-    # Diretorio raiz '.' (record 5): $INDEX_ROOT lista hello.txt e dir1.
-    root_index = build_root_index([
+    # Diretorio raiz '.' (record 5): $INDEX_ROOT lista hello.txt, dir1 e (se houver)
+    # testlib.dll.
+    root_entries = [
         (MFT_REC_HELLO, 'hello.txt', FILE_ATTR_ARCHIVE, len(HELLO_TXT)),
         (MFT_REC_DIR1, 'dir1', FILE_ATTR_DIRECTORY, 0),
-    ])
+    ]
+    if dll_size:
+        root_entries.append((MFT_REC_TESTLIB, 'testlib.dll', FILE_ATTR_ARCHIVE, dll_size))
+    root_index = build_root_index(root_entries)
     root_attrs = [
         make_resident_attr(ATTR_STANDARD_INFORMATION,
                            std_info_bytes(FILE_ATTR_DIRECTORY)),
@@ -290,7 +335,20 @@ def build_mft():
         make_resident_attr(ATTR_DATA, DIR1_FILE_TXT),
     ])
 
-    # Monta a MFT como um array continuo (registros 0..26; buracos = zeros).
+    # \testlib.dll (record 27): $DATA NAO-RESIDENTE (data run p/ TESTLIB_LCN). Prova o
+    # caminho de LoadLibrary a partir de um ARQUIVO no disco (nao de modulo de boot).
+    if dll_size:
+        records[MFT_REC_TESTLIB] = mft_record(MFT_REC_TESTLIB, [
+            make_resident_attr(ATTR_STANDARD_INFORMATION,
+                               std_info_bytes(FILE_ATTR_ARCHIVE)),
+            make_resident_attr(ATTR_FILE_NAME,
+                               fname_attr_bytes(file_ref(MFT_REC_ROOT), 'testlib.dll',
+                                                FILE_ATTR_ARCHIVE, dll_size,
+                                                dll_clusters * CLUSTER)),
+            make_nonresident_attr(ATTR_DATA, TESTLIB_LCN, dll_clusters, dll_size),
+        ])
+
+    # Monta a MFT como um array continuo (registros 0..N; buracos = zeros).
     max_rec = max(records.keys())
     mft = bytearray()
     for i in range(max_rec + 1):
@@ -391,6 +449,13 @@ def main():
         sys.exit(2)
     out_path = sys.argv[1]
     size_mib = int(sys.argv[2]) if len(sys.argv) > 2 else 64
+    # DLL opcional a embutir como \testlib.dll (NAO-residente): arg 3 (caminho).
+    dll_bytes = b''
+    if len(sys.argv) > 3 and sys.argv[3]:
+        with open(sys.argv[3], 'rb') as f:
+            dll_bytes = f.read()
+    dll_size = len(dll_bytes)
+    dll_clusters = (dll_size + CLUSTER - 1) // CLUSTER if dll_size else 0
     total_img_sectors = size_mib * 1024 * 1024 // SECTOR
     part_sectors = total_img_sectors - PART_START_LBA
 
@@ -415,12 +480,17 @@ def main():
     img[backup_off:backup_off + SECTOR] = vbr
 
     # 3) $MFT no LCN escolhido.
-    mft = build_mft()
+    mft = build_mft(dll_size, dll_clusters)
     mft_off = part_off + mft_lcn * CLUSTER
     img[mft_off:mft_off + len(mft)] = mft
     # $MFTMirr: copia dos 4 primeiros registros.
     mftmirr_off = part_off + mftmirr_lcn * CLUSTER
     img[mftmirr_off:mftmirr_off + 4 * MFT_RECORD_SIZE] = mft[:4 * MFT_RECORD_SIZE]
+
+    # 4) Dados de \testlib.dll no TESTLIB_LCN (o data run do $DATA aponta p/ ca).
+    if dll_size:
+        dll_off = part_off + TESTLIB_LCN * CLUSTER
+        img[dll_off:dll_off + dll_size] = dll_bytes
 
     with open(out_path, 'wb') as f:
         f.write(img)
@@ -435,6 +505,9 @@ def main():
           (mft_lcn, mft_lcn * CLUSTER, CLUSTER))
     print("[make-ntfs]   arquivos: \\hello.txt (%d bytes, residente), \\dir1\\file.txt (%d bytes)" %
           (len(HELLO_TXT), len(DIR1_FILE_TXT)))
+    if dll_size:
+        print("[make-ntfs]   \\testlib.dll (%d bytes, NAO-residente, %d cluster(s) @ LCN %d)" %
+              (dll_size, dll_clusters, TESTLIB_LCN))
     print("[make-ntfs]   conteudo conhecido de \\hello.txt: %r" % HELLO_TXT)
 
 

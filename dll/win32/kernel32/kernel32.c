@@ -223,6 +223,54 @@ __declspec(dllexport) int QueryVolumeInfoEx(MEUOS_VOLUME_INFO* out) {
     return (st == 0) ? 1 : 0;
 }
 
+// ============================================================================
+//  FASE 3b (Frente 3) — apoio ao CRT REAL (mingw/UCRT). O startup do CRT importa
+//  estas do kernel32. Em UP single-app, CriticalSection sao no-ops; Tls/Virtual*
+//  devolvem algo plausivel; GetLastError=0; SetUnhandledExceptionFilter guarda/0.
+// ============================================================================
+__declspec(dllexport) void InitializeCriticalSection(void* cs) { (void)cs; }
+__declspec(dllexport) void DeleteCriticalSection(void* cs)     { (void)cs; }
+__declspec(dllexport) void EnterCriticalSection(void* cs)      { (void)cs; }
+__declspec(dllexport) void LeaveCriticalSection(void* cs)      { (void)cs; }
+__declspec(dllexport) unsigned GetLastError(void)             { return 0; }
+__declspec(dllexport) void     SetLastError(unsigned e)       { (void)e; }
+__declspec(dllexport) void*    SetUnhandledExceptionFilter(void* filter) { (void)filter; return 0; }
+__declspec(dllexport) void     Sleep(unsigned ms)            { (void)ms; }
+__declspec(dllexport) void*    TlsGetValue(unsigned idx)     { (void)idx; return 0; }
+__declspec(dllexport) int      TlsSetValue(unsigned idx, void* v) { (void)idx; (void)v; return 1; }
+__declspec(dllexport) int VirtualProtect(void* addr, unsigned long long size,
+                                         unsigned newprot, unsigned* oldprot) {
+    (void)addr; (void)size; (void)newprot;
+    if (oldprot) *oldprot = 0x40;   // PAGE_EXECUTE_READWRITE
+    return 1;                        // TRUE (paginas de usuario ja sao RWX aqui)
+}
+// MEMORY_BASIC_INFORMATION (x64): BaseAddress, AllocationBase, AllocationProtect,
+// __alignment, RegionSize, State, Protect, Type. Devolve algo committed+RWX.
+typedef struct _MEUOS_MBI {
+    void*              BaseAddress;
+    void*              AllocationBase;
+    unsigned           AllocationProtect;
+    unsigned           __align0;
+    unsigned long long RegionSize;
+    unsigned           State;
+    unsigned           Protect;
+    unsigned           Type;
+    unsigned           __align1;
+} MEUOS_MBI;
+__declspec(dllexport) unsigned long long VirtualQuery(void* addr, MEUOS_MBI* mbi,
+                                                      unsigned long long len) {
+    if (!mbi || len < sizeof(MEUOS_MBI)) return 0;
+    mbi->BaseAddress       = (void*)((unsigned long long)addr & ~0xFFFULL);
+    mbi->AllocationBase    = mbi->BaseAddress;
+    mbi->AllocationProtect = 0x40; mbi->__align0 = 0;
+    mbi->RegionSize        = 0x1000;
+    mbi->State             = 0x1000;   // MEM_COMMIT
+    mbi->Protect           = 0x40;     // PAGE_EXECUTE_READWRITE
+    mbi->Type              = 0x20000;  // MEM_PRIVATE
+    mbi->__align1          = 0;
+    return sizeof(MEUOS_MBI);
+}
+
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }

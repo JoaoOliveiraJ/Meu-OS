@@ -12,7 +12,9 @@ typedef unsigned short     wchar16;
 
 unsigned int _tls_index = 0;
 
-__declspec(dllimport) void ExitProcess(unsigned code);
+__declspec(dllimport) void  ExitProcess(unsigned code);
+__declspec(dllimport) void* GetStdHandle(unsigned which);
+__declspec(dllimport) int   WriteFile(void* h, const void* buf, unsigned len, unsigned* written, void* ov);
 
 // ---------------------------------------------------------------------------
 //  heap — bump allocator sobre um buffer estatico (sem free real; basta p/ o CRT).
@@ -96,9 +98,11 @@ __declspec(dllexport) void _initterm(void* first, void* last)   { (void)first; (
 __declspec(dllexport) int  _initterm_e(void* first, void* last) { (void)first; (void)last; return 0; }
 
 __declspec(dllexport) void _cexit(void) { }
-__declspec(dllexport) void exit(int code)  { ExitProcess((unsigned)code); }
-__declspec(dllexport) void _exit(int code) { ExitProcess((unsigned)code); }
-__declspec(dllexport) void abort(void)     { ExitProcess(3); }
+// ExitProcess encerra o processo; o for(;;) so satisfaz o 'noreturn' que o compilador
+// assume p/ exit/_exit/abort (ele nao sabe que ExitProcess nao retorna).
+__declspec(dllexport) void exit(int code)  { ExitProcess((unsigned)code); for (;;) {} }
+__declspec(dllexport) void _exit(int code) { ExitProcess((unsigned)code); for (;;) {} }
+__declspec(dllexport) void abort(void)     { ExitProcess(3);              for (;;) {} }
 
 // ---------------------------------------------------------------------------
 //  private / SEH — __C_specific_handler. So existe p/ resolver; sem exceptions
@@ -109,23 +113,88 @@ __declspec(dllexport) int __C_specific_handler(void* rec, void* frame, void* ctx
 }
 
 // ---------------------------------------------------------------------------
-//  stdio — stubs. O alvo (crthello) escreve via WriteFile/kernel32, entao estas
-//  so precisam existir e nao quebrar num flush de saida na saida do processo.
+//  stdio — printf REAL (subset): formata fmt+valist e escreve no console via
+//  WriteFile (kernel32). Assim um printf() de um .exe com CRT real IMPRIME.
+//  va_list no x64 do Windows = char* p/ os varargs (cada slot = 8 bytes).
 // ---------------------------------------------------------------------------
-static unsigned char g_iob[3][64];   // FILE* falsos p/ stdin/stdout/stderr
+typedef struct { int fd; } UCRT_FILE;   // FILE* falso: guarda o fd (1=out, 2=err)
+static UCRT_FILE g_iob[3] = { {0}, {1}, {2} };
 __declspec(dllexport) void* __acrt_iob_func(unsigned i) {
-    return (i < 3) ? (void*)&g_iob[i][0] : (void*)&g_iob[1][0];
+    return (i < 3) ? (void*)&g_iob[i] : (void*)&g_iob[1];
 }
-__declspec(dllexport) size_t_ fwrite(const void* p, size_t_ sz, size_t_ n, void* stream) {
-    (void)p; (void)sz; (void)stream; return n;   // finge ter escrito 'n' elementos
+static void ucrt_write(int fd, const char* s, int n) {
+    if (n <= 0) return;
+    void* h = GetStdHandle(fd == 2 ? (unsigned)-12 : (unsigned)-11);
+    unsigned w = 0; WriteFile(h, s, (unsigned)n, &w, 0);
+}
+static void put_uint(char* out, int* pos, int cap, unsigned long long v,
+                     int base, int upper, int width, char pad) {
+    char tmp[32]; int t = 0;
+    const char* dig = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    if (v == 0) tmp[t++] = '0';
+    while (v) { tmp[t++] = dig[v % base]; v /= base; }
+    while (t < width) tmp[t++] = pad;
+    while (t > 0 && *pos < cap) out[(*pos)++] = tmp[--t];
+}
+static int ucrt_vfmt(char* out, int cap, const char* fmt, char* ap) {
+    int pos = 0;
+    for (const char* p = fmt; *p && pos < cap; p++) {
+        if (*p != '%') { out[pos++] = *p; continue; }
+        p++;
+        char pad = ' '; int width = 0, lng = 0;
+        if (*p == '0') { pad = '0'; p++; }
+        while (*p >= '0' && *p <= '9') { width = width * 10 + (*p - '0'); p++; }
+        while (*p == 'l') { lng++; p++; }
+        char c = *p;
+        if (c == 's') {
+            const char* s = *(char**)ap; ap += 8;
+            if (!s) s = "(null)";
+            while (*s && pos < cap) out[pos++] = *s++;
+        } else if (c == 'c') {
+            int ch = (int)*(long long*)ap; ap += 8;
+            if (pos < cap) out[pos++] = (char)ch;
+        } else if (c == 'd' || c == 'i') {
+            long long v = *(long long*)ap; ap += 8;
+            if (!lng) v = (int)v;
+            if (v < 0) { if (pos < cap) out[pos++] = '-';
+                         put_uint(out, &pos, cap, (unsigned long long)(-v), 10, 0, width, pad); }
+            else put_uint(out, &pos, cap, (unsigned long long)v, 10, 0, width, pad);
+        } else if (c == 'u') {
+            unsigned long long v = *(unsigned long long*)ap; ap += 8;
+            if (!lng) v = (unsigned)v;
+            put_uint(out, &pos, cap, v, 10, 0, width, pad);
+        } else if (c == 'x' || c == 'X') {
+            unsigned long long v = *(unsigned long long*)ap; ap += 8;
+            if (!lng) v = (unsigned)v;
+            put_uint(out, &pos, cap, v, 16, c == 'X', width, pad);
+        } else if (c == 'p') {
+            unsigned long long v = *(unsigned long long*)ap; ap += 8;
+            if (pos < cap) out[pos++] = '0'; if (pos < cap) out[pos++] = 'x';
+            put_uint(out, &pos, cap, v, 16, 0, 16, '0');
+        } else if (c == '%') {
+            if (pos < cap) out[pos++] = '%';
+        } else {   // desconhecido: emite literal
+            if (pos < cap) out[pos++] = '%';
+            if (pos < cap) out[pos++] = c;
+        }
+    }
+    return pos;
 }
 __declspec(dllexport) int __stdio_common_vfprintf(unsigned long long opt, void* stream,
         const char* fmt, void* loc, void* valist) {
-    (void)opt; (void)stream; (void)fmt; (void)loc; (void)valist; return 0;
+    (void)opt; (void)loc;
+    char buf[1024];
+    int n = ucrt_vfmt(buf, (int)sizeof(buf), fmt, (char*)valist);
+    ucrt_write(stream ? ((UCRT_FILE*)stream)->fd : 1, buf, n);
+    return n;
 }
 __declspec(dllexport) int __stdio_common_vfwprintf(unsigned long long opt, void* stream,
         const wchar16* fmt, void* loc, void* valist) {
     (void)opt; (void)stream; (void)fmt; (void)loc; (void)valist; return 0;
+}
+__declspec(dllexport) size_t_ fwrite(const void* p, size_t_ sz, size_t_ n, void* stream) {
+    ucrt_write(stream ? ((UCRT_FILE*)stream)->fd : 1, (const char*)p, (int)(sz * n));
+    return n;
 }
 
 // ---------------------------------------------------------------------------

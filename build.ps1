@@ -133,6 +133,18 @@ if (Test-Path $tebtest) {
     if ($LASTEXITCODE) { throw "Compilacao do tebtest.exe falhou." }
 }
 
+# FRENTE 3 (Fase 3b) — crthello.exe: um .exe com o CRT REAL do mingw (SEM -nostdlib).
+# O startup do CRT (argv/env/_initterm/exit/__C_specific_handler) roda via a nossa
+# ucrtbase.dll (apisets api-ms-win-crt-* redirecionados pelo loader); main() escreve
+# via WriteFile. Roda com:
+#   run.ps1 -Modules build\ntdll.dll,build\kernel32.dll,build\user32.dll,build\ucrtbase.dll,build\crthello.exe
+$crthello = Join-Path $ex 'crthello.c'
+if (Test-Path $crthello) {
+    Write-Host "[exemplo] apps\crthello.c -> build\crthello.exe (.exe com CRT REAL do mingw)"
+    & $zig cc -target x86_64-windows-gnu -o (Join-Path $out 'crthello.exe') $crthello
+    if ($LASTEXITCODE) { throw "Compilacao do crthello.c falhou." }
+}
+
 # FASE 3 — DEMO Named Pipes (IPC): servidor cria \Pipe\Nome e escreve; cliente
 # abre pelo nome e le os mesmos bytes. Importam kernel32 + user32 (GetStdHandle).
 # ImageBases livres e fora do heap (0x2000000..0x3000000) e da regiao do PMM
@@ -186,6 +198,7 @@ $kernel32Src = Join-Path $dll 'win32\kernel32\kernel32.c'
 $user32Src   = Join-Path $dll 'win32\user32\user32.c'
 $gdi32Src    = Join-Path $dll 'win32\gdi32\gdi32.c'
 $advapi32Src = Join-Path $dll 'win32\advapi32\advapi32.c'
+$ucrtbaseSrc = Join-Path $dll 'win32\ucrtbase\ucrtbase.c'   # FASE 3b: CRT minimo
 $ddrawSrc    = Join-Path $dll 'win32\ddraw\ddraw.c'
 $d3dSrc      = Join-Path $dll 'win32\d3d9\d3d9.c'
 $dxgiSrc     = Join-Path $dll 'win32\dxgi\dxgi.c'
@@ -227,6 +240,15 @@ if (Test-Path $ntdllSrc) {
     & $zig cc @dc '-Wl,--image-base=0x3200000' "-Wl,--out-implib,$(Join-Path $out 'libadvapi32.a')" `
         -o (Join-Path $out 'advapi32.dll') $advapi32Src (Join-Path $out 'libntdll.a')
     if ($LASTEXITCODE) { throw "advapi32.dll falhou." }
+    # FASE 3b (Frente 3) — ucrtbase.dll: CRT minimo (startup do mingw/UCRT). O loader
+    #   redireciona os apisets api-ms-win-crt-* p/ ca. Importa ExitProcess do kernel32.
+    #   ImageBase 0x3300000 (livre, zona morta 48-64 MiB; nao colide com nenhum modulo).
+    if (Test-Path $ucrtbaseSrc) {
+        Write-Host "[dll] ucrtbase.dll (CRT minimo p/ .exe real)"
+        & $zig cc @dc '-Wl,--image-base=0x3300000' "-Wl,--out-implib,$(Join-Path $out 'libucrtbase.a')" `
+            -o (Join-Path $out 'ucrtbase.dll') $ucrtbaseSrc (Join-Path $out 'libkernel32.a')
+        if ($LASTEXITCODE) { throw "ucrtbase.dll falhou." }
+    }
     # ddraw.dll: pulado na 1a passada — sera construido APOS d3d11.dll (que
     # produz libd3d11.a). Antes esta secao tentava construir ddraw aqui mesmo;
     # em -Clean builds o link falhava porque D3D11CreateDevice e dllimport.

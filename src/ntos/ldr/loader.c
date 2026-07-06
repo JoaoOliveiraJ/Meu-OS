@@ -98,8 +98,17 @@ void ldr_module_set_base(const char* name, void* base) {
     if (i >= 0) s_mods[i].base = base;
 }
 
+static int has_prefix_ci(const char* s, const char* pfx) {
+    while (*pfx) { if (!*s || lower(*s) != lower(*pfx)) return 0; s++; pfx++; }
+    return 1;
+}
+
 // resolve um import (dll!fn) -> endereco, carregando a DLL se preciso
 static void* ldr_resolve(const char* dll, const char* fn) {
+    // FASE 3b (Frente 3): os apisets do UCRT (api-ms-win-crt-*.dll) sao redirecionados
+    // p/ a nossa ucrtbase.dll — igual ao Windows, onde esses apisets encaminham p/ o
+    // ucrtbase.dll. Assim um .exe com CRT real resolve _initterm/malloc/exit/etc.
+    if (dll && has_prefix_ci(dll, "api-ms-win-crt-")) dll = "ucrtbase.dll";
     void* base = ldr_load(dll);
     if (!base) return 0;
     return pe_get_export(base, fn);

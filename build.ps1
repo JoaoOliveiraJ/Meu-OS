@@ -122,6 +122,17 @@ if (Test-Path $hihello) {
     if ($LASTEXITCODE) { throw "Compilacao do hihello.exe falhou." }
 }
 
+# FRENTE 3 (Fase 3a) — prova do TEB/PEB: le gs:[0x30]/gs:[0x60]/PEB->ImageBase em
+# ring 3. ImageBase baixo 0x1900000 (sem relocacao) p/ isolar do teste de reloc.
+$tebtest = Join-Path $ex 'tebtest.c'
+if (Test-Path $tebtest) {
+    Write-Host "[exemplo] apps\tebtest.c -> build\tebtest.exe (prova TEB/PEB)"
+    & $zig cc -target x86_64-windows-gnu -nostdlib -e _start `
+        '-Wl,--image-base=0x1900000' '-Wl,--subsystem,console' "-I$sdk", "-I$ddk" `
+        -o (Join-Path $out 'tebtest.exe') $tebtest -lkernel32
+    if ($LASTEXITCODE) { throw "Compilacao do tebtest.exe falhou." }
+}
+
 # FASE 3 — DEMO Named Pipes (IPC): servidor cria \Pipe\Nome e escreve; cliente
 # abre pelo nome e le os mesmos bytes. Importam kernel32 + user32 (GetStdHandle).
 # ImageBases livres e fora do heap (0x2000000..0x3000000) e da regiao do PMM

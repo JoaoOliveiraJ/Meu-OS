@@ -238,6 +238,9 @@ __attribute__((ms_abi)) static void     stub_void(void)    { }
 __attribute__((ms_abi)) static NTSTATUS stub_not_impl(void){ return STATUS_NOT_IMPLEMENTED; }
 __attribute__((ms_abi)) static void*    stub_zero(void)    { return 0; }
 __attribute__((ms_abi)) static BOOLEAN  stub_false(void)   { return 0; }
+// null.sys chama MmPageEntireDriver p/ se tornar pageable; no-op seguro (nao paginamos
+// drivers). Assinatura NT: VOID MmPageEntireDriver(PVOID AddressWithinSection).
+__attribute__((ms_abi)) static void     NT_MmPageEntireDriver(void* AddressWithinSection) { (void)AddressWithinSection; }
 
 // CcMapData, CcUnpinData, etc. — stubs.
 __attribute__((ms_abi)) static BOOLEAN NT_CcMapData(PVOID FileObj, PLARGE_INTEGER Off, ULONG Len, ULONG Flags,
@@ -1282,6 +1285,8 @@ static const struct { const char* name; void* fn; } g_ntexports[] = {
     // do sentinela). pintok nao importa nenhuma das duas (verificado nos imports dele).
     EX("IofCompleteRequest",               IoCompleteRequest_k),
     EX("IofCallDriver",                    IoCallDriver_ms),
+    // INC 7 (Frente 2): null.sys importa MmPageEntireDriver (no-op seguro). Append-only.
+    EX("MmPageEntireDriver",               NT_MmPageEntireDriver),
 
     { 0, 0 }
 };

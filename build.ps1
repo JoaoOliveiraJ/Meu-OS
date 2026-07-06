@@ -168,6 +168,20 @@ if (Test-Path $filecat) {
     if ($LASTEXITCODE) { throw "Compilacao do filecat.c falhou." }
 }
 
+# FRENTE 3 (Fase 3e) — guihello.exe: uma app GRAFICA "de terceiro" ESTRUTURA PADRAO do
+# Windows (WinMain + RegisterClass + CreateWindowEx + loop de msg + WM_PAINT), compilada
+# com o CRT REAL do mingw no subsistema WINDOWS (WinMainCRTStartup chama WinMain). Roda no
+# win32k proprio do MeuOS. user32 ganhou UpdateWindow; kernel32 GetStartupInfoA; ucrtbase
+# __p__acmdln/_ismbblead. Prova com screendump. Roda com:
+#   run.ps1 -Screendump -Modules build\ntdll.dll,build\kernel32.dll,build\user32.dll,build\gdi32.dll,build\ucrtbase.dll,build\guihello.exe
+$guihello = Join-Path $ex 'guihello.c'
+if (Test-Path $guihello) {
+    Write-Host "[exemplo] apps\guihello.c -> build\guihello.exe (.exe GUI com CRT REAL, WinMain)"
+    & $zig cc -target x86_64-windows-gnu '-Wl,--subsystem,windows' `
+        -o (Join-Path $out 'guihello.exe') $guihello -luser32 -lgdi32
+    if ($LASTEXITCODE) { throw "Compilacao do guihello.c falhou." }
+}
+
 # FASE 3 — DEMO Named Pipes (IPC): servidor cria \Pipe\Nome e escreve; cliente
 # abre pelo nome e le os mesmos bytes. Importam kernel32 + user32 (GetStdHandle).
 # ImageBases livres e fora do heap (0x2000000..0x3000000) e da regiao do PMM

@@ -325,3 +325,33 @@ CPUID x3 -> i7-9700K, `10 ; 0 ; 26100.`, SEM "Sistema parado").
 
 **Nota (fixtures):** disk.img e' artefato de build (gitignored); gere com `apps/make-ntfs-disk.ps1`
 (modo sintetico Python sem admin, ou real com admin+Hyper-V) antes de `run.ps1 -Disk`.
+
+---
+
+## MARCO 6 — Frente 3 Fase 3e: GUI de TERCEIRO com CRT REAL (WinMain) no win32k FEITA
+
+Uma app GRAFICA de estrutura PADRAO do Windows — `WinMain` + RegisterClassA + CreateWindowExA +
+loop GetMessage/Translate/Dispatch + WM_PAINT desenhando — compilada com o **CRT REAL do mingw**
+(subsistema WINDOWS: o startup `WinMainCRTStartup` chama WinMain) roda no win32k PROPRIO do MeuOS
+e ABRE UMA JANELA que desenha. Diferente do `guiapp.c` (que usa `_start`/-nostdlib e declara tudo
+a mao), este e' um binario Win32 "de livro" (inclui `<windows.h>`, usa a API padrao) — o alvo do
+item 4 (rodar um binario de janela de terceiro).
+
+**Diagnostico primeiro:** compilei `apps/guihello.c` e rodei — faltavam 4 imports (e ao chamar um
+deles com IAT=0 ele saltava p/ rip=0 -> "Sistema parado"): `USER32!UpdateWindow`,
+`KERNEL32!GetStartupInfoA`, `ucrtbase!__p__acmdln`, `ucrtbase!_ismbblead`. Adicionei os 4 (todos
+ring-3, NENHUMA mudanca no kernel):
+- **user32.c** `UpdateWindow` -> `NtUserInvalidate` (marca invalida -> WM_PAINT).
+- **kernel32.c** `GetStartupInfoA` (zera STARTUPINFOA 104 B -> CRT usa SW_SHOWDEFAULT).
+- **ucrtbase.c** `__p__acmdln` (ponteiro da linha de comando p/ o startup GUI) + `_ismbblead`
+  (sem MBCS -> 0).
+
+**Prova (screendump):** `run.ps1 -Screendump -Modules ntdll,kernel32,user32,gdi32,ucrtbase,
+guihello`. Serial: `RegisterClass 'GuiHelloClass'` -> `CreateWindowEx -> HWND #1 titulo='GuiHello
+(terceiro, CRT)' x=50 y=45 w=240 h=130` -> `InvalidateRect -> WM_PAINT` -> `FillRect(cor=200)` +
+`TextOut("Janela de TERCEIRO (CRT real)")` + `TextOut("WinMain + WM_PAINT OK")`. O win32k tem um
+modo demo que injeta "Hi" e manda WM_QUIT (o app sai limpo; ciclo de vida Win32 completo). A imagem
+`build/screen_guihello.png` (1024x768) mostra a JANELA com barra de titulo azul "GuiHello
+(terceiro, CRT)", o texto e o retangulo vermelho "WinMain + WM_PAINT OK", sobre o desktop
+Win10/11 (wallpaper + taskbar + relogio). Zero "import nao resolvido". Regressao pintok OK
+(C0000365 mantido, CPUID x3 -> i7-9700K, `10 ; 0 ; 26100.`, SEM "Sistema parado").

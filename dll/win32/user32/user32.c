@@ -182,6 +182,13 @@ __declspec(dllexport) int ShowWindow(void* hwnd, int cmdShow) {
     return (int)NtUserShowWindow(hwnd, cmdShow);
 }
 
+// UpdateWindow: forca o repaint da area invalida (marca invalida -> WM_PAINT no
+// proximo GetMessage). No MeuOS a janela ja pinta ao ShowWindow; aqui reforcamos.
+__declspec(dllexport) int UpdateWindow(void* hwnd) {
+    NtUserInvalidate(hwnd);
+    return 1;
+}
+
 __declspec(dllexport) int DestroyWindow(void* hwnd) {
     return (int)NtUserDestroyWindow(hwnd);
 }

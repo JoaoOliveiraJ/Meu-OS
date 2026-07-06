@@ -238,6 +238,15 @@ __declspec(dllexport) void*    SetUnhandledExceptionFilter(void* filter) { (void
 __declspec(dllexport) void     Sleep(unsigned ms)            { (void)ms; }
 __declspec(dllexport) void*    TlsGetValue(unsigned idx)     { (void)idx; return 0; }
 __declspec(dllexport) int      TlsSetValue(unsigned idx, void* v) { (void)idx; (void)v; return 1; }
+// GetStartupInfoA: o startup GUI do CRT (WinMainCRTStartup) chama p/ obter nCmdShow.
+// Zeramos a STARTUPINFOA (104 bytes no x64) -> dwFlags=0, entao o CRT cai em
+// SW_SHOWDEFAULT (a janela aparece). cb fica no offset 0.
+__declspec(dllexport) void GetStartupInfoA(void* si) {
+    if (!si) return;
+    char* p = (char*)si;
+    for (int i = 0; i < 104; i++) p[i] = 0;
+    *(unsigned*)si = 104;   // cb
+}
 __declspec(dllexport) int VirtualProtect(void* addr, unsigned long long size,
                                          unsigned newprot, unsigned* oldprot) {
     (void)addr; (void)size; (void)newprot;

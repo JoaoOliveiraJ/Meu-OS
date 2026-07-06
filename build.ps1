@@ -145,6 +145,18 @@ if (Test-Path $crthello) {
     if ($LASTEXITCODE) { throw "Compilacao do crthello.c falhou." }
 }
 
+# FRENTE 3 (Fase 3c) — echoin.exe: um .exe com o CRT REAL do mingw que LE do teclado
+# via scanf() de verdade (entrada), alem de imprimir via printf (saida da Fase 3b). A
+# ucrtbase.dll ganhou getchar/fgetc/fgets/fread/__stdio_common_vfscanf; o bloqueio da
+# leitura e' feito em ring 3 (a ucrtbase gira em ReadFile ate a tecla chegar). Roda com:
+#   run.ps1 -Modules build\ntdll.dll,build\kernel32.dll,build\user32.dll,build\ucrtbase.dll,build\echoin.exe -SendKeys "4 2 spc m e u o s ret"
+$echoin = Join-Path $ex 'echoin.c'
+if (Test-Path $echoin) {
+    Write-Host "[exemplo] apps\echoin.c -> build\echoin.exe (.exe com CRT REAL: scanf le teclado)"
+    & $zig cc -target x86_64-windows-gnu -o (Join-Path $out 'echoin.exe') $echoin
+    if ($LASTEXITCODE) { throw "Compilacao do echoin.c falhou." }
+}
+
 # FASE 3 — DEMO Named Pipes (IPC): servidor cria \Pipe\Nome e escreve; cliente
 # abre pelo nome e le os mesmos bytes. Importam kernel32 + user32 (GetStdHandle).
 # ImageBases livres e fora do heap (0x2000000..0x3000000) e da regiao do PMM

@@ -172,3 +172,53 @@ o trabalho do pintok), não só "adicionar 13 APIs".
 p/ a Frente 2). Piv­ot p/ **Frente 3 (rodar .exe REAL do Windows)** — a outra metade do objetivo,
 intocada. beep.sys fica documentado aqui p/ retomar depois (começar por safe-stubs que devolvem
 valores sensatos: `MmLockPagableDataSection`→devolve o arg, etc., e o IO_CSQ real).
+
+---
+
+## MARCO 3: Frente 3 (rodar .exe REAL) — Fase 3a COMPLETA + escopo da Fase 3b observado
+
+Branch `feat/kernel-foundation-irql-dpc` (mesma leva). Depois de Frente 1+2, abrimos a
+Frente 3 (rodar executaveis .exe reais do Windows). A Fase 3a (fundacao) esta **completa e
+provada**; a Fase 3b (rodar um binario com CRT real) foi **diagnosticada** (escopo exato).
+
+### Fase 3a — COMPLETA (2 commits)
+- **Relocacao no caminho de usuario** (`ldr_run`, loader.c): espelha a relocacao do caminho
+  de driver. Um .exe de ImageBase alto (>= 1 GiB, ex. 0x140000000 = default MSVC) e realocado
+  p/ RAM baixa via PMM + `.reloc`. Prova: `apps/hihello.c` (ImageBase 0x140000000, .reloc
+  forcado) realocado p/ 0x4319000 e **rodando em ring 3** (`relocacoes aplicadas: 1`;
+  imprimiu; saiu limpo). Apps de base baixa seguem no caminho else — sem regressao.
+- **TEB/PEB + gs-base** (`usermode.c`): o processo ring-3 tem TEB+PEB minimos (no fundo da
+  janela de pilha, 0x600000/0x601000). `enter_ring3` seta `IA32_GS_BASE=TEB` apos o load do
+  seletor de gs e antes do iretq; na volta ao kernel restaura `IA32_GS_BASE=KPCR` (conserta um
+  bug latente — antes o kernel ficava com gs-base 0 depois que uma app rodava). Prova
+  (`apps/tebtest.c`): em ring 3, `gs:[0x30]=0x600000` (TEB.Self), `gs:[0x60]=0x601000` (PEB),
+  `PEB->ImageBaseAddress=0x1900000` (base real do tebtest). conhello roda DEPOIS do tebtest
+  (KPCR restaurado entre apps). E' o acesso exato que o CRT de um .exe real faz no arranque.
+
+### Fase 3b — DIAGNOSTICADA (escopo do "primeiro .exe real")
+`apps/crthello.c` = `printf("...")` compilado com o CRT REAL do mingw:
+`zig cc -target x86_64-windows-gnu apps/crthello.c -o build/crthello.exe` (SEM -nostdlib).
+Resultado (152 KB, ImageBase **0x400000** — zig-mingw poe EXE baixo, entao ele NAO precisa
+de relocacao): ao carregar, o loader lista os imports que faltam (a superficie da Fase 3b):
+- **UCRT via apisets `api-ms-win-crt-*.dll`** (~40 funcs): heap (`malloc/free/calloc/_set_new_mode`),
+  runtime (`_initterm`, `_set_app_type`, `__p___argc/argv/__wargv`, `_cexit`, `exit`,
+  `_configure_narrow/wide_argv`, `_initialize_narrow/wide_environment`, `_crt_atexit`,
+  `_crt_at_quick_exit`, `abort`, `signal`, `_set_invalid_parameter_handler`), stdio
+  (`__acrt_iob_func`, `__stdio_common_vfprintf/vfwprintf`, `fwrite`, `__p__commode`,
+  `__p__fmode`), private (`__C_specific_handler`), string (`strlen`, `strncmp`), math
+  (`__setusermatherr`), environment (`__p__environ/_wenviron`), time (`__daylight`,
+  `__timezone`, `__tzname`, `_tzset`).
+- **KERNEL32.dll** (~10): `Initialize/Enter/Leave/DeleteCriticalSection`, `TlsGetValue`,
+  `VirtualProtect`, `VirtualQuery`, `SetUnhandledExceptionFilter`, `Sleep`, `GetLastError`.
+Com IAT=0 (tudo sem resolver), o startup do CRT chamou por um slot nulo -> `rip=0 cr2=0` ->
+`Sistema parado`.
+
+**Plano da Fase 3b (proxima sessao — heavy, ~2-4 sessoes):** (a) resolver os apisets
+`api-ms-win-crt-*` — ou implementar essas DLLs, ou fazer o `pe_get_export`/loader resolver
+forwarders/apiset p/ uma msvcrt/ucrt nossa; agent B recomendou mirar o msvcrt CLASSICO (mais
+leve) em vez do UCRT — avaliar retargetar o link p/ msvcrt.dll; (b) crescer kernel32 (~10
+funcs acima; CriticalSection podem ser no-ops em UP, Tls* real, VirtualProtect/Query
+plausiveis, GetLastError via TEB LastError); (c) init de loader (processar TLS dir, chamar
+DllMain, registrar .pdata); (d) `__C_specific_handler`/SetUnhandledExceptionFilter stubs.
+Alvo: `crthello.exe` imprime e sai 0. Comecar por WriteConsole/WriteFile (evitar stdio do CRT
+no inicio). Fase 3a ja entrega tudo que o startup do CRT le por gs (TEB/PEB).

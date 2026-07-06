@@ -57,6 +57,8 @@ enum {
     // --- FASE 11: cursor do mouse (le/ajusta posicao). ---
     SYS_USERGETCURSORPOS = 46,
     SYS_USERSETCURSORPOS = 47,
+    // --- FASE 3f: LoadLibrary em runtime (carrega DLL registrada, devolve a base). ---
+    SYS_LOADLIBRARY = 48,
 };
 
 // "Console device": handles padrao do Win32 (GetStdHandle). Sao pseudo-handles
@@ -301,6 +303,18 @@ static void sys_terminateprocess(struct regs* r) {
 static void sys_waitforsingleobject(struct regs* r) {
     (void)r->rsi;   // timeout ignorado por ora
     r->rax = (uint64_t)(uint32_t)STATUS_SUCCESS;
+}
+
+// FASE 3f — NtLoadLibrary(name): carrega uma DLL JA REGISTRADA (modulo de boot) sob
+// demanda e devolve a base (HMODULE). Reaproveita o ldr_load do loader (mapeia + binda
+// os imports no espaco do usuario corrente; devolve a base cacheada se ja carregada).
+// GetProcAddress (LdrGetProcAddress) resolve os exports por cima. Nao le do disco por
+// ora: so modulos passados no boot (Multiboot). rdi=nome; rax=base (0 se falhou).
+extern void* ldr_load(const char* name);
+static void sys_loadlibrary(struct regs* r) {
+    const char* name = (const char*)(uintptr_t)r->rdi;
+    void* base = name ? ldr_load(name) : 0;
+    r->rax = (uint64_t)(uintptr_t)base;
 }
 
 // NtWriteFile(handle, const void* buf, uint32_t len, uint32_t* written).
@@ -982,6 +996,7 @@ static syscall_fn s_ssdt[] = {
     sys_queryvolumeinformation, // 45
     sys_user_getcursorpos,      // 46 (FASE 11)
     sys_user_setcursorpos,      // 47 (FASE 11)
+    sys_loadlibrary,            // 48 (FASE 3f: LoadLibrary runtime)
 };
 #define SSDT_COUNT (sizeof(s_ssdt) / sizeof(s_ssdt[0]))
 

@@ -16,6 +16,7 @@ __declspec(dllimport) long NtQueryDirectoryFile(void* dirHandle, void* outBuf, u
 __declspec(dllimport) long NtQueryVolumeInformation(void* outBuf, unsigned outLen, unsigned* retLen);
 __declspec(dllimport) void* LdrGetModuleHandle(const char* name);
 __declspec(dllimport) void* LdrGetProcAddress(void* module_base, const char* fn);
+__declspec(dllimport) void* LdrLoadDll(const char* name);
 __declspec(dllimport) long NtCreateNamedPipeFile(void* out_handle, const char* name);
 __declspec(dllimport) long NtConnectNamedPipe(void* pipe_handle);
 // FASE 5 — enumeracao de objetos + carregar/descarregar driver (para o cmd.exe).
@@ -117,6 +118,15 @@ __declspec(dllexport) void* GetProcAddress(void* module, const char* name) {
     if (!module || !name) return 0;
     return LdrGetProcAddress(module, name);
 }
+
+// LoadLibraryA(name) — FASE 3f: carrega uma DLL em RUNTIME (via LdrLoadDll -> ldr_load do
+// kernel) e devolve o HMODULE (base). GetProcAddress resolve funcoes por cima. Por ora
+// carrega DLLs ja registradas como modulos de boot (nao le do disco).
+__declspec(dllexport) void* LoadLibraryA(const char* name) {
+    if (!name) return 0;
+    return LdrLoadDll(name);
+}
+__declspec(dllexport) void* LoadLibraryW(const void* name) { (void)name; return 0; }   // wide: nao suportado
 
 // --- Process Manager (Win32 -> Nt*) ---
 // Versao simplificada de CreateProcessA: cria um EPROCESS + uma thread inicial
@@ -235,6 +245,11 @@ __declspec(dllexport) void LeaveCriticalSection(void* cs)      { (void)cs; }
 __declspec(dllexport) unsigned GetLastError(void)             { return 0; }
 __declspec(dllexport) void     SetLastError(unsigned e)       { (void)e; }
 __declspec(dllexport) void*    SetUnhandledExceptionFilter(void* filter) { (void)filter; return 0; }
+// __C_specific_handler: no Windows tambem e' exportado pelo kernel32 (alem do ucrtbase).
+// Quando o .exe linka -lkernel32, o CRT o resolve AQUI. Sem SEH real -> ContinueSearch(1).
+__declspec(dllexport) int __C_specific_handler(void* rec, void* frame, void* ctx, void* disp) {
+    (void)rec; (void)frame; (void)ctx; (void)disp; return 1;
+}
 __declspec(dllexport) void     Sleep(unsigned ms)            { (void)ms; }
 __declspec(dllexport) void*    TlsGetValue(unsigned idx)     { (void)idx; return 0; }
 __declspec(dllexport) int      TlsSetValue(unsigned idx, void* v) { (void)idx; (void)v; return 1; }

@@ -355,3 +355,37 @@ modo demo que injeta "Hi" e manda WM_QUIT (o app sai limpo; ciclo de vida Win32 
 (terceiro, CRT)", o texto e o retangulo vermelho "WinMain + WM_PAINT OK", sobre o desktop
 Win10/11 (wallpaper + taskbar + relogio). Zero "import nao resolvido". Regressao pintok OK
 (C0000365 mantido, CPUID x3 -> i7-9700K, `10 ; 0 ; 26100.`, SEM "Sistema parado").
+
+---
+
+## MARCO 7 — Frente 3 Fase 3f: LoadLibrary em RUNTIME (LoadLibraryA + GetProcAddress) FEITA
+
+Um .exe carrega uma DLL EM RUNTIME (nao por import estatico no load) e chama a funcao POR
+PONTEIRO. Caminho: `LoadLibraryA -> kernel32 -> ntdll (LdrLoadDll) -> int 0x80 ->
+sys_loadlibrary -> ldr_load (mapeia a DLL no espaco do usuario) -> base`; depois
+`GetProcAddress(base, fn) -> LdrGetProcAddress -> pe_get_export -> ponteiro -> chamada`.
+
+Pecas:
+- **KERNEL (append-only, pintok-safe):** `src/ntos/ke/amd64/syscall.c` — `SYS_LOADLIBRARY = 48`
+  (novo, append-only no enum E no `s_ssdt[]` — indices 0-47 intocados) + `sys_loadlibrary`
+  (reaproveita o `ldr_load` existente do loader; rdi=nome, rax=base). Unica mudanca de kernel do
+  INC 3; SSDT so cresce.
+- **dll/ntdll/ntdll.c**: `SYS_LOADLIBRARY=48` (numero casa com o kernel) + export `LdrLoadDll`.
+- **dll/win32/kernel32/kernel32.c**: `LoadLibraryA` -> `LdrLoadDll`; `LoadLibraryW` stub; +
+  `__C_specific_handler` (o CRT com `-lkernel32` resolve o SEH handler AQUI, nao no ucrtbase —
+  sem ele ficava 1 import nao resolvido).
+- **dll/win32/testlib/testlib.c** (NOVA): DLL de teste (-nostdlib) com 2 exports (`testlib_add`,
+  `testlib_name`); ImageBase 0x5100000 + --dynamicbase; NAO importada estaticamente por ninguem.
+- **apps/loadlib.c** (NOVO): LoadLibraryA("testlib.dll") + GetProcAddress + chama por ponteiro.
+
+**Prova:** `run.ps1 -Modules ntdll,kernel32,ucrtbase,testlib,loadlib`:
+```
+  [loadlib] LoadLibraryA("testlib.dll") em runtime...
+[ldr] carregando testlib.dll @ 0x0000000005100000
+  [loadlib] carregada; base=0x0000000005100000. GetProcAddress...
+  [loadlib] chamei POR PONTEIRO: testlib_add(2,3)=5 ; testlib_name()="testlib.dll v1 (carregada em runtime)"
+```
+A testlib.dll so entrou no processo quando LoadLibraryA a carregou (nao estava no import table do
+.exe). Zero "import nao resolvido"; saida limpa. Regressao pintok OK (C0000365, CPUID x3 ->
+i7-9700K, SEM "Sistema parado"). Limitacao v1: carrega DLLs ja registradas como modulo de boot
+(nao le .dll do disco NTFS ainda — proximo passo, agora que o INC 2 deu leitura de arquivo).

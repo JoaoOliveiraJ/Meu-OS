@@ -109,6 +109,19 @@ if (Test-Path $conhello) {
     if ($LASTEXITCODE) { throw "Compilacao do conhello.c falhou." }
 }
 
+# FRENTE 3 (teste de relocacao no caminho de USUARIO): o MESMO conhello.c compilado
+# com ImageBase ALTO (0x140000000 = 5 GiB, o default de .exe reais do Windows MinGW/
+# MSVC) + .reloc (--dynamicbase). Prova que o ldr_run reloca uma imagem de usuario de
+# base > 1 GiB p/ RAM baixa via PMM e a roda em ring 3. Nao usa PEB/TEB (int 0x80).
+$hihello = Join-Path $ex 'hihello.c'
+if (Test-Path $hihello) {
+    Write-Host "[exemplo] apps\hihello.c -> build\hihello.exe (ImageBase alto 0x140000000 + .reloc)"
+    & $zig cc -target x86_64-windows-gnu -nostdlib -e _start `
+        '-Wl,--image-base=0x140000000' '-Wl,--dynamicbase' '-Wl,--subsystem,console' "-I$sdk", "-I$ddk" `
+        -o (Join-Path $out 'hihello.exe') $hihello -lkernel32
+    if ($LASTEXITCODE) { throw "Compilacao do hihello.exe falhou." }
+}
+
 # FASE 3 — DEMO Named Pipes (IPC): servidor cria \Pipe\Nome e escreve; cliente
 # abre pelo nome e le os mesmos bytes. Importam kernel32 + user32 (GetStdHandle).
 # ImageBases livres e fora do heap (0x2000000..0x3000000) e da regiao do PMM

@@ -35,6 +35,8 @@ enum {
     // --- FASE 11: cursor do mouse (le/ajusta posicao) ---
     SYS_USERGETCURSORPOS = 46,
     SYS_USERSETCURSORPOS = 47,
+    // --- FASE 3f: LoadLibrary em runtime ---
+    SYS_LOADLIBRARY = 48,
 };
 
 // long long = 64-bit no Windows (LLP64), para nao truncar ponteiros.
@@ -204,6 +206,11 @@ __declspec(dllexport) void* LdrGetModuleHandle(const char* name) {
 }
 __declspec(dllexport) void* LdrGetProcAddress(void* module_base, const char* fn) {
     return (void*)(__INTPTR_TYPE__)sc2(SYS_GETPROCADDRESS, IP(module_base), IP(fn));
+}
+// LdrLoadDll(name) — FASE 3f: carrega uma DLL registrada (modulo de boot) sob demanda e
+// devolve a base. kernel32!LoadLibraryA chama isto; GetProcAddress resolve por cima.
+__declspec(dllexport) void* LdrLoadDll(const char* name) {
+    return (void*)(__INTPTR_TYPE__)sc1(SYS_LOADLIBRARY, IP(name));
 }
 
 // ---- Process Manager (Ps*) ----

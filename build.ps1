@@ -182,6 +182,17 @@ if (Test-Path $guihello) {
     if ($LASTEXITCODE) { throw "Compilacao do guihello.c falhou." }
 }
 
+# FRENTE 3 (Fase 3f) — loadlib.exe: um .exe com CRT REAL que carrega a testlib.dll EM
+# RUNTIME (LoadLibraryA + GetProcAddress) e chama POR PONTEIRO. kernel32 ganhou LoadLibraryA
+# -> ntdll LdrLoadDll -> syscall SYS_LOADLIBRARY -> ldr_load. Roda com:
+#   run.ps1 -Modules build\ntdll.dll,build\kernel32.dll,build\ucrtbase.dll,build\testlib.dll,build\loadlib.exe
+$loadlib = Join-Path $ex 'loadlib.c'
+if (Test-Path $loadlib) {
+    Write-Host "[exemplo] apps\loadlib.c -> build\loadlib.exe (.exe CRT REAL: LoadLibrary runtime)"
+    & $zig cc -target x86_64-windows-gnu -o (Join-Path $out 'loadlib.exe') $loadlib -lkernel32
+    if ($LASTEXITCODE) { throw "Compilacao do loadlib.c falhou." }
+}
+
 # FASE 3 — DEMO Named Pipes (IPC): servidor cria \Pipe\Nome e escreve; cliente
 # abre pelo nome e le os mesmos bytes. Importam kernel32 + user32 (GetStdHandle).
 # ImageBases livres e fora do heap (0x2000000..0x3000000) e da regiao do PMM
@@ -254,6 +265,8 @@ $ws232Src    = Join-Path $dll 'win32\ws2_32\ws2_32.c'
 # RODADA FINAL — secur32 (SSPI + LSA Logon API) + credui (Credential UI).
 $secur32Src  = Join-Path $dll 'win32\secur32\secur32.c'
 $creduiSrc   = Join-Path $dll 'win32\credui\credui.c'
+# FASE 3f — testlib: DLL de teste carregada em RUNTIME (LoadLibrary + GetProcAddress).
+$testlibSrc  = Join-Path $dll 'win32\testlib\testlib.c'
 if (Test-Path $ntdllSrc) {
     $dc = @('-target','x86_64-windows-gnu','-shared','-nostdlib','-e','DllMain')
     Write-Host "[dll] ntdll.dll + kernel32.dll + user32.dll + gdi32.dll + advapi32.dll + ddraw.dll + d3d9.dll + dxgi.dll + d3d11.dll + d3d12.dll + d2d1.dll + dwrite.dll + dxcore.dll + mmdevapi.dll + Audioses.dll + dsound.dll + winmm.dll + ws2_32.dll"
@@ -446,6 +459,15 @@ if (Test-Path $ntdllSrc) {
             "-Wl,--out-implib,$(Join-Path $out 'libcredui.a')" `
             -o (Join-Path $out 'credui.dll') $creduiSrc
         if ($LASTEXITCODE) { throw "credui.dll falhou." }
+    }
+    # FASE 3f — testlib.dll: DLL de teste carregada EM RUNTIME por loadlib.exe (LoadLibrary
+    #   + GetProcAddress + chamada por ponteiro). ImageBase 0x5100000 (livre apos credui) +
+    #   --dynamicbase (>= PMM_BASE). Sem out-implib: NAO e' linkada estaticamente.
+    if (Test-Path $testlibSrc) {
+        Write-Host "[dll] testlib.dll (DLL de teste p/ LoadLibrary runtime)"
+        & $zig cc @dc '-Wl,--image-base=0x5100000' '-Wl,--dynamicbase' `
+            -o (Join-Path $out 'testlib.dll') $testlibSrc
+        if ($LASTEXITCODE) { throw "testlib.dll falhou." }
     }
 }
 

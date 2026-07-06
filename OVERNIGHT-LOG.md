@@ -222,3 +222,30 @@ plausiveis, GetLastError via TEB LastError); (c) init de loader (processar TLS d
 DllMain, registrar .pdata); (d) `__C_specific_handler`/SetUnhandledExceptionFilter stubs.
 Alvo: `crthello.exe` imprime e sai 0. Comecar por WriteConsole/WriteFile (evitar stdio do CRT
 no inicio). Fase 3a ja entrega tudo que o startup do CRT le por gs (TEB/PEB).
+
+### Fase 3b — FEITA: um .exe com CRT REAL do Windows roda printf() no MeuOS
+
+Implementada (mesma leva). Pecas: **dll/win32/ucrtbase/ucrtbase.c** (NOVA) = CRT minimo
+(~35 exports cobrindo os apisets api-ms-win-crt-*): malloc/strlen/strncmp reais; argv/env
+accessors; `_initterm` no-op (seguro p/ hello C); exit/abort->ExitProcess; `__C_specific_handler`
+->ExceptionContinueSearch; e **printf REAL** — `__stdio_common_vfprintf` formata o va_list
+(x64: char* com slots de 8 bytes; %s %c %d %u %x %p %l/%ll + largura/zero-pad) e escreve via
+WriteFile->NtWriteFile->console. **loader.c** `ldr_resolve` redireciona `api-ms-win-crt-*.dll`
+-> `ucrtbase.dll` (igual aos apisets do Windows). **kernel32.c** +10 funcs do startup
+(CriticalSection no-op, TlsGetValue, VirtualProtect/Query, SetUnhandledExceptionFilter, Sleep,
+GetLastError). Alvo `apps/crthello.c` (printf).
+
+**Prova:** `zig cc -target x86_64-windows-gnu apps/crthello.c` (CRT real), rodado com
+`run.ps1 -Modules ntdll,kernel32,user32,ucrtbase,crthello`:
+```
+  [crthello] Ola de um .exe com CRT REAL (mingw) rodando no MeuOS!
+  [crthello] printf de verdade: 2+2=4, hex=0xff, str=MeuOS, char=!
+[ldr] o .exe (ring 3) terminou; de volta ao kernel.
+```
+TODOS os imports resolvidos (zero "nao resolvido"); startup do CRT chega em main(); printf
+formata certo; sai limpo. Apoiado na Fase 3a (TEB/PEB/gs) + relocacao. pintok C0000365 mantido.
+
+**FRENTE 3 entregue no basico: rodamos um EXECUTAVEL com o CRT REAL do Windows.** Proximos
+passos possiveis (nao criticos): stdio real de FILE (fopen/fread p/ arquivos), mais superficie
+kernel32 conforme apps maiores pedirem, e — p/ binarios MSVC/System32 — resolucao de
+forwarders/apiset generico + ucrtbase clássico. beep.sys (Frente 2 esticada) segue deferido.

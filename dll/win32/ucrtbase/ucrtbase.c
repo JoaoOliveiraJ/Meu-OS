@@ -117,8 +117,9 @@ __declspec(dllexport) int __C_specific_handler(void* rec, void* frame, void* ctx
 //  WriteFile (kernel32). Assim um printf() de um .exe com CRT real IMPRIME.
 //  va_list no x64 do Windows = char* p/ os varargs (cada slot = 8 bytes).
 // ---------------------------------------------------------------------------
-typedef struct { int fd; } UCRT_FILE;   // FILE* falso: guarda o fd (1=out, 2=err)
-static UCRT_FILE g_iob[3] = { {0}, {1}, {2} };
+// FILE* falso: console (fd 0/1/2, handle=0) OU arquivo (fd=-1 + handle do CreateFileA).
+typedef struct { int fd; void* handle; int err; int eof; } UCRT_FILE;
+static UCRT_FILE g_iob[3] = { {0,0,0,0}, {1,0,0,0}, {2,0,0,0} };
 __declspec(dllexport) void* __acrt_iob_func(unsigned i) {
     return (i < 3) ? (void*)&g_iob[i] : (void*)&g_iob[1];
 }
@@ -193,7 +194,14 @@ __declspec(dllexport) int __stdio_common_vfwprintf(unsigned long long opt, void*
     (void)opt; (void)stream; (void)fmt; (void)loc; (void)valist; return 0;
 }
 __declspec(dllexport) size_t_ fwrite(const void* p, size_t_ sz, size_t_ n, void* stream) {
-    ucrt_write(stream ? ((UCRT_FILE*)stream)->fd : 1, (const char*)p, (int)(sz * n));
+    UCRT_FILE* f = (UCRT_FILE*)stream;
+    size_t_ total = sz * n;
+    if (f && f->fd < 0) {                    // arquivo: WriteFile no handle
+        unsigned wrote = 0;
+        WriteFile(f->handle, p, (unsigned)total, &wrote, 0);
+        return sz ? (size_t_)(wrote / sz) : 0;
+    }
+    ucrt_write(f ? f->fd : 1, (const char*)p, (int)total);   // console
     return n;
 }
 
@@ -227,17 +235,25 @@ static void ucrt_sungetc(int c) { s_unget = c; }
 static int  ucrt_is_ws(int c)   { return c==' '||c=='\t'||c=='\n'||c=='\r'||c=='\f'||c=='\v'; }
 
 __declspec(dllexport) int getchar(void)           { return ucrt_sgetc(); }
-__declspec(dllexport) int fgetc(void* stream)     { (void)stream; return ucrt_sgetc(); }
-__declspec(dllexport) int _fgetc_nolock(void* s)  { (void)s; return ucrt_sgetc(); }
-__declspec(dllexport) int getc(void* stream)      { (void)stream; return ucrt_sgetc(); }
+__declspec(dllexport) int fgetc(void* stream) {
+    UCRT_FILE* f = (UCRT_FILE*)stream;
+    if (f && f->fd < 0) {                          // arquivo: 1 byte via ReadFile (EOF se 0)
+        unsigned char c; unsigned got = 0;
+        ReadFile(f->handle, &c, 1, &got, 0);
+        if (!got) { f->eof = 1; return -1; }
+        return (int)c;
+    }
+    return ucrt_sgetc();                            // console/stdin (bloqueante)
+}
+__declspec(dllexport) int _fgetc_nolock(void* s)  { return fgetc(s); }
+__declspec(dllexport) int getc(void* stream)      { return fgetc(stream); }
 __declspec(dllexport) int ungetc(int c, void* st) { (void)st; ucrt_sungetc(c); return c; }
 
 __declspec(dllexport) char* fgets(char* s, int n, void* stream) {
-    (void)stream;
     if (!s || n <= 0) return 0;
     int i = 0;
     while (i < n - 1) {
-        int c = ucrt_sgetc();
+        int c = fgetc(stream);
         if (c < 0) { if (i == 0) return 0; break; }
         s[i++] = (char)c;
         if (c == '\n') break;
@@ -247,15 +263,18 @@ __declspec(dllexport) char* fgets(char* s, int n, void* stream) {
 }
 
 __declspec(dllexport) size_t_ fread(void* ptr, size_t_ sz, size_t_ n, void* stream) {
-    (void)stream;
-    size_t_ total = sz * n, i;
-    unsigned char* p = (unsigned char*)ptr;
-    for (i = 0; i < total; i++) {
-        int c = ucrt_sgetc();
-        if (c < 0) break;
-        p[i] = (unsigned char)c;
+    UCRT_FILE* f = (UCRT_FILE*)stream;
+    size_t_ total = sz * n;
+    if (f && f->fd < 0) {                           // arquivo: ReadFile de uma vez
+        unsigned got = 0;
+        ReadFile(f->handle, ptr, (unsigned)total, &got, 0);
+        if (!got) f->eof = 1;
+        return sz ? (size_t_)(got / sz) : 0;
     }
-    return sz ? (i / sz) : 0;
+    unsigned char* p = (unsigned char*)ptr;         // console/stdin (char a char, bloqueante)
+    size_t_ i;
+    for (i = 0; i < total; i++) { int c = ucrt_sgetc(); if (c < 0) break; p[i] = (unsigned char)c; }
+    return sz ? (size_t_)(i / sz) : 0;
 }
 
 // scanf REAL (subset): %d %i %u %x/%X %c %s, com '*' (suprime), largura e 'l'/'h'.
@@ -340,6 +359,45 @@ __declspec(dllexport) int __stdio_common_vfscanf(unsigned long long opt, void* s
     }
     return assigned;
 }
+
+// ---------------------------------------------------------------------------
+//  stdio — ARQUIVOS. fopen abre via CreateFileA -> NtCreateFile -> volume NTFS
+//  (\Device\Harddisk0\Partition1). v1: abre EXISTENTE (o sys_createfile ainda nao
+//  cria arquivo novo); "w"/"wb" sobrescreve a partir do offset 0 (ntfs_write_file).
+//  Sem seek real (nao ha syscall de seek): fseek/ftell sao stubs; p/ reler, reabra
+//  (reabrir cria um FILE_OBJECT novo com offset 0).
+// ---------------------------------------------------------------------------
+__declspec(dllimport) void* CreateFileA(const char* name, unsigned access, unsigned share,
+                                        void* sec, unsigned disp, unsigned flags, void* templ);
+__declspec(dllimport) int   CloseHandle(void* h);
+
+__declspec(dllexport) void* fopen(const char* path, const char* mode) {
+    if (!path || !mode) return 0;
+    int write = (mode[0] == 'w' || mode[0] == 'a' || mode[1] == '+');
+    unsigned access = write ? 0x40000000u : 0x80000000u;    // GENERIC_WRITE : GENERIC_READ
+    unsigned disp   = (mode[0] == 'w') ? 2u : 3u;           // CREATE_ALWAYS : OPEN_EXISTING
+    void* h = CreateFileA(path, access, 3u, 0, disp, 0, 0);  // share RW
+    if (!h || h == (void*)(unsigned long long)-1) return 0;
+    UCRT_FILE* f = (UCRT_FILE*)malloc(sizeof(UCRT_FILE));
+    if (!f) { CloseHandle(h); return 0; }
+    f->fd = -1; f->handle = h; f->err = 0; f->eof = 0;
+    return f;
+}
+__declspec(dllexport) void* _wfopen(const wchar16* path, const wchar16* mode) {
+    (void)path; (void)mode; return 0;   // wide nao suportado por ora
+}
+__declspec(dllexport) int fclose(void* stream) {
+    UCRT_FILE* f = (UCRT_FILE*)stream;
+    if (f && f->fd < 0 && f->handle) { CloseHandle(f->handle); f->handle = 0; }
+    return 0;   // bump allocator: nao libera o proprio FILE
+}
+__declspec(dllexport) int feof(void* stream)   { UCRT_FILE* f = (UCRT_FILE*)stream; return f ? f->eof : 0; }
+__declspec(dllexport) int ferror(void* stream) { UCRT_FILE* f = (UCRT_FILE*)stream; return f ? f->err : 0; }
+__declspec(dllexport) int fflush(void* stream) { (void)stream; return 0; }
+__declspec(dllexport) int fseek(void* stream, long off, int whence) {
+    (void)stream; (void)off; (void)whence; return 0;   // sem seek real (v1)
+}
+__declspec(dllexport) long ftell(void* stream) { (void)stream; return 0; }
 
 // ---------------------------------------------------------------------------
 //  time — nao usadas pelo alvo; existem p/ resolver os imports. Exportadas como

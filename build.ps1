@@ -157,6 +157,17 @@ if (Test-Path $echoin) {
     if ($LASTEXITCODE) { throw "Compilacao do echoin.c falhou." }
 }
 
+# FRENTE 3 (Fase 3d) — filecat.exe: um .exe com CRT REAL que le/escreve ARQUIVOS reais
+# no NTFS via fopen/fread/fwrite/fclose. A ucrtbase.dll ganhou a camada FILE (abre via
+# CreateFileA -> NtCreateFile -> volume NTFS). Exige disco. Roda com:
+#   run.ps1 -Disk -Modules build\ntdll.dll,build\kernel32.dll,build\user32.dll,build\ucrtbase.dll,build\filecat.exe
+$filecat = Join-Path $ex 'filecat.c'
+if (Test-Path $filecat) {
+    Write-Host "[exemplo] apps\filecat.c -> build\filecat.exe (.exe com CRT REAL: fopen/fread/fwrite NTFS)"
+    & $zig cc -target x86_64-windows-gnu -o (Join-Path $out 'filecat.exe') $filecat
+    if ($LASTEXITCODE) { throw "Compilacao do filecat.c falhou." }
+}
+
 # FASE 3 — DEMO Named Pipes (IPC): servidor cria \Pipe\Nome e escreve; cliente
 # abre pelo nome e le os mesmos bytes. Importam kernel32 + user32 (GetStdHandle).
 # ImageBases livres e fora do heap (0x2000000..0x3000000) e da regiao do PMM

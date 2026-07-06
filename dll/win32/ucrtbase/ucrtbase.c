@@ -198,6 +198,150 @@ __declspec(dllexport) size_t_ fwrite(const void* p, size_t_ sz, size_t_ n, void*
 }
 
 // ---------------------------------------------------------------------------
+//  stdio — ENTRADA (getchar/fgetc/fgets/fread/scanf). Espelha a saida: le do
+//  console (stdin) via ReadFile (kernel32) -> NtReadFile -> fila do teclado (IRQ1).
+//  A leitura de console do kernel NAO bloqueia (devolve 0 se nada foi digitado — p/
+//  o cmd.exe poder desistir sozinho em headless). Entao o BLOQUEIO de getchar/scanf
+//  e' feito AQUI, em ring 3: giramos chamando ReadFile ate chegar >=1 caractere (a
+//  IRQ1 do teclado enfileira em paralelo enquanto giramos; interrupcoes ficam ligadas
+//  em ring 3). Assim getchar()/scanf() ESPERAM a digitacao (como no Windows) SEM
+//  alterar o kernel — o cmd.exe segue com a leitura nao-bloqueante de antes.
+// ---------------------------------------------------------------------------
+__declspec(dllimport) int ReadFile(void* h, void* buf, unsigned len, unsigned* read, void* ov);
+
+// le 1 byte do stdin, BLOQUEANTE (gira ate uma tecla chegar). Ring 3 nao pode 'hlt'.
+static int ucrt_getc_raw(void) {
+    void* h = GetStdHandle((unsigned)-10);   // STD_INPUT_HANDLE
+    for (;;) {
+        unsigned char c; unsigned got = 0;
+        ReadFile(h, &c, 1, &got, 0);
+        if (got) return (int)c;
+    }
+}
+
+// pushback de 1 caractere (scanf precisa "espiar" o proximo p/ saber onde o campo
+// termina). Fila unica global (stdin e' single-stream; sem escalonador de usuario).
+static int  s_unget = -1;
+static int  ucrt_sgetc(void)    { if (s_unget >= 0) { int c = s_unget; s_unget = -1; return c; } return ucrt_getc_raw(); }
+static void ucrt_sungetc(int c) { s_unget = c; }
+static int  ucrt_is_ws(int c)   { return c==' '||c=='\t'||c=='\n'||c=='\r'||c=='\f'||c=='\v'; }
+
+__declspec(dllexport) int getchar(void)           { return ucrt_sgetc(); }
+__declspec(dllexport) int fgetc(void* stream)     { (void)stream; return ucrt_sgetc(); }
+__declspec(dllexport) int _fgetc_nolock(void* s)  { (void)s; return ucrt_sgetc(); }
+__declspec(dllexport) int getc(void* stream)      { (void)stream; return ucrt_sgetc(); }
+__declspec(dllexport) int ungetc(int c, void* st) { (void)st; ucrt_sungetc(c); return c; }
+
+__declspec(dllexport) char* fgets(char* s, int n, void* stream) {
+    (void)stream;
+    if (!s || n <= 0) return 0;
+    int i = 0;
+    while (i < n - 1) {
+        int c = ucrt_sgetc();
+        if (c < 0) { if (i == 0) return 0; break; }
+        s[i++] = (char)c;
+        if (c == '\n') break;
+    }
+    s[i] = 0;
+    return s;
+}
+
+__declspec(dllexport) size_t_ fread(void* ptr, size_t_ sz, size_t_ n, void* stream) {
+    (void)stream;
+    size_t_ total = sz * n, i;
+    unsigned char* p = (unsigned char*)ptr;
+    for (i = 0; i < total; i++) {
+        int c = ucrt_sgetc();
+        if (c < 0) break;
+        p[i] = (unsigned char)c;
+    }
+    return sz ? (i / sz) : 0;
+}
+
+// scanf REAL (subset): %d %i %u %x/%X %c %s, com '*' (suprime), largura e 'l'/'h'.
+// mingw encaminha scanf() -> __stdio_common_vfscanf (igual printf -> __stdio_common_vfprintf).
+// va_list no x64 do Windows = char* p/ os varargs; cada arg de scanf e' um PONTEIRO (8 bytes).
+__declspec(dllexport) int __stdio_common_vfscanf(unsigned long long opt, void* stream,
+        const char* fmt, void* loc, void* valist) {
+    (void)opt; (void)stream; (void)loc;
+    char* ap = (char*)valist;
+    int assigned = 0;
+    for (const char* p = fmt; *p; p++) {
+        if (ucrt_is_ws(*p)) {                     // ws no fmt casa com zero+ ws na entrada
+            int c; do { c = ucrt_sgetc(); } while (ucrt_is_ws(c));
+            ucrt_sungetc(c);
+            continue;
+        }
+        if (*p != '%') {                          // caractere literal: precisa casar
+            int c = ucrt_sgetc();
+            if (c != (unsigned char)*p) { ucrt_sungetc(c); return assigned; }
+            continue;
+        }
+        p++;
+        int width = 0, lng = 0, suppress = 0;
+        if (*p == '*') { suppress = 1; p++; }
+        while (*p >= '0' && *p <= '9') { width = width * 10 + (*p - '0'); p++; }
+        while (*p == 'l' || *p == 'h') { if (*p == 'l') lng++; p++; }
+        char conv = *p;
+        if (conv == 'c') {
+            int c = ucrt_sgetc();
+            if (c < 0) return assigned;
+            if (!suppress) { *(char*)(*(void**)ap) = (char)c; ap += 8; assigned++; }
+            continue;
+        }
+        if (conv == 's') {
+            int c; do { c = ucrt_sgetc(); } while (ucrt_is_ws(c));   // pula ws inicial
+            char* dst = suppress ? 0 : (char*)(*(void**)ap);
+            if (!suppress) ap += 8;
+            int k = 0;
+            while (c >= 0 && !ucrt_is_ws(c) && (width == 0 || k < width)) {
+                if (dst) dst[k] = (char)c;
+                k++; c = ucrt_sgetc();
+            }
+            ucrt_sungetc(c);
+            if (dst) dst[k] = 0;
+            if (!suppress && k > 0) assigned++;
+            continue;
+        }
+        if (conv == 'd' || conv == 'i' || conv == 'u' || conv == 'x' || conv == 'X') {
+            int c; do { c = ucrt_sgetc(); } while (ucrt_is_ws(c));   // pula ws inicial
+            int neg = 0;
+            if (c == '+' || c == '-') { neg = (c == '-'); c = ucrt_sgetc(); }
+            int base = (conv == 'x' || conv == 'X') ? 16 : 10;
+            unsigned long long val = 0; int got = 0;
+            for (;;) {
+                int d = -1;
+                if (c >= '0' && c <= '9') d = c - '0';
+                else if (base == 16 && c >= 'a' && c <= 'f') d = c - 'a' + 10;
+                else if (base == 16 && c >= 'A' && c <= 'F') d = c - 'A' + 10;
+                if (d < 0 || d >= base) break;
+                val = val * (unsigned)base + (unsigned)d; got = 1; c = ucrt_sgetc();
+            }
+            ucrt_sungetc(c);
+            if (!got) return assigned;             // nenhum digito casou
+            if (!suppress) {
+                void* dst = *(void**)ap; ap += 8;
+                if (conv == 'd' || conv == 'i') {
+                    long long sv = neg ? -(long long)val : (long long)val;
+                    if (lng) *(long long*)dst = sv; else *(int*)dst = (int)sv;
+                } else {
+                    if (lng) *(unsigned long long*)dst = val; else *(unsigned*)dst = (unsigned)val;
+                }
+                assigned++;
+            }
+            continue;
+        }
+        if (conv == '%') {
+            int c = ucrt_sgetc();
+            if (c != '%') { ucrt_sungetc(c); return assigned; }
+            continue;
+        }
+        return assigned;   // conversao desconhecida: para
+    }
+    return assigned;
+}
+
+// ---------------------------------------------------------------------------
 //  time — nao usadas pelo alvo; existem p/ resolver os imports. Exportadas como
 //  funcoes que devolvem ponteiros p/ estaticos (o startup so referencia).
 // ---------------------------------------------------------------------------

@@ -249,3 +249,37 @@ formata certo; sai limpo. Apoiado na Fase 3a (TEB/PEB/gs) + relocacao. pintok C0
 passos possiveis (nao criticos): stdio real de FILE (fopen/fread p/ arquivos), mais superficie
 kernel32 conforme apps maiores pedirem, e — p/ binarios MSVC/System32 — resolucao de
 forwarders/apiset generico + ucrtbase clássico. beep.sys (Frente 2 esticada) segue deferido.
+
+---
+
+## MARCO 4 — Frente 3 Fase 3c: ENTRADA de teclado no CRT (scanf/getchar) FEITA
+
+Depois de printf (saida, Fase 3b), agora um .exe com CRT REAL LE do teclado via `scanf()`
+DE VERDADE. Caminho da ENTRADA: `main -> scanf -> __stdio_common_vfscanf (ucrtbase) ->
+ReadFile (kernel32) -> NtReadFile -> fila de stdin do teclado (IRQ1, keyboard.c)`.
+
+Pecas (todas ring-3 / harness — NENHUMA mudanca no kernel):
+- **dll/win32/ucrtbase/ucrtbase.c**: +entrada — `getchar/fgetc/_fgetc_nolock/getc/ungetc/fgets/
+  fread` e o **`__stdio_common_vfscanf` real** (subset `%d %i %u %x/%X %c %s`, com `*`, largura,
+  `l`/`h`), espelhando o formatador de saida `ucrt_vfmt`. Pushback de 1 char p/ o scanf "espiar".
+- **BLOQUEIO em ring 3 (nao no kernel):** o `sys_readfile` do console segue NAO-bloqueante de
+  proposito — o `cmd.exe` depende disso (ele desiste apos ~2M tentativas ociosas em headless; se
+  o kernel bloqueasse, o boot padrao travaria). Entao o "esperar digitar" e' feito na ucrtbase:
+  `ucrt_getc_raw` gira chamando ReadFile ate a tecla chegar (IRQ1 enfileira em paralelo). Assim
+  getchar/scanf ESPERAM a entrada como no Windows, SEM tocar no kernel.
+- **apps/echoin.c** (NOVO): `scanf("%d %s", &n, palavra)`.
+- **run.ps1** `-SendKeys "..."` (NOVO): injeta teclas via QMP `send-key` apos o boot — prova de
+  entrada de teclado SEM display (mesmo caminho do PS/2 real -> IRQ1). Aditivo: so ativa com o
+  switch; o baseline do pintok (que nao usa) fica intacto.
+
+**Prova:** `run.ps1 -Modules ntdll,kernel32,user32,ucrtbase,echoin -Headless -TimeoutSec 25
+-SendKeys "4 2 spc m e u o s ret"`:
+```
+  [echoin] digite: <numero> <palavra> e Enter
+  [echoin] scanf casou 2 campos
+  [echoin] numero=42 (dobro=84), palavra=meuos
+[ldr] o .exe (ring 3) terminou; de volta ao kernel.
+```
+scanf casou os 2 campos (42 e "meuos"); zero "import nao resolvido"; saida limpa. Regressao do
+pintok conferida: [P1]/[P2]/[P3] PROVA PASSOU, CPUID x3 -> i7-9700K, syslog `10 ; 0 ; 26100.`,
+`DriverEntry retornou status=0x00000000C0000365`, SEM "Sistema parado". Baseline MANTIDO.

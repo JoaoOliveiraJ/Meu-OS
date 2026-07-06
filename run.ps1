@@ -15,6 +15,9 @@ param(
     [string[]]$Modules,
     [switch]$Screendump,
     [int]$QmpPort = 4444,
+    # FASE 3c — injeta teclas via QMP 'send-key' apos o boot (prova de entrada de
+    # teclado headless). Lista de qcodes separados por espaco: ex. "4 2 spc m e u o s ret".
+    [string]$SendKeys,
     # FASE 14 — usa o display GTK com OpenGL (-display gtk,gl=on). O caminho de
     # compose GL do QEMU desenha o cursor de HW do virtio-gpu como um OVERLAY de
     # textura, contornando o limite/nao-render do "window cursor" do GTK 2D no
@@ -141,7 +144,7 @@ elseif ($Gl)   { $qargs += @('-display', 'gtk,gl=on') }   # cursor de HW via ove
 # capturar o framebuffer em build\screen.ppm (prova visual). Exige -Headless +
 # -TimeoutSec; o screendump roda em paralelo, aguarda alguns segundos de boot
 # antes do snapshot. NAO toca no caminho normal sem o switch.
-if ($Screendump) {
+if ($Screendump -or $SendKeys) {
     $qargs += @('-qmp', "tcp:127.0.0.1:$QmpPort,server,nowait")
 }
 
@@ -194,6 +197,34 @@ if ($TimeoutSec -gt 0) {
             Write-Host "--- screendump falhou: $($_.Exception.Message) ---"
         }
         Start-Sleep -Seconds ([Math]::Max(1, $TimeoutSec - $snapAt))
+    } elseif ($SendKeys) {
+        # FASE 3c: injeta teclas via QMP 'send-key' depois do boot subir — prova de
+        # entrada de teclado SEM display (mesmo caminho do PS/2 real -> IRQ1 -> fila
+        # de stdin). NAO toca no caminho sem o switch (pintok/baseline intactos).
+        $sendAt = [int]([Math]::Max(2, [Math]::Min(5, $TimeoutSec - 3)))
+        Start-Sleep -Seconds $sendAt
+        try {
+            $client = New-Object System.Net.Sockets.TcpClient
+            $client.Connect('127.0.0.1', $QmpPort)
+            $stream = $client.GetStream()
+            $reader = New-Object System.IO.StreamReader($stream)
+            $writer = New-Object System.IO.StreamWriter($stream)
+            $writer.NewLine = "`r`n"; $writer.AutoFlush = $true
+            [void]$reader.ReadLine()    # greeting QMP
+            $writer.WriteLine('{"execute":"qmp_capabilities"}')
+            [void]$reader.ReadLine()
+            foreach ($k in ($SendKeys -split '\s+' | Where-Object { $_ })) {
+                $cmd = '{"execute":"send-key","arguments":{"keys":[{"type":"qcode","data":"' + $k + '"}]}}'
+                $writer.WriteLine($cmd)
+                [void]$reader.ReadLine()
+                Start-Sleep -Milliseconds 120
+            }
+            $client.Close()
+            Write-Host "--- send-key: $SendKeys ---"
+        } catch {
+            Write-Host "--- send-key falhou: $($_.Exception.Message) ---"
+        }
+        Start-Sleep -Seconds ([Math]::Max(1, $TimeoutSec - $sendAt))
     } else {
         Start-Sleep -Seconds $TimeoutSec
     }

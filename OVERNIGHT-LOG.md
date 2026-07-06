@@ -118,3 +118,57 @@ Fundação + trilha I/O concluídas (IRP/DEVICE_OBJECT layout NT, device stacks,
 **Segurança do pintok:** o pintok retorna `C0000365` (≠ SUCCESS), então **nunca entra** nesse ramo → intocado. Regressão re-verificada: `[P1]/[P2]/[P3] ==== PROVA PASSOU ====`, `chamando DriverEntry`, `DriverEntry retornou status=0xC0000365`, **sem `Sistema parado`**. Idêntico ao baseline dourado.
 
 Logs: `$JOB/tmp/serial_null.log` (null.sys) e `$JOB/tmp/serial_pintok.log` (regressão).
+
+---
+
+## MARCO 2: IofCompleteRequest REAL (conclusão de IRP genuína) — Frente 1 completa
+
+Sessão seguinte (branch `feat/kernel-foundation-irql-dpc`, 7 commits, todos pushed). Alvo:
+robustez p/ drivers reais mais pesados. Descoberta-chave: o `null.sys` só funcionou porque
+seta `IoStatus` na mão; a rotina que drivers WDK reais usam p/ concluir I/O
+(**`IofCompleteRequest`**, p/ onde o macro `IoCompleteRequest()` do `wdm.h` expande) era um
+**no-op** (`generic_zero_stub`). Reforma, em incrementos pequenos com regressão do pintok a cada:
+
+- **INC 1** (`ntddk.h`): constantes `SL_INVOKE_ON_SUCCESS/ERROR/CANCEL`, `SL_PENDING_RETURNED`,
+  `STATUS_MORE_PROCESSING_REQUIRED`; `PIO_COMPLETION_ROUTINE` passa de `void` p/ `NTSTATUS`.
+- **INC 2** (`ntddk.h`): `IO_STACK_LOCATION` de 0x40 → **0x48 real** (união `Parameters` ganha
+  `Others{Argument1..4}`), com `_Static_assert` de offsets (`CompletionRoutine@0x38`). Agora um
+  driver de filtro WDK real interopera com o nosso completador.
+- **INC 3** (`io.c`): `IoCompleteRequest_k` reescrito como **walk real** (igual ao
+  `IopfCompleteRequest` do NT): percorre a pilha de baixo p/ cima, chama a rotina de conclusão
+  de cada nível conforme `Control` × resultado, honra `STATUS_MORE_PROCESSING_REQUIRED`
+  (interrompe/retoma), escreve `UserIosb`, sinaliza `UserEvent`. `IoSetCompletionRoutine_k`
+  passa a gravar na **próxima** localização + `Control`. **Ungated** (pintok não importa
+  nenhuma dessas APIs — verificado no import table dele).
+- **INC 4** (`io.c`+`main.c`): `KiCompletionSelfTest` — pilha real de 2 drivers (filtro+função)
+  prova rotina no nível certo + `SL_INVOKE_ON_*` + `MORE_PROCESSING_REQUIRED` + write-back.
+  `[cmpl-test] ... OK` no boot.
+- **INC 5** (`io.c`): `IoBuild{DeviceIoControl,AsynchronousFsd}Request_k` guardam
+  `UserIosb`/`UserEvent` (era cópia p/ dentro do IRP) → write-back real p/ IOCTL síncrono.
+- **INC 6** (`ntoskrnl.c`): exporta `IofCompleteRequest`/`IofCallDriver` (append-only). Checagem
+  crítica: mesmo a export image sintética do pintok resolvendo `IofCompleteRequest` p/ código
+  real, o baseline se manteve **C0000365**.
+- **INC 7** (`ntoskrnl.c`): `MmPageEntireDriver` (no-op seguro). **`null.sys` roda SOZINHO** e
+  resolve TODOS os imports (nada mais no `generic_zero_stub`): `DriverEntry`→SUCCESS,
+  `WRITE 8→info=8`, `READ 8→0xC0000011` — agora pela **via REAL do `IofCompleteRequest`**.
+
+Baseline pintok re-verificado após CADA incremento: `P1/P2/P3 PROVA PASSOU`, `C0000365`, sem
+`Sistema parado`.
+
+### beep.sys — diagnóstico (Frente 2 esticada, DEFERIDA)
+
+Copiei `C:\Windows\System32\drivers\beep.sys` (10 KB) p/ `build\` e carreguei sozinho. Este
+`beep.sys` do Win10 **não** é o "beep simples": usa o modelo **StartIo + KDEVICE_QUEUE +
+cancel-safe-queue (Csq) + cancel-spinlock** (imports: `IoCsqInitialize/InsertIrp/RemoveNextIrp`,
+`IoStartPacket/StartNextPacket`, `KeRemove(Entry)DeviceQueue`, `IoAcquire/ReleaseCancelSpinLock`,
+`MmLockPagableDataSection`, `IoGetRequestorSessionId`, `IoSetStartIoAttributes`). Com essas
+APIs ainda como stub, o `DriverEntry` do beep **page-faulta cedo** através de ponteiros
+selvagens (cr2=0x2B99…, 0x875F…) e cascateia p/ opcode inválido → `Sistema parado`. Ou seja,
+habilitar o beep é um **subsistema real** (com dimensão de layout de struct do IO_CSQ, estilo
+o trabalho do pintok), não só "adicionar 13 APIs".
+
+**Decisão:** Frente 1 (máquina de conclusão) + Frente 2 núcleo (null.sys pela via real) estão
+**completas e provadas**. O beep é esticada opcional (o plano já previa null.sys como suficiente
+p/ a Frente 2). Piv­ot p/ **Frente 3 (rodar .exe REAL do Windows)** — a outra metade do objetivo,
+intocada. beep.sys fica documentado aqui p/ retomar depois (começar por safe-stubs que devolvem
+valores sensatos: `MmLockPagableDataSection`→devolve o arg, etc., e o IO_CSQ real).

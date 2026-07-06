@@ -283,3 +283,45 @@ Pecas (todas ring-3 / harness — NENHUMA mudanca no kernel):
 scanf casou os 2 campos (42 e "meuos"); zero "import nao resolvido"; saida limpa. Regressao do
 pintok conferida: [P1]/[P2]/[P3] PROVA PASSOU, CPUID x3 -> i7-9700K, syslog `10 ; 0 ; 26100.`,
 `DriverEntry retornou status=0x00000000C0000365`, SEM "Sistema parado". Baseline MANTIDO.
+
+---
+
+## MARCO 5 — Frente 3 Fase 3d: ARQUIVOS reais no NTFS via CRT (fopen/fread/fwrite) FEITA
+
+Um .exe com CRT REAL agora le e escreve ARQUIVOS REAIS no disco NTFS via fopen/fread/fwrite/
+fclose. Caminho: `fopen -> CreateFileA -> NtCreateFile -> volume NTFS (\Device\Harddisk0\
+Partition1)`; `fread -> ReadFile -> IRP_MJ_READ -> ntfs_read_file`; `fwrite -> WriteFile ->
+IRP_MJ_WRITE -> ntfs_write_file`.
+
+**Diagnostico:** quase tudo ja existia — o kernel ja tinha um teste completo de NTFS no boot
+(main.c FASE 2/3/4: IDENTIFY, mount, leitura de \hello.txt, ESCRITA que cresce o arquivo) e a
+via usuario->IRP (sys_createfile/read/write) ja resolvia C:\... no volume. **O unico elo
+faltando era o `-Disk` no run.ps1** (o hal/disk.c ja pedia "Rode com -Disk"; make-ntfs-disk.ps1
+ja gera build\disk.img). Logo o INC 2 nao precisou de NENHUMA mudanca no kernel.
+
+Pecas (ring-3 / harness):
+- **run.ps1** `-Disk` (NOVO): anexa build\disk.img como IDE primario master
+  (`-drive file=disk.img,format=raw,if=ide,index=0,media=disk`) — o canal 0x1F0 que o hal/disk.c
+  le por ATA PIO. Gated: sem o switch, nada muda (baseline do pintok intacto).
+- **dll/win32/ucrtbase/ucrtbase.c**: modelo FILE estendido (console fd 0/1/2 OU arquivo fd=-1 +
+  HANDLE do CreateFileA); `fopen/fclose/feof/ferror/fflush`; `fread/fwrite/fgetc/fgets` ramificam
+  arquivo (ReadFile/WriteFile no handle) vs console. `fseek/ftell` stub (sem syscall de seek; p/
+  reler, reabrir). v1: abre EXISTENTE ("w"/"wb" sobrescreve do offset 0); criar arquivo novo (MFT)
+  fica deferido.
+- **apps/filecat.c** (NOVO): le C:\hello.txt e faz round-trip de escrita em C:\dir1\file.txt.
+
+**Prova:** `make-ntfs-disk.ps1` gera o disco; `run.ps1 -Disk -Modules ntdll,kernel32,user32,
+ucrtbase,filecat -Headless`:
+```
+  [filecat] li 159 bytes de C:\hello.txt:
+    "MeuOS FASE 4: arquivo NTFS reescrito E AUMENTADO no lugar, resident grow dentro do ..."
+  [filecat] escrevi 19 B "MEUOS-FILEIO-OK-123"; reli 19 B "MEUOS-FILEIO-OK-123"
+```
+(O conteudo lido de hello.txt e' a mensagem do teste de ESCRITA do boot — o proprio boot cresce o
+arquivo p/ 191 bytes ANTES do filecat; o fread devolve min(pedido,disponivel)=159, correto.) O
+round-trip em dir1\file.txt (grava 19 B, reabre, rele 19 B identicos via IRP_MJ_WRITE/READ) prova
+a ida-e-volta. Zero "import nao resolvido"; saida limpa. Regressao pintok OK (C0000365 mantido,
+CPUID x3 -> i7-9700K, `10 ; 0 ; 26100.`, SEM "Sistema parado").
+
+**Nota (fixtures):** disk.img e' artefato de build (gitignored); gere com `apps/make-ntfs-disk.ps1`
+(modo sintetico Python sem admin, ou real com admin+Hyper-V) antes de `run.ps1 -Disk`.

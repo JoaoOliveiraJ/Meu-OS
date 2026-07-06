@@ -18,6 +18,9 @@ param(
     # FASE 3c — injeta teclas via QMP 'send-key' apos o boot (prova de entrada de
     # teclado headless). Lista de qcodes separados por espaco: ex. "4 2 spc m e u o s ret".
     [string]$SendKeys,
+    # FASE 2 — anexa build\disk.img como disco IDE (canal primario master, 0x1F0)
+    # p/ o hal/disk.c detectar via ATA PIO e o NTFS montar. Gere com make-ntfs-disk.ps1.
+    [switch]$Disk,
     # FASE 14 — usa o display GTK com OpenGL (-display gtk,gl=on). O caminho de
     # compose GL do QEMU desenha o cursor de HW do virtio-gpu como um OVERLAY de
     # textura, contornando o limite/nao-render do "window cursor" do GTK 2D no
@@ -140,6 +143,16 @@ $qargs = @('-kernel', 'kernel.bin', '-m', '256', '-no-reboot', '-serial', 'stdio
 if ($initrd)   { $qargs += @('-initrd', $initrd) }
 if ($Headless) { $qargs += @('-display', 'none') }
 elseif ($Gl)   { $qargs += @('-display', 'gtk,gl=on') }   # cursor de HW via overlay GL
+# FASE 2 (disco): anexa build\disk.img como IDE primario master (if=ide,index=0),
+# exatamente o canal 0x1F0 que o hal/disk.c le por ATA PIO. cwd=build\ no run, entao
+# usamos o nome relativo 'disk.img' (sem espacos). Sem o switch, nada muda (o boot
+# roda sem disco e o teste de NTFS e' pulado — baseline do pintok intacto).
+if ($Disk) {
+    if (-not (Test-Path (Join-Path $build 'disk.img'))) {
+        throw "build\disk.img nao encontrado. Gere com: .\apps\make-ntfs-disk.ps1"
+    }
+    $qargs += @('-drive', 'file=disk.img,format=raw,if=ide,index=0,media=disk')
+}
 # FASE GPU: -Screendump abre QMP via TCP e, apos o boot, manda 'screendump' p/
 # capturar o framebuffer em build\screen.ppm (prova visual). Exige -Headless +
 # -TimeoutSec; o screendump roda em paralelo, aguarda alguns segundos de boot

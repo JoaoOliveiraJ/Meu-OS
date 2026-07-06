@@ -79,6 +79,12 @@ __declspec(dllexport) wchar16*** __p__wenviron(void) { return &g_wenv_p; }
 __declspec(dllexport) int*        __p__commode(void) { return &g_commode; }
 __declspec(dllexport) int*        __p__fmode(void)   { return &g_fmode; }
 
+// __p__acmdln: ponteiro p/ a string bruta da linha de comando (o startup GUI do CRT,
+// WinMainCRTStartup, usa p/ montar lpCmdLine). _ismbblead: sem MBCS, nunca e' lead-byte.
+static char* g_acmdln = (char*)"";
+__declspec(dllexport) char** __p__acmdln(void)    { return &g_acmdln; }
+__declspec(dllexport) int    _ismbblead(unsigned c) { (void)c; return 0; }
+
 __declspec(dllexport) int  _configure_narrow_argv(int mode) { (void)mode; return 0; }
 __declspec(dllexport) int  _configure_wide_argv(int mode)   { (void)mode; return 0; }
 __declspec(dllexport) int  _initialize_narrow_environment(void) { return 0; }

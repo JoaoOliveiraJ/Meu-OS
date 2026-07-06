@@ -2,6 +2,7 @@
 #include "ldr/loader.h"
 #include "ldr/pe.h"
 #include "mm/paging.h"
+#include "mm/pmm.h"
 #include "ke/amd64/usermode.h"
 #include "ps/process.h"
 #include "win32/win32k.h"
@@ -191,10 +192,40 @@ void ldr_run(const char* path, const void* image) {
     if (!pe_parse(image, &pi)) { kputs("[ldr] PE invalido\n"); return; }
     if (!pi.is64) { ldr_run32(path, image, &pi); return; }   // caminho 32-bit
 
+    // 1 GiB e o limite da identidade (mesmo criterio do caminho de driver em
+    // driver.c:98-129). Um .exe REAL do Windows costuma ter ImageBase alto (ex.:
+    // 0x140000000 = 5 GiB, default do MinGW/MSVC) e/ou nao caber na faixa baixa;
+    // nesse caso carregamos numa base baixa via PMM e aplicamos o .reloc. Os apps
+    // de ImageBase baixo (todos os nossos, < 1 GiB) seguem EXATAMENTE no caminho
+    // original (pe_map no preferido) — sem qualquer mudanca de comportamento.
     void* entry = 0;
-    void* base = pe_map(image, &entry);
-    if (!base || !entry) { kputs("[ldr] falha ao mapear o .exe\n"); return; }
-    mm_map_user((uint64_t)(uintptr_t)base, 0x200000);
+    void* base  = 0;
+    if (pi.preferred >= 0x40000000ULL || pi.size_image > 0x800000u) {
+        if (!pe_has_relocs(image)) {
+            kputs("[ldr] .exe de ImageBase alto SEM .reloc — nao da p/ realocar (");
+            kput_hex(pi.preferred); kputs("); abortando\n");
+            return;
+        }
+        uint64_t pages = (pi.size_image + 4095u) / 4096u;
+        uint64_t alt   = pmm_alloc_contiguous(pages);
+        if (!alt || alt >= 0x40000000ULL) {
+            kputs("[ldr] sem RAM contigua p/ o .exe ("); kput_dec(pi.size_image); kputs(" bytes)\n");
+            return;
+        }
+        kputs("[ldr] .exe em base alternativa @"); kput_hex(alt);
+        kputs(" (ImageBase preferido "); kput_hex(pi.preferred); kputs(", .reloc sera aplicado)\n");
+        base = pe_map_at(image, alt, &entry);
+        if (!base || !entry) { kputs("[ldr] pe_map_at falhou\n"); return; }
+        uint64_t map_sz = (pi.size_image + 0x1FFFFFull) & ~0x1FFFFFull;
+        if (map_sz < 0x200000u) map_sz = 0x200000u;
+        mm_map_user(alt, map_sz);
+        uint32_t n = pe_relocate(base, pi.preferred);
+        kputs("[ldr] relocacoes (.reloc) aplicadas: "); kput_dec(n); kputc('\n');
+    } else {
+        base = pe_map(image, &entry);
+        if (!base || !entry) { kputs("[ldr] falha ao mapear o .exe\n"); return; }
+        mm_map_user((uint64_t)(uintptr_t)base, 0x200000);
+    }
 
     // Cria o EPROCESS para este .exe (objeto do Object Manager). Guarda o CR3
     // atual (espaco compartilhado por ora) e a base da imagem; a thread

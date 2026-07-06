@@ -193,6 +193,17 @@ if (Test-Path $loadlib) {
     if ($LASTEXITCODE) { throw "Compilacao do loadlib.c falhou." }
 }
 
+# FRENTE 3 (Fase 3g) — loaddisk.exe: carrega C:\testlib.dll a partir de um ARQUIVO no
+# disco NTFS (nao de modulo de boot). sys_loadlibrary le a DLL via ntfs_read_file (data
+# run nao-residente) e mapeia. Exige -Disk. Roda com:
+#   run.ps1 -Disk -Modules build\ntdll.dll,build\kernel32.dll,build\ucrtbase.dll,build\loaddisk.exe
+$loaddisk = Join-Path $ex 'loaddisk.c'
+if (Test-Path $loaddisk) {
+    Write-Host "[exemplo] apps\loaddisk.c -> build\loaddisk.exe (.exe CRT REAL: LoadLibrary do disco)"
+    & $zig cc -target x86_64-windows-gnu -o (Join-Path $out 'loaddisk.exe') $loaddisk -lkernel32
+    if ($LASTEXITCODE) { throw "Compilacao do loaddisk.c falhou." }
+}
+
 # FASE 3 — DEMO Named Pipes (IPC): servidor cria \Pipe\Nome e escreve; cliente
 # abre pelo nome e le os mesmos bytes. Importam kernel32 + user32 (GetStdHandle).
 # ImageBases livres e fora do heap (0x2000000..0x3000000) e da regiao do PMM

@@ -131,6 +131,32 @@ void* ldr_load(const char* name) {
     return base;
 }
 
+// FASE 3g — carrega uma imagem PE a partir de BYTES em memoria (ex.: uma DLL lida do
+// disco NTFS pelo sys_loadlibrary), registrando-a sob basename(name) e mapeando +
+// bindando IGUAL ao ldr_load faz p/ modulos de boot. Devolve a base (0 se falhar). Se
+// ja estava carregada sob esse nome, devolve a base existente.
+void* ldr_load_image(const char* name, const void* bytes) {
+    const char* bn = basename(name);
+    int i = find_mod(bn);
+    if (i >= 0 && s_mods[i].base) return s_mods[i].base;   // ja carregada
+    if (i < 0) {
+        ldr_register(bn, bytes);                            // registra os bytes sob o basename
+        i = find_mod(bn);
+        if (i < 0) return 0;                                // tabela de modulos cheia
+    } else {
+        s_mods[i].bytes = bytes;
+    }
+    void* entry = 0;
+    void* base  = pe_map(bytes, &entry);
+    if (!base) return 0;
+    s_mods[i].base = base;
+    mm_map_user((uint64_t)(uintptr_t)base, 0x200000);       // DLL acessivel ao usuario
+    kputs("[ldr] mapeando imagem (do disco) "); kputs(bn);
+    kputs(" @ "); kput_hex((uint64_t)(uintptr_t)base); kputc('\n');
+    pe_bind_imports(base, ldr_resolve);                     // resolve os imports da DLL
+    return base;
+}
+
 // Base de carga para EXEs de 32 bits (faixa separada da 64-bit). Se o PE32
 // tiver .reloc, carregamos numa base DESLOCADA da preferida para EXERCITAR as
 // relocacoes; senao (relocs strip) carregamos no ImageBase preferido.

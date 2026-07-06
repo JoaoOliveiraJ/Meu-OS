@@ -389,3 +389,40 @@ A testlib.dll so entrou no processo quando LoadLibraryA a carregou (nao estava n
 .exe). Zero "import nao resolvido"; saida limpa. Regressao pintok OK (C0000365, CPUID x3 ->
 i7-9700K, SEM "Sistema parado"). Limitacao v1: carrega DLLs ja registradas como modulo de boot
 (nao le .dll do disco NTFS ainda — proximo passo, agora que o INC 2 deu leitura de arquivo).
+
+---
+
+## MARCO 8 — Frente 3 Fase 3g: LoadLibrary a partir de um ARQUIVO no disco NTFS FEITA
+
+Um .exe carrega uma DLL que vive num ARQUIVO no disco (C:\testlib.dll) — nao mais um modulo
+de boot. Prova, de uma vez: (1) leitura de arquivo NAO-RESIDENTE no NTFS (data runs) e (2)
+LoadLibrary a partir de um arquivo real do disco. Caminho: `LoadLibraryA("C:\\testlib.dll") ->
+... -> sys_loadlibrary` detecta o caminho de volume -> `ntfs_resolve_path` + `ntfs_read_file`
+(le o $DATA nao-residente p/ um buffer kmalloc) -> `ldr_load_image` (mapeia o PE dos bytes +
+binda) -> base; GetProcAddress + chamada por ponteiro por cima.
+
+Pecas:
+- **apps/make-ntfs-image.py**: NOVO `make_nonresident_attr` (header nao-residente 0x40 bytes +
+  1 data run contiguo: header nibble-baixo=tam.length, nibble-alto=tam.offset; real_size @0x30 —
+  casa com o leitor `ntfs_run_for_vcn`/`attr_nonresident_size` do kernel). Embute build\testlib.dll
+  como `\testlib.dll` (record MFT 27, $DATA nao-residente 1 cluster @ LCN 32, indexado na raiz).
+- **apps/make-ntfs-disk.ps1**: passa build\testlib.dll ao gerador (arg 3).
+- **src/ntos/ldr/loader.c**: NOVO `ldr_load_image(name, bytes)` — mapeia/binda um PE a partir de
+  BYTES em memoria (registra sob basename), como ldr_load faz p/ modulos de boot.
+- **src/ntos/ke/amd64/syscall.c**: `sys_loadlibrary` agora detecta caminho de disco (reusa
+  `ntfs_volume_subpath`), le a DLL via `ntfs_read_file` p/ um buffer kmalloc e mapeia via
+  `ldr_load_image`. Modulos de boot seguem pelo caminho antigo (ldr_load). Append-only; pintok-safe.
+- **apps/loaddisk.c** (NOVO): LoadLibraryA("C:\\testlib.dll") + GetProcAddress + chamada.
+
+**Prova:** `run.ps1 -Disk -Modules ntdll,kernel32,ucrtbase,loaddisk` (SEM testlib.dll como modulo):
+```
+  [loaddisk] LoadLibraryA("C:\testlib.dll") a partir do DISCO NTFS...
+[ldr] mapeando imagem (do disco) testlib.dll @ 0x0000000005100000
+[ldr] LoadLibrary DO DISCO: 'C:\testlib.dll' -> base 0x0000000005100000
+  [loaddisk] carregada DO DISCO; chamei por ponteiro: testlib_add(7,8)=15 ; "testlib.dll v1 (carregada em runtime)"
+```
+Antes: o kernel ja listava `\testlib.dll (2560 bytes) -> MFT #27` na raiz (metadados OK). Zero
+"import nao resolvido"; saida limpa. Regressao pintok OK (C0000365, CPUID x3 -> i7-9700K, SEM
+"Sistema parado"). NOTA: o leitor NAO-residente do NTFS agora esta EXERCITADO end-to-end (era
+usado so p/ residente antes). Deferido: rodar um .EXE do disco (precisa CreateProcess executar a
+imagem — processos = trilha sensivel, melhor supervisionada).

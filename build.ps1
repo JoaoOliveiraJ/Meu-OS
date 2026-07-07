@@ -312,6 +312,8 @@ $ws232Src    = Join-Path $dll 'win32\ws2_32\ws2_32.c'
 # RODADA FINAL — secur32 (SSPI + LSA Logon API) + credui (Credential UI).
 $secur32Src  = Join-Path $dll 'win32\secur32\secur32.c'
 $creduiSrc   = Join-Path $dll 'win32\credui\credui.c'
+# Frente C (explorer real) — combase.dll: COM base minimo (CoTaskMemAlloc + Co* init).
+$combaseSrc  = Join-Path $dll 'win32\combase\combase.c'
 # FASE 3f — testlib: DLL de teste carregada em RUNTIME (LoadLibrary + GetProcAddress).
 $testlibSrc  = Join-Path $dll 'win32\testlib\testlib.c'
 if (Test-Path $ntdllSrc) {
@@ -337,6 +339,13 @@ if (Test-Path $ntdllSrc) {
     & $zig cc @dc '-Wl,--image-base=0x3200000' "-Wl,--out-implib,$(Join-Path $out 'libadvapi32.a')" `
         -o (Join-Path $out 'advapi32.dll') $advapi32Src (Join-Path $out 'libntdll.a')
     if ($LASTEXITCODE) { throw "advapi32.dll falhou." }
+    # Frente C (explorer real) — combase.dll: COM base minimo (CoTaskMemAlloc + Co* init).
+    #   ImageBase 0x5500000 (livre, apos explorer 0x5400000). Autocontido (sem ntdll).
+    if (Test-Path $combaseSrc) {
+        & $zig cc @dc '-Wl,--image-base=0x5500000' '-Wl,--dynamicbase' `
+            -o (Join-Path $out 'combase.dll') $combaseSrc
+        if ($LASTEXITCODE) { throw "combase.dll falhou." }
+    }
     # FASE 3b (Frente 3) — ucrtbase.dll: CRT minimo (startup do mingw/UCRT). O loader
     #   redireciona os apisets api-ms-win-crt-* p/ ca. Importa ExitProcess do kernel32.
     #   ImageBase 0x3300000 (livre, zona morta 48-64 MiB; nao colide com nenhum modulo).

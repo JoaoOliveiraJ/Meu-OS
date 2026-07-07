@@ -630,17 +630,37 @@ static void sys_queryvolumeinformation(struct regs* r) {
 // ---- Registro (stubs simples). Sem hive real ainda: NtOpenKey devolve um
 // pseudo-handle (raiz fixa) e NtQueryValueKey responde valores conhecidos.
 #define REG_ROOT_HANDLE ((uintptr_t)0x5245474B)   // 'REGK'
+#define REG_TRACE 0   // 1 = loga cada NtOpenKey/NtQueryValueKey (diagnostico do que o
+                      // explorer le no registro; util p/ mapear a init do shell). Off no commit.
 
 static int str_eq(const char* a, const char* b) {
     if (!a || !b) return 0;
     while (*a && *b) { if (*a != *b) return 0; a++; b++; }
     return *a == *b;
 }
+static int str_has(const char* h, const char* n) {   // substring (h contem n?)
+    if (!h || !n) return 0;
+    for (; *h; h++) { const char* a = h; const char* b = n; while (*a && *b && *a == *b) { a++; b++; } if (!*b) return 1; }
+    return 0;
+}
 
-// NtOpenKey(out HANDLE*, const char* path). Stub: aceita qualquer caminho e
-// devolve a raiz fixa do registro (REG_ROOT_HANDLE).
+// NtOpenKey(out HANDLE*, const char* path). Stub sem hive: devolve a raiz fixa
+// (REG_ROOT_HANDLE) para as chaves que "existem". EXCECAO honesta: chaves que de
+// fato NAO existem devem FALHAR, senao o app acha que existem (vazias) e desiste do
+// fallback. Ex.: Winlogon\AlternateShells\AvailableShells (feature de shell alternativo,
+// ausente por padrao) — abri-la fazia o explorer enumerar valores vazios e cair no modo
+// "janela de pasta" em vez de ler o valor Shell (que aponta explorer.exe) e virar o shell.
 static void sys_openkey(struct regs* r) {
-    HANDLE* out = (HANDLE*)(uintptr_t)r->rdi;
+    HANDLE*     out  = (HANDLE*)(uintptr_t)r->rdi;
+    const char* path = (const char*)(uintptr_t)r->rsi;
+#if REG_TRACE
+    kputs("[reg] NtOpenKey '"); kputs(path ? path : "(null)"); kputs("'\n");
+#endif
+    if (path && str_has(path, "AvailableShells")) {          // chave ausente -> nao encontrada
+        if (out) *out = 0;
+        r->rax = (uint64_t)0xC0000034u;                       // STATUS_OBJECT_NAME_NOT_FOUND
+        return;
+    }
     if (out) *out = (HANDLE)REG_ROOT_HANDLE;
     r->rax = (uint64_t)(uint32_t)STATUS_SUCCESS;
 }
@@ -655,6 +675,9 @@ static void sys_queryvaluekey(struct regs* r) {
     uint32_t    buflen = (uint32_t)r->r10;
     uint32_t*   outlen = (uint32_t*)(uintptr_t)r->r8;
 
+#if REG_TRACE
+    kputs("[reg] NtQueryValueKey '"); kputs(name ? name : "(null)"); kputs("'\n");
+#endif
     const char* val = 0;
     if (key == REG_ROOT_HANDLE) {
         if (str_eq(name, "ProductName"))       val = "MeuOS";

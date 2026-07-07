@@ -233,6 +233,42 @@ void pe_bind_imports(void* base, pe_resolver_t resolve) {
             }
         }
     }
+
+    // Delay-load imports (data dir 13, secao .didat). Sem isto, o thunk de delay-load
+    // chama ResolveDelayLoadedAPI (stub que devolveria 0) -> slot=0 -> CALL[0] -> rip=0.
+    // Resolvemos EAGERLY com o mesmo resolver (nome + ORDINAL); so sobrescrevemos o slot
+    // quando resolve (senao mantem o thunk original). So descritores RVA-based (bit 0).
+    if (is64) {
+        datadir_t del = get_dir(b, 13);
+        if (del.rva) {
+            // Fallback p/ imports de delay-load NAO resolvidos (DLL opcional ausente):
+            // aponta o slot p/ o no-op ntdll!LdrpNullStub (devolve 0) em vez de deixar o
+            // thunk -> ResolveDelayLoadedAPI -> 0 -> rip=0. Sem SEH, e' a degradacao segura.
+            void* nullstub = resolve("ntdll.dll", "LdrpNullStub");
+            uint8_t* dp = b + del.rva;
+            for (;; dp += 32) {
+                uint32_t attrs   = *(uint32_t*)(dp + 0);
+                uint32_t nameRva = *(uint32_t*)(dp + 4);
+                uint32_t iatRva  = *(uint32_t*)(dp + 12);
+                uint32_t intRva  = *(uint32_t*)(dp + 16);
+                if (nameRva == 0 && iatRva == 0) break;
+                if (!(attrs & 1) || !intRva || !iatRva) continue;   // so RVA-based
+                const char* dll = (const char*)(b + nameRva);
+                uint64_t* iat = (uint64_t*)(b + iatRva);
+                uint64_t* intt = (uint64_t*)(b + intRva);
+                for (uint32_t k = 0; intt[k]; k++) {
+                    uint64_t t = intt[k];
+                    char ordbuf[8];
+                    const char* fname;
+                    if (t & (1ULL << 63)) { fmt_ord(ordbuf, (uint32_t)(t & 0xFFFF)); fname = ordbuf; }
+                    else                  { fname = (const char*)(b + (uint32_t)t + 2); }
+                    void* fn = resolve(dll, fname);
+                    if (!fn) fn = nullstub;                     // opcional ausente -> no-op (nao crasha)
+                    if (fn) iat[k] = (uint64_t)(uintptr_t)fn;
+                }
+            }
+        }
+    }
 }
 
 void* pe_get_export(void* base, const char* name) {

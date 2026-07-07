@@ -654,18 +654,27 @@ __declspec(dllexport) void SetThreadpoolWait(void* wait, void* handle, void* tim
 __declspec(dllexport) void WaitForThreadpoolWaitCallbacks(void* wait, int cancel) { (void)wait;(void)cancel; }
 __declspec(dllexport) void CloseThreadpoolWait(void* wait) { (void)wait; }
 
-// ---- InitOnce: INIT_ONCE = { void* Ptr }. Single-threaded. ----
-#define K32_INITONCE_DONE ((void*)(unsigned long long)2)
+// ---- InitOnce: INIT_ONCE = { void* Ptr }. Estado nos 2 bits baixos (contexto alinhado a
+//      4): 0=nao-iniciado, 2=concluido (Ptr&~3 = contexto guardado por Complete). Guardar
+//      e devolver o CONTEXTO e' essencial — o caller (padrao begin/complete) usa o objeto
+//      criado; devolver 0 fazia o explorer derefar NULL. Single-threaded. ----
+#define K32_IO_DONE 2ULL
 __declspec(dllexport) int InitOnceExecuteOnce(void** once, void* fn, void* param, void** ctx) {
-    if (once && *once == K32_INITONCE_DONE) { if (ctx)*ctx=0; return 1; }
+    unsigned long long v = once ? (unsigned long long)*once : 0;
+    if ((v & 3) == K32_IO_DONE) { if (ctx)*ctx=(void*)(v & ~3ULL); return 1; }
     void* lctx = 0; int ok = fn ? ((int(*)(void**,void*,void**))fn)(once, param, &lctx) : 1;
-    if (ok && once) *once = K32_INITONCE_DONE; if (ctx)*ctx=lctx; return ok;
+    if (ok && once) *once = (void*)(((unsigned long long)lctx & ~3ULL) | K32_IO_DONE);
+    if (ctx)*ctx=lctx; return ok;
 }
 __declspec(dllexport) int InitOnceBeginInitialize(void** once, unsigned flags, int* pending, void** ctx) {
-    (void)flags; if (once && *once == K32_INITONCE_DONE) { if (pending)*pending=0; if (ctx)*ctx=0; return 1; }
+    (void)flags; unsigned long long v = once ? (unsigned long long)*once : 0;
+    if ((v & 3) == K32_IO_DONE) { if (pending)*pending=0; if (ctx)*ctx=(void*)(v & ~3ULL); return 1; }
     if (pending)*pending=1; if (ctx)*ctx=0; return 1;   // caller inicializa e chama Complete
 }
-__declspec(dllexport) int InitOnceComplete(void** once, unsigned flags, void* ctx) { (void)flags;(void)ctx; if (once)*once=K32_INITONCE_DONE; return 1; }
+__declspec(dllexport) int InitOnceComplete(void** once, unsigned flags, void* ctx) {
+    if (flags & 0x4u) { if (once)*once=0; return 1; }   // INIT_ONCE_INIT_FAILED: reabre
+    if (once) *once=(void*)(((unsigned long long)ctx & ~3ULL) | K32_IO_DONE); return 1;
+}
 
 // ---- processo/thread: threads reais de ring-3 (com param/stack proprios) ainda nao
 //      wired -> handles-sentinela. O thread principal do explorer segue; workers nao. ----

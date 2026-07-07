@@ -57,13 +57,16 @@ __declspec(dllexport) int strncmp(const char* a, const char* b, size_t_ n) {
 // ---------------------------------------------------------------------------
 //  runtime startup — argv/env, _initterm, config, exit.
 // ---------------------------------------------------------------------------
-static int      g_argc = 1;
 static char     g_arg0[] = "crthello.exe";
-static char*    g_argv[2]  = { g_arg0, 0 };
-static char**   g_argv_p   = g_argv;
+static char*    g_argv[2]  = { g_arg0, 0 };      // array default de argv (1 elem + NULL)
 static wchar16  g_warg0[1] = { 0 };
 static wchar16* g_wargv[1] = { g_warg0 };
-static wchar16** g_wargv_p = g_wargv;
+// __argc/__argv/__wargv: SIMBOLOS DE DADOS exportados que o startup do mingw-w64 (crtexe.c)
+// le DIRETAMENTE (e o __p___argc/argv devolvem o endereco deles). Sem exporta-los, o startup
+// lia um import de dado nao resolvido -> argc=0. meuos_parse_cmdline os atualiza.
+__declspec(dllexport) int       __argc  = 1;
+__declspec(dllexport) char**    __argv  = g_argv;
+__declspec(dllexport) wchar16** __wargv = g_wargv;
 static char*    g_env[1]   = { 0 };
 static char**   g_env_p    = g_env;
 static wchar16* g_wenv[1]  = { 0 };
@@ -71,9 +74,10 @@ static wchar16** g_wenv_p  = g_wenv;
 static int      g_commode  = 0;
 static int      g_fmode    = 0;
 
-__declspec(dllexport) int*       __p___argc(void)  { return &g_argc; }
-__declspec(dllexport) char***    __p___argv(void)  { return &g_argv_p; }
-__declspec(dllexport) wchar16*** __p___wargv(void) { return &g_wargv_p; }
+static void meuos_parse_cmdline(void);   // parseia a cmdline do kernel em argv[] (MeuOS)
+__declspec(dllexport) int*       __p___argc(void)  { meuos_parse_cmdline(); return &__argc; }
+__declspec(dllexport) char***    __p___argv(void)  { meuos_parse_cmdline(); return &__argv; }
+__declspec(dllexport) wchar16*** __p___wargv(void) { return &__wargv; }
 __declspec(dllexport) char***    __p__environ(void)  { return &g_env_p; }
 __declspec(dllexport) wchar16*** __p__wenviron(void) { return &g_wenv_p; }
 __declspec(dllexport) int*        __p__commode(void) { return &g_commode; }
@@ -85,7 +89,41 @@ static char* g_acmdln = (char*)"";
 __declspec(dllexport) char** __p__acmdln(void)    { return &g_acmdln; }
 __declspec(dllexport) int    _ismbblead(unsigned c) { (void)c; return 0; }
 
-__declspec(dllexport) int  _configure_narrow_argv(int mode) { (void)mode; return 0; }
+// MeuOS: o kernel escreve a linha de comando do processo em 0x601800 (PEB+0x800; a
+// janela TEB/PEB deste OS fica em 0x600000). String vazia = sem cmdline -> mantem o
+// default ("crthello.exe"). Parseamos em argv[] por espacos (v1: sem aspas). Idempotente
+// (re-le a mesma fonte), chamado do _configure_narrow_argv e do __p___argc/__p___argv,
+// entao funciona qualquer que seja a ordem do startup do mingw. NAO usa guard: cada
+// processo (o pai roda com 0x601800 vazio; o filho com a sua cmdline) e' re-parseado.
+#define MEUOS_CMDLINE_ADDR 0x601800ULL
+static char  g_cmdbuf[256];
+static char* g_argv_real[32];
+static void meuos_parse_cmdline(void) {
+    const char* src = (const char*)(__INTPTR_TYPE__)MEUOS_CMDLINE_ADDR;
+    if (!src || src[0] == 0) {                        // sem cmdline: volta ao default.
+        __argc = 1; __argv = g_argv;                 // NAO herdar args de um processo anterior
+        return;                                        // (ucrtbase e' compartilhado entre processos)
+    }
+    int n = 0;
+    while (src[n] && n < (int)sizeof(g_cmdbuf) - 1) { g_cmdbuf[n] = src[n]; n++; }
+    g_cmdbuf[n] = 0;
+    int argc = 0; char* p = g_cmdbuf;
+    while (*p && argc < 31) {
+        while (*p == ' ') p++;                        // pula espacos entre tokens
+        if (!*p) break;
+        g_argv_real[argc++] = p;                      // inicio do token
+        while (*p && *p != ' ') p++;                  // fim do token
+        if (*p) *p++ = 0;                             // termina o token in-place
+    }
+    if (argc > 0) {
+        g_argv_real[argc] = 0;
+        __argc = argc;
+        __argv = g_argv_real;
+        g_acmdln = (char*)(__INTPTR_TYPE__)MEUOS_CMDLINE_ADDR;   // cmdline crua (GetCommandLine/WinMain)
+    }
+}
+
+__declspec(dllexport) int  _configure_narrow_argv(int mode) { (void)mode; meuos_parse_cmdline(); return 0; }
 __declspec(dllexport) int  _configure_wide_argv(int mode)   { (void)mode; return 0; }
 __declspec(dllexport) int  _initialize_narrow_environment(void) { return 0; }
 __declspec(dllexport) int  _initialize_wide_environment(void)   { return 0; }
@@ -96,12 +134,23 @@ __declspec(dllexport) int   _crt_atexit(void* fn)      { (void)fn; return 0; }
 __declspec(dllexport) int   _crt_at_quick_exit(void* fn){ (void)fn; return 0; }
 __declspec(dllexport) void* signal(int sig, void* handler) { (void)sig; (void)handler; return 0; }
 
-// _initterm: no Windows chama cada ponteiro de funcao em [first,last) (inicializadores
-// C/C++). Para um hello C sem construtores estaticos, e' seguro NAO chamar a tabela —
-// os inicializadores internos do CRT que pularizamos ja estao stubbados aqui. Isso
-// evita cascatear em codigo de CRT nao implementado.
-__declspec(dllexport) void _initterm(void* first, void* last)   { (void)first; (void)last; }
-__declspec(dllexport) int  _initterm_e(void* first, void* last) { (void)first; (void)last; return 0; }
+// _initterm: chama cada ponteiro de funcao em [first,last) (inicializadores C do CRT).
+// PRECISA rodar a tabela: o startup do mingw (crtexe.c) registra pre_c_init (.CRT$XI) e
+// pre_cpp_init (.CRT$XC) nela, e o pre_cpp_init e' quem chama __getmainargs ->
+// _configure_narrow_argv + __p___argc/argv (monta o argv REAL). Como no-op, argc/argv
+// nunca eram montados (argc=0). pre_c_init/pre_cpp_init so chamam funcs que ja temos
+// (_set_app_type, __p__fmode/commode, _setargv estatico, __p___argc/argv), sem cascata.
+__declspec(dllexport) void _initterm(void* first, void* last) {
+    void (**p)(void) = (void (**)(void))first;
+    void (**e)(void) = (void (**)(void))last;
+    for (; p < e; p++) if (*p) (*p)();
+}
+__declspec(dllexport) int _initterm_e(void* first, void* last) {
+    int (**p)(void) = (int (**)(void))first;
+    int (**e)(void) = (int (**)(void))last;
+    for (; p < e; p++) if (*p) { int r = (*p)(); if (r) return r; }
+    return 0;
+}
 
 __declspec(dllexport) void _cexit(void) { }
 // ExitProcess encerra o processo; o for(;;) so satisfaz o 'noreturn' que o compilador

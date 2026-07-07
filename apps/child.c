@@ -10,8 +10,11 @@
 //                -Wl,--dynamicbase apps/child.c (com o CRT).
 #include <stdio.h>
 
-int main(void) {
+int main(int argc, char** argv) {
     printf("  [child] estou vivo, rodando como processo filho!\n");
+    printf("  [child] recebi argc=%d (argumentos passados pelo pai):\n", argc);
+    for (int i = 0; i < argc; i++)
+        printf("  [child]   argv[%d] = \"%s\"\n", i, argv[i]);
     printf("  [child] (2+2=%d) — terminando com codigo 0.\n", 2 + 2);
     return 0;
 }

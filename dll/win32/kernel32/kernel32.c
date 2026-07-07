@@ -7,7 +7,7 @@ __declspec(dllimport) long NtCreateFile(void* out_handle, const char* name);
 __declspec(dllimport) long NtDeviceIoControlFile(void* handle, unsigned ioctl,
         void* in_buf, unsigned in_len, void* out_buf, unsigned out_len);
 __declspec(dllimport) void NtClose(void* handle);
-__declspec(dllimport) long NtCreateProcess(void* out_handle, const char* image_name);
+__declspec(dllimport) long NtCreateProcess(void* out_handle, const char* image_name, const char* cmdline);
 __declspec(dllimport) long NtCreateThread(void* out_handle, void* process, void* start);
 __declspec(dllimport) long NtWaitForSingleObject(void* handle, unsigned timeout_ms);
 __declspec(dllimport) long NtWriteFile(void* handle, const void* buf, unsigned len, unsigned* written);
@@ -129,13 +129,15 @@ __declspec(dllexport) void* LoadLibraryA(const char* name) {
 __declspec(dllexport) void* LoadLibraryW(const void* name) { (void)name; return 0; }   // wide: nao suportado
 
 // --- Process Manager (Win32 -> Nt*) ---
-// Versao simplificada de CreateProcessA: cria um EPROCESS + uma thread inicial
-// (objetos do Object Manager) e devolve seus handles. Nao executa a imagem.
+// CreateProcessA: cria um EPROCESS + thread inicial (objetos do Object Manager), RODA a
+// imagem do filho (o kernel executa via sys_createprocess, sincrono) e devolve os handles.
+// lpCommandLine (cmdline) leva o argv do filho ate o CRT dele.
 __declspec(dllexport) int CreateProcessA(const char* app, char* cmdline, void* pa, void* ta,
         int inherit, unsigned flags, void* env, const char* cwd, void* si, void* pi) {
-    (void)cmdline; (void)pa; (void)ta; (void)inherit; (void)flags; (void)env; (void)cwd; (void)si;
+    (void)pa; (void)ta; (void)inherit; (void)flags; (void)env; (void)cwd; (void)si;
     void* hproc = 0;
-    if (NtCreateProcess(&hproc, app) != 0) return 0;       // FALSE
+    // Se lpCommandLine for NULL, o Windows usa lpApplicationName como a linha de comando.
+    if (NtCreateProcess(&hproc, app, cmdline ? cmdline : (char*)app) != 0) return 0;   // FALSE
     void* hthr = 0;
     NtCreateThread(&hthr, hproc, 0);
     if (pi) { void** out = (void**)pi; out[0] = hproc; out[1] = hthr; }   // hProcess, hThread

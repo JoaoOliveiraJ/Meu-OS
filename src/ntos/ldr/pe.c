@@ -162,6 +162,14 @@ uint32_t pe_relocate(void* base, uint64_t preferred) {
 // "import by ordinal" e o 63 (PE32+) ou o 31 (PE32). O hint/name aponta para
 // uma estrutura {hint:2}{name}. O resolver devolve o endereco da funcao.
 // ---------------------------------------------------------------------------
+// Formata "#<decimal>" (import por ORDINAL) num buffer >= 8 bytes.
+static void fmt_ord(char* buf, uint32_t ord) {
+    buf[0] = '#'; char tmp[8]; int t = 0;
+    if (ord == 0) tmp[t++] = '0';
+    while (ord) { tmp[t++] = (char)('0' + ord % 10); ord /= 10; }
+    int q = 1; while (t > 0) buf[q++] = tmp[--t]; buf[q] = 0;
+}
+
 void pe_bind_imports(void* base, pe_resolver_t resolve) {
     uint8_t* b = (uint8_t*)base;
     int is64 = (*(uint16_t*)(b + *(uint32_t*)(b + 0x3C) + 4 + 20) == 0x20B);
@@ -185,11 +193,15 @@ void pe_bind_imports(void* base, pe_resolver_t resolve) {
             for (uint32_t k = 0; ilt[k]; k++) {
                 uint64_t t = ilt[k];
                 void* fn = 0;
-                const char* fname = "(ordinal)";
-                if (!(t & (1ULL << 63))) {
+                char ordbuf[8];
+                const char* fname;
+                if (t & (1ULL << 63)) {                 // import por ORDINAL
+                    fmt_ord(ordbuf, (uint32_t)(t & 0xFFFF));
+                    fname = ordbuf;
+                } else {
                     fname = (const char*)(b + (uint32_t)t + 2);
-                    fn = resolve(dll, fname);
                 }
+                fn = resolve(dll, fname);
                 if (!fn) {
                     kputs("[ldr] import nao resolvido: "); kputs(dll);
                     kputs("!"); kputs(fname); kputc('\n');
@@ -202,11 +214,15 @@ void pe_bind_imports(void* base, pe_resolver_t resolve) {
             for (uint32_t k = 0; ilt[k]; k++) {
                 uint32_t t = ilt[k];
                 void* fn = 0;
-                const char* fname = "(ordinal)";
-                if (!(t & (1UL << 31))) {
+                char ordbuf[8];
+                const char* fname;
+                if (t & (1UL << 31)) {                  // import por ORDINAL
+                    fmt_ord(ordbuf, (uint32_t)(t & 0xFFFF));
+                    fname = ordbuf;
+                } else {
                     fname = (const char*)(b + (t & 0x7FFFFFFF) + 2);
-                    fn = resolve(dll, fname);
                 }
+                fn = resolve(dll, fname);
                 if (!fn) {
                     kputs("[ldr] import nao resolvido: "); kputs(dll);
                     kputs("!"); kputs(fname); kputc('\n');
@@ -235,4 +251,22 @@ void* pe_get_export(void* base, const char* name) {
             return (void*)(uintptr_t)(b + funcs[ords[i]]);
     }
     return 0;
+}
+
+// Resolve um export por ORDINAL (imports #N — ex.: shell32 via api-ms-win-shell-*).
+// AddressOfFunctions e' indexado por (ordinal - Base). RVA 0 = slot vazio.
+void* pe_get_export_by_ordinal(void* base, uint32_t ordinal) {
+    uint8_t* b = (uint8_t*)base;
+    datadir_t exp_dir = get_dir(b, 0);        // IMAGE_DIRECTORY_ENTRY_EXPORT
+    if (!exp_dir.rva) return 0;
+    uint8_t* ex = b + exp_dir.rva;
+    uint32_t ord_base = *(uint32_t*)(ex + 0x10);   // Base
+    uint32_t nfuncs   = *(uint32_t*)(ex + 0x14);   // NumberOfFunctions
+    uint32_t* funcs   = (uint32_t*)(b + *(uint32_t*)(ex + 0x1C));
+    if (ordinal < ord_base) return 0;
+    uint32_t idx = ordinal - ord_base;
+    if (idx >= nfuncs) return 0;
+    uint32_t rva = funcs[idx];
+    if (!rva) return 0;
+    return (void*)(uintptr_t)(b + rva);
 }

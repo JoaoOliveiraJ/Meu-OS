@@ -261,6 +261,54 @@ __declspec(dllexport) unsigned long long GetTraceEnableFlags(unsigned long long 
 __declspec(dllexport) unsigned long TraceEventInstance(unsigned long long h, void* ev, void* inst) { (void)h;(void)ev;(void)inst; return 0; }
 __declspec(dllexport) unsigned long TraceEvent(unsigned long long h, void* ev) { (void)h;(void)ev; return 0; }
 
+// ============================================================================
+// Frente C (explorer real) — advapi32: ETW controller + seguranca (SID/ACL/token) +
+// SHReg. Sem subsistema de seguranca real -> stubs ESPECIFICOS que representam
+// "processo com todos os direitos, sem auditoria" (correto p/ um SO single-user de
+// bring-up). ETW controller = no-op (ERROR_SUCCESS). Sem catch-all generico.
+// ============================================================================
+#define ERROR_SUCCESS_ 0UL
+// ---- ETW controller (StartTrace/StopTrace/EnableTraceEx2/TraceMessage): no-op ----
+__declspec(dllexport) unsigned long StartTraceW(unsigned long long* h, const void* name, void* props) { (void)name;(void)props; if (h)*h=0; return ERROR_SUCCESS_; }
+__declspec(dllexport) unsigned long StopTraceW(unsigned long long h, const void* name, void* props) { (void)h;(void)name;(void)props; return ERROR_SUCCESS_; }
+__declspec(dllexport) unsigned long EnableTraceEx2(unsigned long long h, const void* provider, unsigned ctl, unsigned char lvl, unsigned long long any, unsigned long long all, unsigned to, void* params) { (void)h;(void)provider;(void)ctl;(void)lvl;(void)any;(void)all;(void)to;(void)params; return ERROR_SUCCESS_; }
+__declspec(dllexport) unsigned long TraceMessage(unsigned long long h, unsigned flags, void* guid, unsigned short num, ...) { (void)h;(void)flags;(void)guid;(void)num; return ERROR_SUCCESS_; }
+
+// ---- SID: um SID = { BYTE Rev; BYTE SubCount; BYTE IdAuth[6]; DWORD SubAuth[SubCount] } ----
+typedef struct { unsigned char Rev, SubCount, IdAuth[6]; unsigned long Sub[15]; } SID_;
+__declspec(dllexport) int IsValidSid(void* sid) { SID_* s=(SID_*)sid; return (s && s->Rev==1 && s->SubCount<=15) ? 1 : 0; }
+__declspec(dllexport) unsigned long GetLengthSid(void* sid) { SID_* s=(SID_*)sid; return s ? (unsigned long)(8 + 4*s->SubCount) : 0; }
+__declspec(dllexport) int EqualSid(void* a, void* b) { if (a==b) return 1; if (!a||!b) return 0; unsigned long n=GetLengthSid(a); if (n!=GetLengthSid(b)) return 0; unsigned char* x=(unsigned char*)a; unsigned char* y=(unsigned char*)b; for (unsigned long i=0;i<n;i++) if (x[i]!=y[i]) return 0; return 1; }
+__declspec(dllexport) int CopySid(unsigned long cb, void* dst, void* src) { unsigned long n=GetLengthSid(src); if (!dst||cb<n) return 0; unsigned char* d=(unsigned char*)dst; unsigned char* s=(unsigned char*)src; for (unsigned long i=0;i<n;i++) d[i]=s[i]; return 1; }
+__declspec(dllexport) void* FreeSid(void* sid) { (void)sid; return 0; }
+__declspec(dllexport) void* GetSidSubAuthorityCount(void* sid) { SID_* s=(SID_*)sid; return s ? &s->SubCount : 0; }
+__declspec(dllexport) int CreateWellKnownSid(int type, void* domain, void* sid, unsigned long* cb) {
+    (void)type;(void)domain; if (!sid||!cb||*cb<12){ if (cb)*cb=12; return 0; }
+    SID_* s=(SID_*)sid; s->Rev=1; s->SubCount=1; for (int i=0;i<6;i++) s->IdAuth[i]=0; s->IdAuth[5]=5; s->Sub[0]=18; *cb=12; return 1;   // NT AUTHORITY\SYSTEM-ish
+}
+__declspec(dllexport) int LookupAccountNameW(const void* sys, const void* name, void* sid, unsigned long* csid, void* dom, unsigned long* cdom, unsigned* use) { (void)sys;(void)name;(void)sid;(void)dom; if (csid)*csid=0; if (cdom)*cdom=0; if (use)*use=0; return 0; }
+
+// ---- ACL: InitializeAcl/AddAce/DeleteAce/GetAce/GetAclInformation ----
+__declspec(dllexport) int InitializeAcl(void* acl, unsigned long len, unsigned long rev) { if (!acl||len<8) return 0; unsigned char* a=(unsigned char*)acl; a[0]=(unsigned char)rev; a[1]=0; *(unsigned short*)(a+2)=(unsigned short)len; *(unsigned short*)(a+4)=0; *(unsigned short*)(a+6)=0; return 1; }
+__declspec(dllexport) int AddAce(void* acl, unsigned long rev, unsigned long idx, void* aces, unsigned long n) { (void)acl;(void)rev;(void)idx;(void)aces;(void)n; return 1; }
+__declspec(dllexport) int DeleteAce(void* acl, unsigned long idx) { (void)acl;(void)idx; return 1; }
+__declspec(dllexport) int GetAce(void* acl, unsigned long idx, void** ace) { (void)acl;(void)idx; if (ace)*ace=0; return 0; }
+__declspec(dllexport) int GetAclInformation(void* acl, void* info, unsigned long len, int cls) { (void)acl;(void)cls; if (info){ unsigned char* b=(unsigned char*)info; for (unsigned long i=0;i<len;i++) b[i]=0; } return 1; }
+
+// ---- security descriptor / token: "acesso concedido" (single-user) ----
+__declspec(dllexport) int GetSecurityDescriptorDacl(void* sd, int* present, void** dacl, int* defaulted) { (void)sd; if (present)*present=0; if (dacl)*dacl=0; if (defaulted)*defaulted=0; return 1; }
+__declspec(dllexport) int SetSecurityDescriptorDacl(void* sd, int present, void* dacl, int defaulted) { (void)sd;(void)present;(void)dacl;(void)defaulted; return 1; }
+__declspec(dllexport) int MakeAbsoluteSD(void* self, void* abs, unsigned long* cbAbs, void* dacl, unsigned long* cbDacl, void* sacl, unsigned long* cbSacl, void* owner, unsigned long* cbOwner, void* grp, unsigned long* cbGrp) { (void)self;(void)abs;(void)dacl;(void)sacl;(void)owner;(void)grp; if (cbAbs)*cbAbs=0; if (cbDacl)*cbDacl=0; if (cbSacl)*cbSacl=0; if (cbOwner)*cbOwner=0; if (cbGrp)*cbGrp=0; return 1; }
+__declspec(dllexport) int SetKernelObjectSecurity(void* h, unsigned info, void* sd) { (void)h;(void)info;(void)sd; return 1; }
+__declspec(dllexport) int GetTokenInformation(void* tok, int cls, void* info, unsigned long len, unsigned long* ret) { (void)tok;(void)cls; if (info){ unsigned char* b=(unsigned char*)info; for (unsigned long i=0;i<len;i++) b[i]=0; } if (ret)*ret=len; return 1; }
+__declspec(dllexport) int DuplicateToken(void* tok, int level, void** newtok) { (void)tok;(void)level; if (newtok)*newtok=(void*)(unsigned long long)1; return 1; }
+__declspec(dllexport) int CheckTokenMembership(void* tok, void* sid, int* member) { (void)tok;(void)sid; if (member)*member=1; return 1; }   // e' membro (single-user admin)
+
+// ---- SHReg (shlwapi registry helpers) + WDAG ----
+__declspec(dllexport) long SHRegGetBoolUSValueW(const void* subkey, const void* value, int hkcu, int def) { (void)subkey;(void)value;(void)hkcu; return def; }
+__declspec(dllexport) long SHRegGetUSValueW(const void* subkey, const void* value, unsigned* type, void* data, unsigned* cb, int hkcu, void* defData, unsigned defLen) { (void)subkey;(void)value;(void)hkcu;(void)defData;(void)defLen; if (type)*type=0; if (cb)*cb=0; (void)data; return 2; }   // ERROR_FILE_NOT_FOUND
+__declspec(dllexport) long IsProcessInWDAGContainer(void* rsv, int* inContainer) { (void)rsv; if (inContainer)*inContainer=0; return 0; }   // S_OK, nao
+
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }

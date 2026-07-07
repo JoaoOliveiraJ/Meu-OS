@@ -1,0 +1,93 @@
+LIBRARY shell32.dll
+EXPORTS
+    DragQueryFileW
+    DuplicateIcon
+    ExtractIconExW
+    ILClone = il_clone
+    ILCloneFirst = il_clone_first
+    ILCombine = il_combine
+    ILFindLastID = il_find_last
+    ILFree = il_free
+    ILGetSize = il_get_size
+    ILIsEqual = il_is_equal
+    ILIsParent = il_is_parent
+    ILRemoveLastID = il_remove_last
+    SHAddToRecentDocs
+    SHAppBarMessage
+    SHBindToFolderIDListParent
+    SHBindToObject
+    SHBindToParent
+    SHChangeNotify
+    SHChangeNotifyRegisterThread
+    SHCreateDataObject
+    SHCreateItemFromIDList
+    SHCreateItemFromParsingName
+    SHCreateItemInKnownFolder
+    SHEnableServiceObject
+    SHEvaluateSystemCommandTemplate
+    SHFileOperationW
+    SHGetIDListFromObject
+    SHGetLocalizedName
+    SHGetNameFromIDList
+    SHGetPathFromIDListW
+    SHGetPropertyStoreForWindow
+    SHGetStockIconInfo
+    SHParseDisplayName
+    SHQueryUserNotificationState
+    SHUpdateRecycleBinIcon
+    ShellExecuteExW
+    ShellExecuteW
+    Shell_GetCachedImageIndexW
+    Shell_NotifyIconGetRect
+    Shell_NotifyIconW
+    _ord2 = shell_ord_stub @2 NONAME
+    _ord4 = shell_ord_stub @4 NONAME
+    _ord6 = shell_ord_stub @6 NONAME
+    _ord22 = shell_ord_stub @22 NONAME
+    _ord43 = shell_ord_stub @43 NONAME
+    _ord54 = shell_ord_stub @54 NONAME
+    _ord60 = shell_ord_stub @60 NONAME
+    _ord61 = shell_ord_stub @61 NONAME
+    _ord67 = shell_ord_stub @67 NONAME
+    _ord85 = shell_ord_stub @85 NONAME
+    _ord89 = shell_ord_stub @89 NONAME
+    _ord91 = shell_ord_stub @91 NONAME
+    _ord95 = shell_ord_stub @95 NONAME
+    _ord100 = shell_ord_stub @100 NONAME
+    _ord132 = shell_ord_stub @132 NONAME
+    _ord134 = shell_ord_stub @134 NONAME
+    _ord137 = shell_ord_stub @137 NONAME
+    _ord162 = shell_ord_stub @162 NONAME
+    _ord172 = shell_ord_stub @172 NONAME
+    _ord181 = shell_ord_stub @181 NONAME
+    _ord188 = shell_ord_stub @188 NONAME
+    _ord190 = shell_ord_stub @190 NONAME
+    _ord193 = shell_ord_stub @193 NONAME
+    _ord200 = shell_ord_stub @200 NONAME
+    _ord201 = shell_ord_stub @201 NONAME
+    _ord206 = shell_ord_stub @206 NONAME
+    _ord244 = shell_ord_stub @244 NONAME
+    _ord245 = shell_ord_stub @245 NONAME
+    _ord254 = shell_ord_stub @254 NONAME
+    _ord292 = DragQueryFileW @292 NONAME
+    _ord644 = shell_ord_stub @644 NONAME
+    _ord645 = shell_ord_stub @645 NONAME
+    _ord680 = shell_ord_stub @680 NONAME
+    _ord711 = shell_ord_stub @711 NONAME
+    _ord723 = shell_ord_stub @723 NONAME
+    _ord727 = shell_ord_stub @727 NONAME
+    _ord733 = shell_ord_stub @733 NONAME
+    _ord743 = shell_ord_stub @743 NONAME
+    _ord753 = shell_ord_stub @753 NONAME
+    _ord764 = shell_ord_stub @764 NONAME
+    _ord790 = shell_ord_stub @790 NONAME
+    _ord792 = shell_ord_stub @792 NONAME
+    _ord850 = shell_ord_stub @850 NONAME
+    _ord866 = shell_ord_stub @866 NONAME
+    _ord885 = shell_ord_stub @885 NONAME
+    _ord894 = shell_ord_stub @894 NONAME
+    _ord895 = shell_ord_stub @895 NONAME
+    _ord896 = shell_ord_stub @896 NONAME
+    _ord899 = shell_ord_stub @899 NONAME
+    _ord906 = shell_ord_stub @906 NONAME
+    _ord907 = shell_ord_stub @907 NONAME

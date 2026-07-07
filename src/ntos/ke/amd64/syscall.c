@@ -406,6 +406,7 @@ static void sys_waitforsingleobject(struct regs* r) {
 // GetProcAddress (LdrGetProcAddress) resolve os exports por cima. Nao le do disco por
 // ora: so modulos passados no boot (Multiboot). rdi=nome; rax=base (0 se falhou).
 extern void* ldr_load(const char* name);
+extern void* ldr_load_runtime(const char* name);   // apiset_redirect + anexa ".dll"
 extern void* ldr_load_image(const char* name, const void* bytes);
 extern void* kmalloc(uint64_t n);
 static void sys_loadlibrary(struct regs* r) {
@@ -430,8 +431,9 @@ static void sys_loadlibrary(struct regs* r) {
         r->rax = 0;   // nao achou/nao leu o arquivo no disco
         return;
     }
-    // (2) Modulo de boot registrado (comportamento original — Fase 3f).
-    void* base = ldr_load(name);
+    // (2) Modulo de boot registrado. Usa ldr_load_runtime: aplica apiset_redirect (contratos
+    //     api-ms-win-*/kernelbase) e anexa ".dll" a nomes sem extensao (LoadLibraryW(L"dui70")).
+    void* base = ldr_load_runtime(name);
     r->rax = (uint64_t)(uintptr_t)base;
 }
 
@@ -699,7 +701,10 @@ static void sys_queryvaluekey(struct regs* r) {
 // GetModuleHandleA: consulta o loader (que carregou as DLLs do boot). Em RAX.
 static void sys_getmodulehandle(struct regs* r) {
     const char* name = (const char*)(uintptr_t)r->rdi;
-    void* base = name ? ldr_load(name) : 0;   // ja registrada/carregada -> base
+    // ldr_find_runtime: aplica apiset_redirect + ".dll" e devolve a base JA carregada (nao
+    // carrega). Antes chamava ldr_load direto -> "nao registrada" p/ kernelbase/apisets que
+    // ja vivem no kernel32; agora GetModuleHandle("kernelbase")/("api-ms-win-core-*") acham.
+    void* base = name ? ldr_find_runtime(name) : 0;
     r->rax = (uint64_t)(uintptr_t)base;
 }
 

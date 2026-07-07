@@ -17,6 +17,8 @@ __declspec(dllimport) long NtQueryVolumeInformation(void* outBuf, unsigned outLe
 __declspec(dllimport) void* LdrGetModuleHandle(const char* name);
 __declspec(dllimport) void* LdrGetProcAddress(void* module_base, const char* fn);
 __declspec(dllimport) void* LdrLoadDll(const char* name);
+typedef unsigned short wchar16;                                   // UTF-16 (def canonica adiante)
+static void k32_wtoasc(char* d, const wchar16* s, int cap);       // fwd: usado por LoadLibraryW
 __declspec(dllimport) long NtCreateNamedPipeFile(void* out_handle, const char* name);
 __declspec(dllimport) long NtConnectNamedPipe(void* pipe_handle);
 // FASE 5 — enumeracao de objetos + carregar/descarregar driver (para o cmd.exe).
@@ -130,7 +132,15 @@ __declspec(dllexport) void* LoadLibraryA(const char* name) {
     if (!name) return 0;
     return LdrLoadDll(name);
 }
-__declspec(dllexport) void* LoadLibraryW(const void* name) { (void)name; return 0; }   // wide: nao suportado
+// LoadLibraryW(name) — versao WIDE. O explorer carrega quase tudo por aqui (LoadLibraryW/
+// Ex). Converte UTF-16->ascii e delega ao LdrLoadDll (syscall -> ldr_load_runtime, que
+// aplica apiset_redirect + anexa ".dll"). Antes era um stub que devolvia 0 SEMPRE, o que
+// abortava silenciosamente TODA carga wide (inclusive de DLLs que ja temos como modulo).
+__declspec(dllexport) void* LoadLibraryW(const wchar16* name) {
+    if (!name) return 0;
+    char nb[128]; k32_wtoasc(nb, name, sizeof(nb));
+    return LdrLoadDll(nb);
+}
 
 // --- Process Manager (Win32 -> Nt*) ---
 // CreateProcessA: cria um EPROCESS + thread inicial (objetos do Object Manager), RODA a

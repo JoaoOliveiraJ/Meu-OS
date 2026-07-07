@@ -1,0 +1,12 @@
+; dwmapi.def — SO os ordinais PRIVADOS/noname que o explorer importa POR ORDINAL da dwmapi.
+; Os exports NOMEADOS (DwmIsCompositionEnabled etc.) vem de __declspec no dwmapi.c (aditivo).
+LIBRARY dwmapi.dll
+EXPORTS
+    Dwm_ord113 @113 NONAME
+    Dwm_ord114 @114 NONAME
+    Dwm_ord124 @124 NONAME
+    Dwm_ord138 @138 NONAME
+    Dwm_ord139 @139 NONAME
+    Dwm_ord140 @140 NONAME
+    Dwm_ord141 @141 NONAME
+    Dwm_ord159 @159 NONAME

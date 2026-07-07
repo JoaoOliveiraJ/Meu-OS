@@ -465,6 +465,149 @@ __declspec(dllexport) unsigned GetGuiResources(void* proc, unsigned fl){ (void)p
 __declspec(dllexport) void* FindWindowW(const void* cls, const void* name){ (void)cls;(void)name; return 0; }
 __declspec(dllexport) void* FindWindowExW(void* parent, void* after, const void* cls, const void* name){ (void)parent;(void)after;(void)cls;(void)name; return 0; }
 
+// ============================================================================
+// Frente C (explorer real) — W-VARIANTS de criacao/gerencia de janela. O explorer importa
+// 72 funcoes de janela (RegisterClassExW/CreateWindowExW/loop de msg/geometria/props/timers/
+// hooks) do apiset ext-ms-win-rtcore-ntuser-window-ext (delay), que redireciona p/ ca. Sem
+// as W-variants, elas bindavam ao LdrpNullStub (devolve 0) e a criacao da Shell_TrayWnd
+// FALHAVA EM SILENCIO -> o explorer abortava a init da taskbar. Aqui as W delegam ao MESMO
+// win32k (Nt*) das A-variants, convertendo UTF-16->ascii. Sem catch-all: cada uma nomeada.
+// ============================================================================
+// pool persistente p/ nomes de classe/janela convertidos de wide (o kernel guarda o ponteiro).
+static char g_wpool[16384]; static int g_wpool_off = 0;
+static const char* u32_wpool(const void* ws) {
+    if (!ws) return 0;
+    const u16_* w = (const u16_*)ws;
+    if ((unsigned long long)ws < 0x10000ULL) return (const char*)ws;   // ATOM (MAKEINTATOM) -> passa cru
+    char* out = &g_wpool[g_wpool_off]; int n = 0;
+    while (w[n] && g_wpool_off + n < (int)sizeof(g_wpool) - 1) { out[n] = (char)w[n]; n++; }
+    out[n] = 0; g_wpool_off += n + 1; return out;
+}
+static int u32_weq(const u16_* a, const u16_* b) {   // compara wide-strings
+    if (!a || !b) return 0; while (*a && *b) { if (*a != *b) return 0; a++; b++; } return *a == *b;
+}
+
+// WNDCLASSW / WNDCLASSEXW (layout Win32). So os campos que usamos: wndproc + className.
+typedef struct { unsigned style; WNDPROC lpfnWndProc; int cbClsExtra, cbWndExtra; void* hInstance,*hIcon,*hCursor,*hbrBackground; const u16_* lpszMenuName,*lpszClassName; } WNDCLASSW;
+typedef struct { unsigned cbSize, style; WNDPROC lpfnWndProc; int cbClsExtra, cbWndExtra; void* hInstance,*hIcon,*hCursor,*hbrBackground; const u16_* lpszMenuName,*lpszClassName; void* hIconSm; } WNDCLASSEXW;
+
+static unsigned short u32_register_class(const u16_* clsName, WNDPROC proc) {
+    const char* nm = u32_wpool(clsName);
+    if (!nm) return 0;
+    int slot = -1;
+    for (int i = 0; i < MAX_CLASSES; i++) if (g_classes[i].used && seq(g_classes[i].name, nm)) { slot = i; break; }
+    if (slot < 0) for (int i = 0; i < MAX_CLASSES; i++) if (!g_classes[i].used) { slot = i; break; }
+    if (slot < 0) return 0;
+    g_classes[slot].used = 1; g_classes[slot].name = nm; g_classes[slot].proc = proc;
+    NtUserRegisterClass(nm, (void*)proc);
+    return 1;   // ATOM
+}
+__declspec(dllexport) unsigned short RegisterClassW(const WNDCLASSW* wc) { return wc ? u32_register_class(wc->lpszClassName, wc->lpfnWndProc) : 0; }
+__declspec(dllexport) unsigned short RegisterClassExW(const WNDCLASSEXW* wc) { return wc ? u32_register_class(wc->lpszClassName, wc->lpfnWndProc) : 0; }
+
+__declspec(dllexport) void* CreateWindowExW(unsigned exStyle, const u16_* className, const u16_* windowName,
+        unsigned style, int x, int y, int w, int h, void* parent, void* menu, void* inst, void* param) {
+    (void)exStyle; (void)menu; (void)inst; (void)param;
+    return create_window_impl(u32_wpool(className), u32_wpool(windowName), style, x, y, w, h, parent, WND_BG_DEFAULT, 0);
+}
+__declspec(dllexport) long long DefWindowProcW(void* hwnd, unsigned msg, ULL wParam, ULL lParam) {
+    if (msg == WM_DESTROY) { NtUserPostQuitMessage(0); return 0; }
+    (void)hwnd; (void)wParam; (void)lParam; return 0;
+}
+
+// ---- loop de mensagens (W) — delega ao mesmo win32k das A-variants ----
+__declspec(dllexport) int GetMessageW(MSG* msg, void* hwnd, unsigned mn, unsigned mx) { (void)hwnd;(void)mn;(void)mx; return (int)NtUserGetMessage(msg); }
+__declspec(dllexport) int PeekMessageW(MSG* msg, void* hwnd, unsigned mn, unsigned mx, unsigned rm) {
+    (void)hwnd;(void)mn;(void)mx;(void)rm; if (msg) { msg->hwnd=0; msg->message=0; msg->wParam=0; msg->lParam=0; } return 0;  // sem msg pendente
+}
+__declspec(dllexport) long long DispatchMessageW(const MSG* msg) {
+    if (!msg) return 0;
+    NtUserDispatchMessage((void*)msg);
+    WNDPROC proc = wndproc_of(msg->hwnd);
+    if (!proc) return DefWindowProcW(msg->hwnd, msg->message, msg->wParam, msg->lParam);
+    return proc(msg->hwnd, msg->message, msg->wParam, msg->lParam);
+}
+__declspec(dllexport) int PostMessageW(void* hwnd, unsigned msg, ULL w, ULL l) { return (int)NtUserPostMessage(hwnd, msg, w, l); }
+__declspec(dllexport) long long SendMessageW(void* hwnd, unsigned msg, ULL w, ULL l) {
+    WNDPROC proc = wndproc_of(hwnd);   // SendMessage e' sincrono: chama o wndproc direto (ring 3)
+    if (proc) return proc(hwnd, msg, w, l);
+    return DefWindowProcW(hwnd, msg, w, l);
+}
+__declspec(dllexport) long long SendMessageTimeoutW(void* hwnd, unsigned msg, ULL w, ULL l, unsigned fl, unsigned to, ULL* res) { (void)fl;(void)to; long long r=SendMessageW(hwnd,msg,w,l); if(res)*res=(ULL)r; return 1; }
+__declspec(dllexport) int SendNotifyMessageW(void* hwnd, unsigned msg, ULL w, ULL l) { return (int)PostMessageW(hwnd,msg,w,l); }
+
+// ---- geometria / posicao (tela fixa 1024x768) ----
+__declspec(dllexport) int GetClientRect(void* hwnd, RECT* r) { (void)hwnd; if(!r) return 0; r->left=0; r->top=0; r->right=1024; r->bottom=768; return 1; }
+__declspec(dllexport) int GetWindowRect(void* hwnd, RECT* r) { (void)hwnd; if(!r) return 0; r->left=0; r->top=0; r->right=1024; r->bottom=768; return 1; }
+__declspec(dllexport) void* GetDesktopWindow(void) { return (void*)1; }   // hwnd do desktop (nao-nulo, referencia)
+__declspec(dllexport) int SetWindowPos(void* hwnd, void* after, int x, int y, int w, int h, unsigned fl) { (void)hwnd;(void)after;(void)x;(void)y;(void)w;(void)h;(void)fl; return 1; }
+__declspec(dllexport) int ScreenToClient(void* hwnd, POINT* p) { (void)hwnd; (void)p; return 1; }   // identidade (janela na origem)
+__declspec(dllexport) int ClientToScreen(void* hwnd, POINT* p) { (void)hwnd; (void)p; return 1; }
+__declspec(dllexport) int MapWindowPoints(void* from, void* to, POINT* pts, unsigned n) { (void)from;(void)to;(void)pts;(void)n; return 0; }
+__declspec(dllexport) int GetWindowInfo(void* hwnd, void* pwi) { (void)hwnd; if(pwi){ unsigned char* b=(unsigned char*)pwi; for(int i=0;i<60;i++) b[i]=0; } return 1; }
+
+// ---- atributos de janela (GWL_*) ----
+__declspec(dllexport) long long GetWindowLongPtrW(void* hwnd, int idx) { (void)hwnd;(void)idx; return 0; }
+__declspec(dllexport) long long SetWindowLongPtrW(void* hwnd, int idx, long long v) { (void)hwnd;(void)idx;(void)v; return 0; }
+__declspec(dllexport) long GetWindowLongW(void* hwnd, int idx) { (void)hwnd;(void)idx; return 0; }
+__declspec(dllexport) long SetWindowLongW(void* hwnd, int idx, long v) { (void)hwnd;(void)idx;(void)v; return 0; }
+
+// ---- props (janela -> dado). O explorer guarda ponteiros nas janelas. Tabela por (hwnd,nome). ----
+#define U32_MAX_PROPS 128
+static struct { void* hwnd; const u16_* name; void* val; } g_props[U32_MAX_PROPS];
+static int prop_find(void* hwnd, const u16_* name) {
+    for (int i = 0; i < U32_MAX_PROPS; i++) if (g_props[i].hwnd == hwnd && g_props[i].name) {
+        if (name && (unsigned long long)name < 0x10000ULL) { if (g_props[i].name == name) return i; }   // ATOM
+        else if (u32_weq(g_props[i].name, name)) return i;
+    }
+    return -1;
+}
+__declspec(dllexport) int SetPropW(void* hwnd, const u16_* name, void* val) {
+    int i = prop_find(hwnd, name);
+    if (i < 0) for (int k = 0; k < U32_MAX_PROPS; k++) if (!g_props[k].hwnd) { i = k; break; }
+    if (i < 0) return 0;
+    g_props[i].hwnd = hwnd; g_props[i].name = name; g_props[i].val = val; return 1;
+}
+__declspec(dllexport) void* GetPropW(void* hwnd, const u16_* name) { int i = prop_find(hwnd, name); return i >= 0 ? g_props[i].val : 0; }
+__declspec(dllexport) void* RemovePropW(void* hwnd, const u16_* name) { int i = prop_find(hwnd, name); if (i < 0) return 0; void* v = g_props[i].val; g_props[i].hwnd = 0; g_props[i].name = 0; g_props[i].val = 0; return v; }
+
+// ---- timers / hooks ----
+__declspec(dllexport) unsigned long long SetTimer(void* hwnd, unsigned long long id, unsigned el, void* proc) { (void)hwnd;(void)el;(void)proc; return id ? id : 1; }
+__declspec(dllexport) unsigned long long SetCoalescableTimer(void* hwnd, unsigned long long id, unsigned el, void* proc, unsigned tol) { (void)tol; return SetTimer(hwnd,id,el,proc); }
+__declspec(dllexport) int KillTimer(void* hwnd, unsigned long long id) { (void)hwnd;(void)id; return 1; }
+__declspec(dllexport) void* SetWindowsHookExW(int id, void* fn, void* mod, unsigned tid) { (void)id;(void)fn;(void)mod;(void)tid; return u32_h(); }
+__declspec(dllexport) int UnhookWindowsHookEx(void* h) { (void)h; return 1; }
+__declspec(dllexport) long long CallNextHookEx(void* h, int code, ULL w, ULL l) { (void)h;(void)code;(void)w;(void)l; return 0; }
+
+// ---- consultas de janela ----
+__declspec(dllexport) int IsWindow(void* hwnd) { return hwnd ? 1 : 0; }
+__declspec(dllexport) int IsWindowVisible(void* hwnd) { return hwnd ? 1 : 0; }
+__declspec(dllexport) int IsWindowEnabled(void* hwnd) { return hwnd ? 1 : 0; }
+__declspec(dllexport) void* GetParent(void* hwnd) { (void)hwnd; return 0; }
+__declspec(dllexport) void* GetAncestor(void* hwnd, unsigned fl) { (void)fl; return hwnd; }
+__declspec(dllexport) void* GetForegroundWindow(void) { return 0; }
+__declspec(dllexport) int SetForegroundWindow(void* hwnd) { (void)hwnd; return 1; }
+__declspec(dllexport) void* GetFocus(void) { return 0; }
+__declspec(dllexport) void* GetWindow(void* hwnd, unsigned cmd) { (void)hwnd;(void)cmd; return 0; }
+__declspec(dllexport) int EnumWindows(void* proc, ULL lparam) { (void)proc;(void)lparam; return 1; }
+__declspec(dllexport) int EnumChildWindows(void* hwnd, void* proc, ULL lparam) { (void)hwnd;(void)proc;(void)lparam; return 1; }
+__declspec(dllexport) int EnumThreadWindows(unsigned tid, void* proc, ULL lparam) { (void)tid;(void)proc;(void)lparam; return 1; }
+__declspec(dllexport) int GetClassInfoExW(void* inst, const u16_* cls, void* wc) { (void)inst;(void)cls;(void)wc; return 0; }   // classe nao registrada -> caller registra
+__declspec(dllexport) int GetClassInfoW(void* inst, const u16_* cls, void* wc) { (void)inst;(void)cls;(void)wc; return 0; }
+__declspec(dllexport) int GetClassNameW(void* hwnd, u16_* buf, int cch) { (void)hwnd; if(buf&&cch>0) buf[0]=0; return 0; }
+__declspec(dllexport) unsigned RegisterWindowMessageW(const u16_* s) { (void)s; static unsigned m = 0xC000; return m++; }
+__declspec(dllexport) int SetWindowTextW(void* hwnd, const u16_* s) { (void)hwnd;(void)s; return 1; }
+__declspec(dllexport) int GetWindowTextW(void* hwnd, u16_* buf, int cch) { (void)hwnd; if(buf&&cch>0) buf[0]=0; return 0; }
+__declspec(dllexport) unsigned GetWindowThreadProcessId(void* hwnd, unsigned* pid) { (void)hwnd; if(pid)*pid=1; return 1; }
+__declspec(dllexport) int GetWindowTextLengthW(void* hwnd) { (void)hwnd; return 0; }
+__declspec(dllexport) void* WindowFromPoint(POINT p) { (void)p.x;(void)p.y; return 0; }
+__declspec(dllexport) void* ChildWindowFromPoint(void* hwnd, POINT p) { (void)hwnd;(void)p.x;(void)p.y; return 0; }
+__declspec(dllexport) int GetGUIThreadInfo(unsigned tid, void* pgui) { (void)tid;(void)pgui; return 0; }
+// DeferWindowPos (batch de SetWindowPos): devolve o handle recebido (encadeia sem efeito).
+__declspec(dllexport) void* BeginDeferWindowPos(int n) { (void)n; return u32_h(); }
+__declspec(dllexport) void* DeferWindowPos(void* h, void* hwnd, void* after, int x,int y,int w,int hh, unsigned fl) { (void)hwnd;(void)after;(void)x;(void)y;(void)w;(void)hh;(void)fl; return h; }
+__declspec(dllexport) int EndDeferWindowPos(void* h) { (void)h; return 1; }
+
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }

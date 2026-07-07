@@ -12,6 +12,10 @@
 #include "mm/pmm.h"
 #include "input/keyboard.h"
 #include "filesystems/ntfs/ntfs.h"
+#include "hal/cpu.h"            // HalReadMsr / HalWriteMsr (salvar/restaurar GS base)
+#include "ke/amd64/kpcr.h"     // MSR_IA32_GS_BASE
+#include "ke/amd64/gdt.h"      // tss_get_rsp0 / tss_set_rsp0 (segunda pilha de kernel)
+#include "mm/paging.h"         // mm_get_cr3 / mm_switch_cr3
 
 // Device de volume NTFS (ntfs_fs.c) — para rotear NtCreateFile/Read/QueryDir.
 PDEVICE_OBJECT ntfs_fs_volume_device(void);
@@ -20,6 +24,8 @@ extern void kputs(const char* s);
 extern void kputc(char c);
 extern void kput_hex(uint64_t v);
 extern void kput_dec(uint64_t v);
+extern void* kmalloc(uint64_t n);   // heap (tambem externado junto ao sys_loadlibrary)
+extern void  kfree(void* p);
 
 void* g_user_exit[5];
 
@@ -248,18 +254,82 @@ static void sys_close(struct regs* r) {
 }
 
 // ---- Process Manager (Ps*) ----
-// NtCreateProcess(out HANDLE*, const char* image_name) — cria um EPROCESS
-// (objeto + handle). Versao simplificada: cria so o objeto, herdando o CR3
-// atual; nao roda a imagem (o loader e quem roda os .exe do boot).
+// FRENTE 4 (Fase 4a) — roda a imagem de um FILHO de forma SINCRONA e ANINHADA dentro
+// do syscall do PAI. Reusa o caminho provado ldr_run -> usermode_enter, mas o filho
+// reusa endereços FIXOS (pilha/TEB/PEB em 0x600000, o setjmp global g_user_exit, o
+// gs-base) e a UNICA pilha de kernel (TSS.RSP0). Salvamos e restauramos tudo que o
+// filho "pisa", senao o PAI volta corrompido:
+//   1) TSS.RSP0 -> uma SEGUNDA pilha de kernel para o filho. Sem isso, o int 0x80 do
+//      filho recarrega o topo da pilha de kernel COMPARTILHADA e sobrescreve o trap
+//      frame do pai -> o pai NUNCA volta (falha deterministica);
+//   2) g_user_exit[5] (o buffer setjmp/longjmp global; o setjmp do filho o sobrescreve);
+//   3) a janela [0x600000,0x700000) = pilha + TEB + PEB do pai (o filho a reusa);
+//   4) CR3 (mapa de memoria do pai);
+//   5) IA32_GS_BASE (a saida do filho troca para o KPCR; o pai quer o seu TEB);
+//   + FPU/SSE/MXCSR via fxsave/fxrstor.
+// Vazamentos conhecidos (nao travam; enderecados depois): o CR3 do filho, a regiao de
+// imagem contigua e os objetos EPROCESS nao sao liberados.
+static void run_child_image(const char* name, const void* bytes) {
+    const uint64_t UWIN_BASE = 0x600000ULL;   // base da janela pilha/TEB/PEB do pai
+    const uint64_t UWIN_SIZE = 0x100000ULL;   // 1 MiB
+    const uint64_t KCHILD    = 0x8000ULL;     // 32 KiB: pilha de kernel do filho
+
+    void* kstk = kmalloc(KCHILD);
+    if (!kstk) { kputs("[ps] createprocess: sem RAM p/ pilha de kernel do filho\n"); return; }
+    void* win  = kmalloc(UWIN_SIZE);
+    if (!win)  { kfree(kstk); kputs("[ps] createprocess: sem RAM p/ salvar a janela do pai\n"); return; }
+    uint64_t kstk_top = ((uint64_t)(uintptr_t)kstk + KCHILD) & ~0xFULL;
+
+    // ---- SALVA o estado do pai ----
+    uint8_t fxarea[512] __attribute__((aligned(16)));
+    __asm__ volatile ("fxsave (%0)" : : "r"(fxarea) : "memory");
+    void* saved_jmp[5];
+    for (int i = 0; i < 5; i++) saved_jmp[i] = g_user_exit[i];
+    { volatile uint64_t* s = (volatile uint64_t*)(uintptr_t)UWIN_BASE;
+      volatile uint64_t* d = (volatile uint64_t*)win;
+      for (uint64_t i = 0; i < UWIN_SIZE / 8; i++) d[i] = s[i]; }
+    uint64_t saved_cr3  = mm_get_cr3();
+    uint64_t saved_gs   = HalReadMsr(MSR_IA32_GS_BASE);
+    uint64_t saved_rsp0 = tss_get_rsp0();
+
+    // ---- Troca a pilha de kernel e RODA o filho (sincrono; sai via longjmp) ----
+    tss_set_rsp0(kstk_top);
+    kputs("[ps] createprocess: rodando o filho '"); kputs(name); kputs("' (sincrono)...\n");
+    ldr_run(name, bytes);
+
+    // ---- RESTAURA o estado do pai ----
+    tss_set_rsp0(saved_rsp0);
+    { volatile uint64_t* s = (volatile uint64_t*)win;
+      volatile uint64_t* d = (volatile uint64_t*)(uintptr_t)UWIN_BASE;
+      for (uint64_t i = 0; i < UWIN_SIZE / 8; i++) d[i] = s[i]; }
+    for (int i = 0; i < 5; i++) g_user_exit[i] = saved_jmp[i];
+    mm_switch_cr3(saved_cr3);
+    HalWriteMsr(MSR_IA32_GS_BASE, saved_gs);
+    __asm__ volatile ("fxrstor (%0)" : : "r"(fxarea) : "memory");
+    kputs("[ps] createprocess: filho terminou; pai restaurado.\n");
+
+    kfree(win);
+    kfree(kstk);
+}
+
+// NtCreateProcess(out HANDLE*, const char* image_name) — cria um EPROCESS (objeto +
+// handle) e, na Fase 4a, RODA a imagem do filho de verdade (antes so criava o objeto).
 static void sys_createprocess(struct regs* r) {
     HANDLE*     out  = (HANDLE*)(uintptr_t)r->rdi;
     const char* name = (const char*)(uintptr_t)r->rsi;
     uint64_t cr3; __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
 
+    // (1) Objeto EPROCESS + handle (o handle devolvido ao pai). Inalterado.
     PEPROCESS p = PsCreateProcess(name, 0, cr3);
     if (!p) { if (out) *out = 0; r->rax = (uint64_t)(uint32_t)STATUS_UNSUCCESSFUL; return; }
     HANDLE h = ob_create_handle(p);
     if (out) *out = h;
+
+    // (2) Resolve os bytes da imagem do filho (Fase 4a: modulo de boot pelo nome) e
+    //     RODA. Se nao houver a imagem, mantem o comportamento antigo (so o objeto).
+    const void* bytes = ldr_get_module_bytes(name);
+    if (bytes) run_child_image(name, bytes);
+
     r->rax = (uint64_t)(uint32_t)STATUS_SUCCESS;
 }
 

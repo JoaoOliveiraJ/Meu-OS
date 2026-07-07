@@ -532,6 +532,24 @@ __declspec(dllexport) void GetStartupInfoW(void* si) {
     *(unsigned*)p = 104;   // cb = sizeof(STARTUPINFOW)
 }
 
+// --- Objetos de sincronizacao (api-ms-win-core-synch). Ainda nao ha objetos de kernel
+//     expostos ao usermode; no modelo single-threaded (sem threads de ring-3) NAO ha
+//     contencao, entao handles pseudo (nao-nulos, na faixa alta) + waits imediatos sao
+//     CORRETOS p/ a init do explorer. Viram objetos reais qdo houver threads/eventos. ---
+static void* k32_pseudo(void) { static unsigned long long h = 0x40001000ULL; h += 0x10; return (void*)h; }
+__declspec(dllexport) void* CreateEventW(void* a, int mr, int is, const K32_WCHAR* n)  { (void)a;(void)mr;(void)is;(void)n; return k32_pseudo(); }
+__declspec(dllexport) void* CreateEventExW(void* a, const K32_WCHAR* n, unsigned f, unsigned acc) { (void)a;(void)n;(void)f;(void)acc; return k32_pseudo(); }
+__declspec(dllexport) void* OpenEventW(unsigned acc, int inh, const K32_WCHAR* n) { (void)acc;(void)inh;(void)n; return k32_pseudo(); }
+__declspec(dllexport) int   SetEvent(void* h)   { (void)h; return 1; }
+__declspec(dllexport) int   ResetEvent(void* h) { (void)h; return 1; }
+__declspec(dllexport) void* CreateMutexW(void* a, int owner, const K32_WCHAR* n) { (void)a;(void)owner;(void)n; return k32_pseudo(); }
+__declspec(dllexport) void* CreateMutexExW(void* a, const K32_WCHAR* n, unsigned f, unsigned acc) { (void)a;(void)n;(void)f;(void)acc; return k32_pseudo(); }
+__declspec(dllexport) int   ReleaseMutex(void* h) { (void)h; return 1; }
+__declspec(dllexport) void* CreateSemaphoreExW(void* a, long ini, long mx, const K32_WCHAR* n, unsigned f, unsigned acc) { (void)a;(void)ini;(void)mx;(void)n;(void)f;(void)acc; return k32_pseudo(); }
+__declspec(dllexport) int   ReleaseSemaphore(void* h, long c, long* prev) { (void)h;(void)c; if (prev) *prev = 0; return 1; }
+__declspec(dllexport) unsigned WaitForSingleObjectEx(void* h, unsigned ms, int al) { (void)h;(void)ms;(void)al; return 0; } // WAIT_OBJECT_0
+__declspec(dllexport) unsigned WaitForMultipleObjectsEx(unsigned n, void* h, int all, unsigned ms, int al) { (void)n;(void)h;(void)all;(void)ms;(void)al; return 0; }
+
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }

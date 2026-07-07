@@ -409,6 +409,16 @@ void isr_handler(struct regs* r) {
                 return;     // recuperado — continua execucao do driver
             }
         }
+        // Frente C (bring-up do explorer real): se um processo de RING-3 chamou um
+        // ponteiro nulo (import NAO resolvido -> IAT=0 -> CALL [0] -> rip=0), o endereco
+        // de RETORNO esta no topo da pilha do usuario ([rsp]). Logamos p/ identificar
+        // EXATAMENTE qual import faltou (desmontar o .exe nesse endereco = a proxima
+        // funcao a implementar de verdade). So no caminho de halt; nao toca o pintok.
+        if (r->rip == 0 && (r->err_code & 4)) {   // U=1: a falha veio de ring-3
+            kputs("  [bringup] ring-3 chamou import NAO resolvido (IAT=0). caller[rsp]=");
+            kput_hex(*(volatile uint64_t*)(uintptr_t)r->rsp);
+            kputs(" (desmonte o .exe nesse endereco p/ achar a funcao)\n");
+        }
         kputs("\nSistema parado.\n");
         for (;;) __asm__ volatile ("cli; hlt");
     }

@@ -37,6 +37,8 @@ enum {
     SYS_USERSETCURSORPOS = 47,
     // --- FASE 3f: LoadLibrary em runtime ---
     SYS_LOADLIBRARY = 48,
+    // --- Frente C: tempo do sistema p/ o usermode (explorer real) ---
+    SYS_QUERYSYSTEMTIME = 49,
 };
 
 // long long = 64-bit no Windows (LLP64), para nao truncar ponteiros.
@@ -90,6 +92,10 @@ static long long sc6(long long n, long long a1, long long a2, long long a3,
 }
 
 #define IP(x) ((long long)(__INTPTR_TYPE__)(x))
+
+// Frente C (explorer real): tempo do sistema (o kernel le o KUSER_SHARED_DATA).
+// out = { long long SystemTime; unsigned TickCount; }.
+__declspec(dllexport) long NtQuerySystemTime(void* out) { return (long)sc1(SYS_QUERYSYSTEMTIME, IP(out)); }
 
 // "Native API" (Nt*): o ponto onde o modo usuário entra no kernel.
 __declspec(dllexport) long NtUserMessageBox(const char* text, const char* caption) {

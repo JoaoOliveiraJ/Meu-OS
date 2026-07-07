@@ -122,6 +122,7 @@ static const char* apiset_redirect(const char* dll) {
     if (has_prefix_ci(dll, "api-ms-win-eventing-"))      return "advapi32.dll"; // ETW: no-op (sem tracing)
     if (has_prefix_ci(dll, "api-ms-win-shell-"))         return "shell32.dll"; // namespace/changenotify/dataobject/shdirectory
     if (has_prefix_ci(dll, "api-ms-win-shcore-"))        return "shcore.dll";  // DPI/stream/registro/thread/appid
+    if (has_prefix_ci(dll, "api-ms-win-storage-"))       return "shell32.dll"; // storage-exports-internal: SHGetFolderPathEx/KnownFolderIDList + Get/SetThreadFlags
     // Extension API Sets (ext-ms-win-*): contratos OPCIONAIS (delay-load) -> DLL host real.
     if (has_prefix_ci(dll, "ext-ms-win-rtcore-ntuser-")) return "user32.dll";
     if (has_prefix_ci(dll, "ext-ms-win-ntuser-"))        return "user32.dll";
@@ -131,6 +132,9 @@ static const char* apiset_redirect(const char* dll) {
     if (has_prefix_ci(dll, "ext-ms-win-shell-"))         return "shell32.dll";
     if (has_prefix_ci(dll, "ext-ms-win-security-"))      return "advapi32.dll";
     if (has_prefix_ci(dll, "ext-ms-win-core-"))          return "kernel32.dll";
+    // DLLs DIRETAS mapeadas p/ um host que ja temos (estilo Wine): evita um modulo
+    // Multiboot extra (limite ~16). userenv (perfil/appcontainer) -> advapi32 (seguranca).
+    if (has_prefix_ci(dll, "userenv"))                   return "advapi32.dll";
     return dll;
 }
 

@@ -114,6 +114,16 @@ __declspec(dllexport) HRESULT_ SHGetLocalizedName(const void* path, void* module
 __declspec(dllexport) HRESULT_ SHEvaluateSystemCommandTemplate(const void* cmd, void** app, void** args, void** dir) { (void)cmd; if (app)*app=0; if (args)*args=0; if (dir)*dir=0; return E_FAIL_; }
 __declspec(dllexport) HRESULT_ SHEnableServiceObject(const void* clsid, int enable) { (void)clsid;(void)enable; return S_OK_; }
 
+// ---- api-ms-win-storage-exports-internal-l1-1-0.dll (o explorer importa daqui) ----
+// SHGetFolderPathEx/SHGetKnownFolderIDList: sem backing de known-folders/FS ainda ->
+// falham honestamente (buffer/pidl zerados; o explorer degrada). Get/SetThreadFlags: par
+// de flags de thread do shell (mask,value); single-thread aqui, uma variavel serve.
+static unsigned g_shell_thread_flags = 0;
+__declspec(dllexport) HRESULT_ SHGetFolderPathEx(const void* rfid, unsigned flags, void* token, unsigned short* path, unsigned cch) { (void)rfid;(void)flags;(void)token; if (path && cch) path[0]=0; return E_FAIL_; }
+__declspec(dllexport) HRESULT_ SHGetKnownFolderIDList(const void* rfid, unsigned flags, void* token, void** ppidl) { (void)rfid;(void)flags;(void)token; if (ppidl)*ppidl=0; return E_FAIL_; }
+__declspec(dllexport) unsigned GetThreadFlags(void) { return g_shell_thread_flags; }
+__declspec(dllexport) void SetThreadFlags(unsigned mask, unsigned value) { g_shell_thread_flags = (g_shell_thread_flags & ~mask) | (value & mask); }
+
 // ---- stub generico ESPECIFICO p/ os ordinais internos ainda nao mapeados: devolve 0
 //      (S_OK/NULL/FALSE — o caminho benigno). Cada ordinal aponta aqui pelo .def. ----
 __declspec(dllexport) long long shell_ord_stub(void) { return 0; }

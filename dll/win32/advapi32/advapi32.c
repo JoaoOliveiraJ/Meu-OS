@@ -309,6 +309,13 @@ __declspec(dllexport) long SHRegGetBoolUSValueW(const void* subkey, const void* 
 __declspec(dllexport) long SHRegGetUSValueW(const void* subkey, const void* value, unsigned* type, void* data, unsigned* cb, int hkcu, void* defData, unsigned defLen) { (void)subkey;(void)value;(void)hkcu;(void)defData;(void)defLen; if (type)*type=0; if (cb)*cb=0; (void)data; return 2; }   // ERROR_FILE_NOT_FOUND
 __declspec(dllexport) long IsProcessInWDAGContainer(void* rsv, int* inContainer) { (void)rsv; if (inContainer)*inContainer=0; return 0; }   // S_OK, nao
 
+// ---- USERENV.dll (redirect no loader): perfil de usuario + appcontainer ----
+// GetProfileType: perfil LOCAL normal (flags=0: nao mandatory/roaming/temporary). TRUE.
+__declspec(dllexport) int GetProfileType(unsigned long* pdwFlags) { if (pdwFlags)*pdwFlags=0; return 1; }
+// DeriveAppContainerSidFromAppContainerName: sem sandbox de appcontainer aqui -> falha
+// honesta (o explorer roda como usuario normal, fora de qualquer appcontainer).
+__declspec(dllexport) long DeriveAppContainerSidFromAppContainerName(const void* name, void** ppsid) { (void)name; if (ppsid)*ppsid=0; return (long)0x80004001; }   // E_NOTIMPL
+
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }

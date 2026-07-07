@@ -214,8 +214,8 @@ __declspec(dllexport) void* LdrLoadDll(const char* name) {
 }
 
 // ---- Process Manager (Ps*) ----
-__declspec(dllexport) long NtCreateProcess(void* out_handle, const char* image_name) {
-    return (long)sc2(SYS_CREATEPROCESS, IP(out_handle), IP(image_name));
+__declspec(dllexport) long NtCreateProcess(void* out_handle, const char* image_name, const char* cmdline) {
+    return (long)sc3(SYS_CREATEPROCESS, IP(out_handle), IP(image_name), IP(cmdline));
 }
 __declspec(dllexport) long NtCreateThread(void* out_handle, void* process, void* start) {
     return (long)sc3(SYS_CREATETHREAD, IP(out_handle), IP(process), IP(start));

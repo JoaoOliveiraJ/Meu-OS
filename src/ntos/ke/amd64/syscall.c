@@ -16,6 +16,7 @@
 #include "ke/amd64/kpcr.h"     // MSR_IA32_GS_BASE
 #include "ke/amd64/gdt.h"      // tss_get_rsp0 / tss_set_rsp0 (segunda pilha de kernel)
 #include "mm/paging.h"         // mm_get_cr3 / mm_switch_cr3
+#include "ke/amd64/usermode.h" // usermode_set_cmdline (argv do filho, Fase 4c)
 
 // Device de volume NTFS (ntfs_fs.c) — para rotear NtCreateFile/Read/QueryDir.
 PDEVICE_OBJECT ntfs_fs_volume_device(void);
@@ -269,7 +270,7 @@ static void sys_close(struct regs* r) {
 //   + FPU/SSE/MXCSR via fxsave/fxrstor.
 // Vazamentos conhecidos (nao travam; enderecados depois): o CR3 do filho, a regiao de
 // imagem contigua e os objetos EPROCESS nao sao liberados.
-static void run_child_image(const char* name, const void* bytes) {
+static void run_child_image(const char* name, const void* bytes, const char* cmdline) {
     const uint64_t UWIN_BASE = 0x600000ULL;   // base da janela pilha/TEB/PEB do pai
     const uint64_t UWIN_SIZE = 0x100000ULL;   // 1 MiB
     const uint64_t KCHILD    = 0x8000ULL;     // 32 KiB: pilha de kernel do filho
@@ -294,8 +295,10 @@ static void run_child_image(const char* name, const void* bytes) {
 
     // ---- Troca a pilha de kernel e RODA o filho (sincrono; sai via longjmp) ----
     tss_set_rsp0(kstk_top);
+    usermode_set_cmdline(cmdline);   // build_teb_peb do filho grava a cmdline em 0x601800
     kputs("[ps] createprocess: rodando o filho '"); kputs(name); kputs("' (sincrono)...\n");
     ldr_run(name, bytes);
+    usermode_set_cmdline(0);          // limpa p/ o proximo processo (boot/outro filho) nao herdar
 
     // ---- RESTAURA o estado do pai ----
     tss_set_rsp0(saved_rsp0);
@@ -315,8 +318,9 @@ static void run_child_image(const char* name, const void* bytes) {
 // NtCreateProcess(out HANDLE*, const char* image_name) — cria um EPROCESS (objeto +
 // handle) e, na Fase 4a, RODA a imagem do filho de verdade (antes so criava o objeto).
 static void sys_createprocess(struct regs* r) {
-    HANDLE*     out  = (HANDLE*)(uintptr_t)r->rdi;
-    const char* name = (const char*)(uintptr_t)r->rsi;
+    HANDLE*     out     = (HANDLE*)(uintptr_t)r->rdi;
+    const char* name    = (const char*)(uintptr_t)r->rsi;
+    const char* cmdline = (const char*)(uintptr_t)r->rdx;   // Fase 4c: linha de comando (argv)
     uint64_t cr3; __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
 
     // (1) Objeto EPROCESS + handle (o handle devolvido ao pai). Inalterado.
@@ -337,14 +341,14 @@ static void sys_createprocess(struct regs* r) {
             if (buf) {
                 if (ntfs_read_file(fi.mft_record, 0, buf, (uint32_t)fi.size) == (uint32_t)fi.size) {
                     kputs("[ps] createprocess: lendo o filho do DISCO NTFS: '"); kputs(name); kputs("'\n");
-                    run_child_image(name, buf);
+                    run_child_image(name, buf, cmdline);
                 }
                 kfree(buf);   // ldr_run ja copiou a imagem (pe_map); o buffer nao e mais preciso
             }
         }
     } else {
         const void* bytes = ldr_get_module_bytes(name);
-        if (bytes) run_child_image(name, bytes);
+        if (bytes) run_child_image(name, bytes, cmdline);
     }
 
     r->rax = (uint64_t)(uint32_t)STATUS_SUCCESS;

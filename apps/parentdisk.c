@@ -16,14 +16,16 @@ __declspec(dllimport) unsigned WaitForSingleObject(void* handle, unsigned timeou
 __declspec(dllimport) int      CloseHandle(void* handle);
 
 int main(void) {
-    printf("[parent-disk] lancando o filho a partir do DISCO (C:\\child.exe)...\n");
+    // Linha de comando REAL para o filho do disco (o CRT do filho parseia em argv[]).
+    char cmd[] = "child.exe do-disco 7";
+    printf("[parent-disk] lancando C:\\child.exe do DISCO com cmdline \"%s\"...\n", cmd);
 
     char si[104];
     for (int i = 0; i < 104; i++) si[i] = 0;
     *(unsigned*)si = 104;
 
     PROCINFO pi = { 0, 0, 0, 0 };
-    int ok = CreateProcessA("C:\\child.exe", 0, 0, 0, 0, 0, 0, 0, si, &pi);
+    int ok = CreateProcessA("C:\\child.exe", cmd, 0, 0, 0, 0, 0, 0, si, &pi);
     if (!ok) { printf("[parent-disk] ERRO: CreateProcess falhou\n"); return 1; }
 
     WaitForSingleObject(pi.hProcess, 0xFFFFFFFFu);   // INFINITE

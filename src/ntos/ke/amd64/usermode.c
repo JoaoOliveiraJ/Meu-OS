@@ -25,6 +25,17 @@ extern void kput_hex(uint64_t v);
 #define PEB_ADDR      (USTACK_BASE + 0x1000ULL)  // 0x601000
 #define USTACK_LIMIT  (USTACK_BASE + 0x2000ULL)  // fundo util da pilha (acima do TEB/PEB)
 
+// FRENTE 4 (Fase 4c) — linha de comando do processo (argv). O sys_createprocess seta
+// esta string com a cmdline do filho antes de rodar a imagem; o build_teb_peb a escreve
+// em PEB+0x800 (0x601800), e o CRT (ucrtbase) le/parseia em argv la'. Vazia p/ apps de
+// boot (default "crthello.exe"). E' um global de kernel; nao esta na janela salva/restaurada.
+static char g_proc_cmdline[256] = {0};
+void usermode_set_cmdline(const char* s) {
+    if (!s) { g_proc_cmdline[0] = 0; return; }
+    int i = 0; while (s[i] && i < 255) { g_proc_cmdline[i] = s[i]; i++; }
+    g_proc_cmdline[i] = 0;
+}
+
 // Monta um TEB + PEB minimos no fundo da janela de pilha. load_base = ImageBase
 // REAL de carga da imagem (apos relocacao). Escreve direto na RAM identidade
 // (mesmo frame fisico que a app enxerga no CR3 dela — a faixa baixa e clonada).
@@ -40,6 +51,13 @@ static void build_teb_peb(uint64_t load_base) {
     *(volatile uint64_t*)(uintptr_t)(TEB_ADDR + 0x68) = 0;             // LastErrorValue
     // PEB (subset): o que o CRT le primeiro.
     *(volatile uint64_t*)(uintptr_t)(PEB_ADDR + 0x10) = load_base;     // ImageBaseAddress
+    // Fase 4c: linha de comando em PEB+0x800 (0x601800), lida pelo CRT p/ montar argv.
+    // Vazio -> o CRT usa o default. A pilha desce de 0x700000 e nunca alcanca aqui.
+    if (g_proc_cmdline[0]) {
+        volatile char* c = (volatile char*)(uintptr_t)(PEB_ADDR + 0x800);
+        int i = 0; while (g_proc_cmdline[i] && i < 255) { c[i] = g_proc_cmdline[i]; i++; }
+        c[i] = 0;
+    }
 }
 
 // Troca para ring 3 montando um frame de iretq (SS, RSP, RFLAGS, CS, RIP).

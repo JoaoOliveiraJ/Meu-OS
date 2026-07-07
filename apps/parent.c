@@ -16,7 +16,10 @@ __declspec(dllimport) unsigned WaitForSingleObject(void* handle, unsigned timeou
 __declspec(dllimport) int      CloseHandle(void* handle);
 
 int main(void) {
-    printf("[parent] lancando o filho (child.exe)...\n");
+    // Linha de comando REAL passada ao filho; o CRT do filho a parseia em argv[]
+    // (argv[0] por convencao = nome do programa). Buffer mutavel (o kernel copia).
+    char cmd[] = "child.exe alpha beta 42";
+    printf("[parent] lancando o filho com cmdline \"%s\"...\n", cmd);
 
     // STARTUPINFOA zerado com cb=104 (o kernel32 ignora, mas passamos como no Windows).
     char si[104];
@@ -24,7 +27,7 @@ int main(void) {
     *(unsigned*)si = 104;
 
     PROCINFO pi = { 0, 0, 0, 0 };
-    int ok = CreateProcessA("child.exe", 0, 0, 0, 0, 0, 0, 0, si, &pi);
+    int ok = CreateProcessA("child.exe", cmd, 0, 0, 0, 0, 0, 0, si, &pi);
     if (!ok) { printf("[parent] ERRO: CreateProcess falhou\n"); return 1; }
 
     // Espera o filho terminar. Sem escalonador, o filho ja rodou ate o fim dentro do

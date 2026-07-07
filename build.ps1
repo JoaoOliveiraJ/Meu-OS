@@ -291,6 +291,7 @@ $dll = Join-Path $root 'dll'
 $ntdllSrc    = Join-Path $dll 'ntdll\ntdll.c'
 $kernel32Src = Join-Path $dll 'win32\kernel32\kernel32.c'
 $user32Src   = Join-Path $dll 'win32\user32\user32.c'
+$user32Def   = Join-Path $dll 'win32\user32\user32.def'   # ordinais privados noname (#2005/#2521/#2522/#2573/#2574/#2611) que o explorer importa por ORDINAL
 $gdi32Src    = Join-Path $dll 'win32\gdi32\gdi32.c'
 $advapi32Src = Join-Path $dll 'win32\advapi32\advapi32.c'
 $ucrtbaseSrc = Join-Path $dll 'win32\ucrtbase\ucrtbase.c'   # FASE 3b: CRT minimo
@@ -344,7 +345,7 @@ if (Test-Path $ntdllSrc) {
         -o (Join-Path $out 'kernel32.dll') $kernel32Src (Join-Path $out 'libntdll.a')
     if ($LASTEXITCODE) { throw "kernel32.dll falhou." }
     & $zig cc @dc '-Wl,--image-base=0xE00000' "-Wl,--out-implib,$(Join-Path $out 'libuser32.a')" `
-        -o (Join-Path $out 'user32.dll') $user32Src (Join-Path $out 'libntdll.a')
+        -o (Join-Path $out 'user32.dll') $user32Src $user32Def (Join-Path $out 'libntdll.a')
     if ($LASTEXITCODE) { throw "user32.dll falhou." }
     # gdi32.dll: API GDI (TextOutA/FillRect/GetStockObject/CreateSolidBrush) -> ntdll.
     #   ImageBase 0x1A00000 (livre; ver a lista de bases ja usadas no README).

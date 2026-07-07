@@ -109,6 +109,37 @@ static WNDPROC wndproc_of(void* hwnd) {
     return 0;
 }
 
+// Forward: converte um nome de classe/janela wide (UTF-16) para ASCII agrupado
+// (a definicao real fica adiante, junto das W-variants).
+static const char* u32_wpool(const void* ws);
+
+// Resolve uma referencia de classe que pode ser um ATOM (valor < 0x10000, como o que
+// RegisterClass* devolve) OU um ponteiro de string. Nossos atoms = 0xC000 + slot; aqui
+// resolvemos o atom de volta ao NOME ASCII registrado. Sem isto, criar uma janela por
+// ATOM (ex.: o explorer real chama CreateWindowInBand(atom, ...) com o atom devolvido por
+// RegisterClassExW) derefaria um inteiro pequeno como string -> page fault em RING-3.
+#define U32_ATOM_BASE 0xC000u
+static const char* class_ref_to_name_w(const void* c) {
+    unsigned long long v = (unsigned long long)c;
+    if (!v) return 0;
+    if (v < 0x10000ULL) {                                    // ATOM (MAKEINTATOM)
+        if (v >= U32_ATOM_BASE && v < U32_ATOM_BASE + MAX_CLASSES && g_classes[v - U32_ATOM_BASE].used)
+            return g_classes[v - U32_ATOM_BASE].name;
+        return 0;                                            // atom desconhecido (classe de sistema)
+    }
+    return u32_wpool(c);                                     // string wide -> ascii agrupada
+}
+static const char* class_ref_to_name_a(const char* c) {
+    unsigned long long v = (unsigned long long)c;
+    if (!v) return 0;
+    if (v < 0x10000ULL) {                                    // ATOM
+        if (v >= U32_ATOM_BASE && v < U32_ATOM_BASE + MAX_CLASSES && g_classes[v - U32_ATOM_BASE].used)
+            return g_classes[v - U32_ATOM_BASE].name;
+        return 0;
+    }
+    return c;                                                // string ascii direta
+}
+
 // ============================================================================
 //  API
 // ============================================================================
@@ -130,7 +161,7 @@ __declspec(dllexport) unsigned short RegisterClassA(const WNDCLASSA* wc) {
     g_classes[slot].name = wc->lpszClassName;
     g_classes[slot].proc = wc->lpfnWndProc;
     NtUserRegisterClass(wc->lpszClassName, (void*)wc->lpfnWndProc);
-    return 1;   // ATOM (simplificado)
+    return (unsigned short)(U32_ATOM_BASE + slot);   // ATOM unico por classe (resolvivel em CreateWindow*)
 }
 
 // Implementacao comum: cria a janela com bgColor + flags (FASE 6). O kernel
@@ -157,7 +188,7 @@ __declspec(dllexport) void* CreateWindowExA(unsigned exStyle, const char* classN
         const char* windowName, unsigned style, int x, int y, int w, int h,
         void* parent, void* menu, void* inst, void* param) {
     (void)exStyle; (void)menu; (void)inst; (void)param;
-    return create_window_impl(className, windowName, style, x, y, w, h, parent,
+    return create_window_impl(class_ref_to_name_a(className), windowName, style, x, y, w, h, parent,
                               WND_BG_DEFAULT, 0);
 }
 
@@ -421,7 +452,31 @@ __declspec(dllexport) int TileWindows(void* par, unsigned how, const RECT* r, un
 __declspec(dllexport) void* GhostWindowFromHungWindow(void* hwnd){ (void)hwnd; return 0; }
 __declspec(dllexport) void* HungWindowFromGhostWindow(void* hwnd){ (void)hwnd; return 0; }
 __declspec(dllexport) int GetWindowBand(void* hwnd, unsigned* band){ (void)hwnd; if(band)*band=0; return 1; }
-__declspec(dllexport) void* CreateWindowInBand(unsigned ex, const void* cls, const void* name, unsigned style, int x, int y, int w, int h, void* par, void* menu, void* inst, void* pm, unsigned band){ (void)ex;(void)cls;(void)name;(void)style;(void)x;(void)y;(void)w;(void)h;(void)par;(void)menu;(void)inst;(void)pm;(void)band; return 0; }
+// CreateWindowInBand: como CreateWindowExW + um 'band' (faixa de z-order, Win8+). O explorer
+// REAL cria a sua "Worker Window" por aqui (import privado api-ms-win-rtcore-ntuser-private!
+// CreateWindowInBand), passando o ATOM devolvido por RegisterClassExW como className. Antes
+// era um stub -> 0, e o explorer, vendo hwnd==NULL, DESISTIA (wWinMain retornava 0). Agora
+// cria de verdade (mesmo caminho do CreateWindowExW), resolvendo o ATOM -> nome de classe.
+__declspec(dllexport) void* CreateWindowInBand(unsigned ex, const void* cls, const void* name, unsigned style, int x, int y, int w, int h, void* par, void* menu, void* inst, void* pm, unsigned band){ (void)ex;(void)menu;(void)inst;(void)pm;(void)band; return create_window_impl(class_ref_to_name_w(cls), u32_wpool(name), style, x, y, w, h, par, WND_BG_DEFAULT, 0); }
+// CreateWindowInBandEx: variante com typeFlags extra (mesma criacao; band+flags ignorados).
+__declspec(dllexport) void* CreateWindowInBandEx(unsigned ex, const void* cls, const void* name, unsigned style, int x, int y, int w, int h, void* par, void* menu, void* inst, void* pm, unsigned band, unsigned typeFlags){ (void)ex;(void)menu;(void)inst;(void)pm;(void)band;(void)typeFlags; return create_window_impl(class_ref_to_name_w(cls), u32_wpool(name), style, x, y, w, h, par, WND_BG_DEFAULT, 0); }
+
+// ---- ordinais PRIVADOS/noname do user32 que o explorer real importa POR ORDINAL ----
+// Exportados nos ordinais da MS via user32.def (aditivo). Sem NOME publico na user32 real;
+// implementados como stubs cujo retorno foi escolhido a partir do USO no explorer (RE das
+// call-sites) para NAO provocar um bail. Nao levam __declspec: o .def os exporta.
+//   #2522(hwnd): chamado logo apos criar a "Worker Window" (CreateWindowInBand); o explorer
+//                IGNORA o retorno -> stub inofensivo. Era o slot=0 que crashava (rip=0).
+//   #2005(p):    retorno IGNORADO em todas as call-sites (o arg e' relido depois) -> passthrough.
+//   #2521:       GetProcessUIContextInformation-like -> FALSE (processo sem UI-context de
+//                app-container; caso normal do explorer classico).
+//   #2573/#2574/#2611: fora do caminho atual; retornam 0 (revisar se/quando alcancados).
+void* User32_ord2005(void* a){ return a; }
+int   User32_ord2521_GetProcessUIContextInformation(void* proc, void* out){ (void)proc; (void)out; return 0; }
+int   User32_ord2522(void* hwnd){ (void)hwnd; return 1; }
+int   User32_ord2573(void* a){ (void)a; return 0; }
+int   User32_ord2574(void* hwnd){ (void)hwnd; return 0; }
+int   User32_ord2611(void* a){ (void)a; return 0; }
 
 // ---- texto ----
 __declspec(dllexport) int DrawTextW(void* hdc, const void* txt, int cch, RECT* r, unsigned fmt){ (void)hdc;(void)txt;(void)cch; if((fmt&0x400u)&&r) r->bottom=r->top+16; return 16; }
@@ -500,7 +555,7 @@ static unsigned short u32_register_class(const u16_* clsName, WNDPROC proc) {
     if (slot < 0) return 0;
     g_classes[slot].used = 1; g_classes[slot].name = nm; g_classes[slot].proc = proc;
     NtUserRegisterClass(nm, (void*)proc);
-    return 1;   // ATOM
+    return (unsigned short)(U32_ATOM_BASE + slot);   // ATOM unico por classe (resolvivel em CreateWindow*)
 }
 __declspec(dllexport) unsigned short RegisterClassW(const WNDCLASSW* wc) { return wc ? u32_register_class(wc->lpszClassName, wc->lpfnWndProc) : 0; }
 __declspec(dllexport) unsigned short RegisterClassExW(const WNDCLASSEXW* wc) { return wc ? u32_register_class(wc->lpszClassName, wc->lpfnWndProc) : 0; }
@@ -508,7 +563,7 @@ __declspec(dllexport) unsigned short RegisterClassExW(const WNDCLASSEXW* wc) { r
 __declspec(dllexport) void* CreateWindowExW(unsigned exStyle, const u16_* className, const u16_* windowName,
         unsigned style, int x, int y, int w, int h, void* parent, void* menu, void* inst, void* param) {
     (void)exStyle; (void)menu; (void)inst; (void)param;
-    return create_window_impl(u32_wpool(className), u32_wpool(windowName), style, x, y, w, h, parent, WND_BG_DEFAULT, 0);
+    return create_window_impl(class_ref_to_name_w(className), u32_wpool(windowName), style, x, y, w, h, parent, WND_BG_DEFAULT, 0);
 }
 __declspec(dllexport) long long DefWindowProcW(void* hwnd, unsigned msg, ULL wParam, ULL lParam) {
     if (msg == WM_DESTROY) { NtUserPostQuitMessage(0); return 0; }

@@ -316,6 +316,19 @@ __declspec(dllexport) int GetProfileType(unsigned long* pdwFlags) { if (pdwFlags
 // honesta (o explorer roda como usuario normal, fora de qualquer appcontainer).
 __declspec(dllexport) long DeriveAppContainerSidFromAppContainerName(const void* name, void** ppsid) { (void)name; if (ppsid)*ppsid=0; return (long)0x80004001; }   // E_NOTIMPL
 
+// ---- SspiCli.dll (redirect no loader): GetUserNameExW ----
+// Usuario unico "User". nSize: entrada=chars do buffer; saida=chars escritos (sem null) no
+// sucesso, ou tamanho necessario (com null) na falha. NameFormat ignorado (sempre "User").
+__declspec(dllexport) int GetUserNameExW(int NameFormat, unsigned short* buf, unsigned long* nSize) {
+    (void)NameFormat;
+    static const unsigned short nm[] = { 'U','s','e','r', 0 };
+    unsigned long need = 5;   // 4 chars + terminador
+    if (!nSize) return 0;
+    if (!buf || *nSize < need) { *nSize = need; return 0; }
+    for (unsigned long i = 0; i < need; i++) buf[i] = nm[i];
+    *nSize = 4; return 1;
+}
+
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }

@@ -113,7 +113,7 @@ static const char* apiset_redirect(const char* dll) {
     if (!dll) return dll;
     if (has_prefix_ci(dll, "api-ms-win-crt-"))           return "ucrtbase.dll";
     if (has_prefix_ci(dll, "api-ms-win-core-com"))       return "combase.dll";  // COM base (CoTaskMemAlloc/Co*)
-    if (has_prefix_ci(dll, "api-ms-win-core-winrt"))     return dll;            // WinRT (a implementar)
+    if (has_prefix_ci(dll, "api-ms-win-core-winrt"))     return "combase.dll";  // WinRT (HSTRING/Ro*/error) vive na combase, igual ao Windows real
     if (has_prefix_ci(dll, "api-ms-win-core-registry"))  return "advapi32.dll"; // Reg* vivem na advapi32
     if (has_prefix_ci(dll, "api-ms-win-core-"))          return "kernel32.dll"; // kernelbase -> nosso kernel32
     if (has_prefix_ci(dll, "api-ms-win-rtcore-ntuser-")) return "user32.dll";

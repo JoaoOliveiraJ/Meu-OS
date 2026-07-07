@@ -204,6 +204,26 @@ if (Test-Path $loaddisk) {
     if ($LASTEXITCODE) { throw "Compilacao do loaddisk.c falhou." }
 }
 
+# FRENTE 4 (Fase 4a) — child.exe: um .exe FILHO simples (CRT REAL) para ser LANCADO por
+# outro processo. Prova que o filho REALMENTE executa quando o pai chama CreateProcess.
+$child = Join-Path $ex 'child.c'
+if (Test-Path $child) {
+    Write-Host "[exemplo] apps\child.c -> build\child.exe (.exe FILHO, CRT REAL)"
+    & $zig cc -target x86_64-windows-gnu -o (Join-Path $out 'child.exe') $child -lkernel32
+    if ($LASTEXITCODE) { throw "Compilacao do child.c falhou." }
+}
+
+# FRENTE 4 (Fase 4a) — parent.exe: um .exe PAI (CRT REAL) que LANCA child.exe via
+# CreateProcessA e ESPERA (WaitForSingleObject), depois continua. Caminho: CreateProcessA
+# -> kernel32 -> ntdll NtCreateProcess -> int 0x80 -> sys_createprocess (roda a imagem). Roda com:
+#   run.ps1 -Modules build\ntdll.dll,build\kernel32.dll,build\ucrtbase.dll,build\parent.exe,build\child.exe
+$parent = Join-Path $ex 'parent.c'
+if (Test-Path $parent) {
+    Write-Host "[exemplo] apps\parent.c -> build\parent.exe (.exe PAI: CreateProcess + wait)"
+    & $zig cc -target x86_64-windows-gnu -o (Join-Path $out 'parent.exe') $parent -lkernel32
+    if ($LASTEXITCODE) { throw "Compilacao do parent.c falhou." }
+}
+
 # FASE 3 — DEMO Named Pipes (IPC): servidor cria \Pipe\Nome e escreve; cliente
 # abre pelo nome e le os mesmos bytes. Importam kernel32 + user32 (GetStdHandle).
 # ImageBases livres e fora do heap (0x2000000..0x3000000) e da regiao do PMM

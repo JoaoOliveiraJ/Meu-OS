@@ -549,6 +549,12 @@ __declspec(dllexport) long RtlpEnsureBufferSize(unsigned flags, void* buf, unsig
 __declspec(dllexport) long LdrResSearchResource(void* base, void* info, unsigned long level, unsigned long flags, void** addr, unsigned long* size, void* a, void* b) {
     (void)base;(void)info;(void)level;(void)flags;(void)a;(void)b; if (addr)*addr=0; if (size)*size=0; return STATUS_NOT_FOUND_; }
 
+// Frente C: stub de retorno-0 acessivel em ring-3, usado pelo loader como FALLBACK dos
+// imports de DELAY-LOAD nao resolvidos (DLLs OPCIONAIS ausentes: NInput/SndVolSSO/...).
+// Sem SEH ativo o explorer nao pode capturar a falha de delay-load; apontar o slot p/ um
+// no-op (devolve 0 = S_OK/NULL/FALSE) degrada a funcionalidade opcional sem crashar.
+__declspec(dllexport) long long LdrpNullStub(void) { return 0; }
+
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }

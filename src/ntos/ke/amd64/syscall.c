@@ -360,10 +360,19 @@ static void sys_createprocess(struct regs* r) {
 
 // NtCreateThread(out HANDLE*, HANDLE process, void* start) — cria um ETHREAD
 // no processo dado (ou no processo corrente se process==0). Nao agenda ainda.
+// FRENTE THREADS — tabela de workers ring-3 PENDENTES. CreateThread(start,param) registra
+// aqui; o 1o WaitForSingleObject sobre o handle do worker RODA o threadproc (usermode_run_
+// worker), que vira a thread ring-3 corrente (modelo cooperativo — ver usermode.c). Assim o
+// explorer real, cujo wWinMain bloqueia no ~WorkerWindow em WaitForSingleObject(worker_thread),
+// PERSISTE em vez de sair. Pequena (o explorer cria 1 worker no caminho atual).
+static struct { HANDLE h; uint64_t start; uint64_t param; int ran; } g_ring3_threads[8];
+static int g_ring3_count = 0;
+
 static void sys_createthread(struct regs* r) {
     HANDLE*  out   = (HANDLE*)(uintptr_t)r->rdi;
     HANDLE   hproc = (HANDLE)(uintptr_t)r->rsi;
     uint64_t start = (uint64_t)r->rdx;
+    uint64_t param = (uint64_t)r->r10;   // NOVO: 4o arg (lpParameter do CreateThread)
 
     PEPROCESS p = hproc ? (PEPROCESS)ob_handle_to_object(hproc, OB_TYPE_PROCESS)
                         : PsGetCurrentProcess();
@@ -373,6 +382,16 @@ static void sys_createthread(struct regs* r) {
     if (!t) { if (out) *out = 0; r->rax = (uint64_t)(uint32_t)STATUS_UNSUCCESSFUL; return; }
     HANDLE h = ob_create_handle(t);
     if (out) *out = h;
+    // Registra o worker ring-3 (rodado sob demanda no 1o WaitForSingleObject sobre 'h').
+    if (start && g_ring3_count < 8) {
+        g_ring3_threads[g_ring3_count].h     = h;
+        g_ring3_threads[g_ring3_count].start = start;
+        g_ring3_threads[g_ring3_count].param = param;
+        g_ring3_threads[g_ring3_count].ran   = 0;
+        g_ring3_count++;
+        kputs("[thread] CreateThread REGISTRADO: start="); kput_hex(start);
+        kputs(" param="); kput_hex(param); kputs(" handle="); kput_hex((uint64_t)(uintptr_t)h); kputc('\n');
+    }
     r->rax = (uint64_t)(uint32_t)STATUS_SUCCESS;
 }
 
@@ -395,8 +414,23 @@ static void sys_terminateprocess(struct regs* r) {
 
 // NtWaitForSingleObject(HANDLE, uint32_t timeout_ms). Sem escalonador ainda:
 // retorna imediatamente STATUS_SUCCESS (objeto considerado "sinalizado").
+extern void usermode_run_worker(uint64_t start, uint64_t param);   // usermode.c
+
 static void sys_waitforsingleobject(struct regs* r) {
+    HANDLE h = (HANDLE)(uintptr_t)r->rdi;
     (void)r->rsi;   // timeout ignorado por ora
+    // FRENTE THREADS: se e' o handle de um worker ring-3 ainda NAO rodado, RODA o threadproc
+    // agora — ele vira a thread ring-3 corrente e NAO retorna (a thread principal fica "presa"
+    // aqui, exatamente como o WaitForSingleObject(worker_thread, INFINITE) do ~WorkerWindow do
+    // explorer). Efeito: o processo PERSISTE (nao chega ao DestroyWindow/ExitProcess).
+    for (int i = 0; i < g_ring3_count; i++) {
+        if (g_ring3_threads[i].h == h && !g_ring3_threads[i].ran && g_ring3_threads[i].start) {
+            g_ring3_threads[i].ran = 1;
+            kputs("[thread] WaitForSingleObject sobre worker -> rodando threadproc ring-3 (processo persiste)\n");
+            usermode_run_worker(g_ring3_threads[i].start, g_ring3_threads[i].param);  // NAO retorna
+            return;   // (defensivo) se voltar, cai no sucesso abaixo
+        }
+    }
     r->rax = (uint64_t)(uint32_t)STATUS_SUCCESS;
 }
 

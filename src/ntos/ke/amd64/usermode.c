@@ -4,6 +4,7 @@
 #include "ke/amd64/kpcr.h"
 #include "hal/cpu.h"            // HalWriteMsr / MSR_IA32_GS_BASE
 #include "mm/paging.h"
+#include "mm/pmm.h"              // pmm_alloc_contiguous (pilha do worker ring-3)
 #include "ps/process.h"
 
 extern void kputs(const char* s);
@@ -101,6 +102,53 @@ static void enter_ring3_32(uint32_t entry32, uint32_t stack_top32) {
         "pushq %1\n"                       // RIP (low 32 -> EIP)
         "iretq\n"
         : : "r"(rsp), "r"(rip) : "rax", "memory");
+}
+
+// enter_ring3 com ARGUMENTO em rcx (p/ o threadproc(param) do CreateThread real).
+// Igual ao enter_ring3, mas carrega rcx=arg antes do iretq (1o param x64).
+static void enter_ring3_arg(uint64_t entry, uint64_t stack_top, uint64_t teb, uint64_t arg) {
+    __asm__ volatile (
+        "movw $0x23, %%ax\n"
+        "movw %%ax, %%ds\n movw %%ax, %%es\n movw %%ax, %%fs\n movw %%ax, %%gs\n"
+        "movl $0xC0000101, %%ecx\n"        // IA32_GS_BASE
+        "movq %2, %%rax\n movq %2, %%rdx\n shrq $32, %%rdx\n wrmsr\n"
+        "movq %3, %%rcx\n"                 // rcx = arg (1o param do threadproc)
+        "pushq $0x23\n"                    // SS  = UDATA | 3
+        "pushq %0\n"                       // RSP
+        "pushq $0x202\n"                   // RFLAGS (IF=1 -> preemptivel pelo timer)
+        "pushq $0x1B\n"                    // CS  = UCODE | 3
+        "pushq %1\n"                       // RIP
+        "iretq\n"
+        : : "r"(stack_top), "r"(entry), "r"(teb), "r"(arg) : "rax", "rcx", "rdx", "memory");
+}
+
+// FRENTE THREADS — roda um threadproc de ring-3 (do CreateThread real) numa PILHA + TEB
+// NOVOS, no mesmo processo (mesmo CR3). Modelo COOPERATIVO com o esquema de UMA thread
+// ring-3: a thread principal (parada em WaitForSingleObject sobre o handle do worker) e'
+// ABANDONADA aqui — este threadproc PASSA A SER a thread ring-3 corrente. A preempcao do
+// timer que ja funciona p/ 1 thread ring-3 (o explorer roda sobre o contexto idle/boot)
+// segue valendo: o timer preempta o worker, roda os kthreads de kernel e volta pro worker.
+// Assim o PROCESSO PERSISTE (nao chega ao DestroyWindow/ExitProcess). NAO retorna.
+#define WK_STACK_SIZE 0x40000ULL   // 256 KiB por thread worker
+void usermode_run_worker(uint64_t start, uint64_t param) {
+    if (!start) return;
+    uint64_t pages = WK_STACK_SIZE >> 12;
+    uint64_t phys = pmm_alloc_contiguous(pages);
+    if (!phys) { kputs("[thread] sem RAM p/ pilha do worker ring-3\n"); return; }
+    mm_map_user(phys, WK_STACK_SIZE);                    // torna a pilha acessivel ao ring 3
+    uint64_t teb = phys;                                 // TEB no fundo da regiao
+    uint64_t stack_top = (phys + WK_STACK_SIZE) & ~0xFULL;
+    // TEB minimo (compartilha o PEB do processo em PEB_ADDR — threads dividem o mesmo PEB).
+    volatile uint8_t* t = (volatile uint8_t*)(uintptr_t)teb;
+    for (int i = 0; i < 0x1000; i++) t[i] = 0;
+    *(volatile uint64_t*)(uintptr_t)(teb + 0x08) = stack_top;      // NtTib.StackBase
+    *(volatile uint64_t*)(uintptr_t)(teb + 0x10) = teb + 0x2000;   // NtTib.StackLimit
+    *(volatile uint64_t*)(uintptr_t)(teb + 0x30) = teb;           // NtTib.Self  -> gs:[0x30]
+    *(volatile uint64_t*)(uintptr_t)(teb + 0x60) = PEB_ADDR;      // PEB -> gs:[0x60]
+    kputs("[thread] worker ring-3: start="); kput_hex(start);
+    kputs(" param="); kput_hex(param);
+    kputs(" stack_top="); kput_hex(stack_top); kputs(" teb="); kput_hex(teb); kputs("\n");
+    enter_ring3_arg(start, stack_top - 8, teb, param);   // vira a thread ring-3; NAO retorna
 }
 
 void usermode_enter(void (*entry)(void)) {

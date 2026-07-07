@@ -1,5 +1,9 @@
 LIBRARY shell32.dll
 EXPORTS
+    GetThreadFlags
+    SetThreadFlags
+    SHGetFolderPathEx
+    SHGetKnownFolderIDList
     DragQueryFileW
     DuplicateIcon
     ExtractIconExW

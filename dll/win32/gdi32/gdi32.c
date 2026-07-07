@@ -59,6 +59,36 @@ __declspec(dllexport) void* CreateSolidBrush(unsigned color) {
 // DeleteObject: stub (os brushes vivem no Object Manager; nada urgente a fazer).
 __declspec(dllexport) int DeleteObject(void* obj) { (void)obj; return 1; }
 
+// GetDeviceCaps(hdc, index): capacidades da tela. Modo FIXO do MeuOS: framebuffer
+// 1024x768x32, DPI 96. Valores constantes REAIS p/ esse dispositivo (nao stub: sao as
+// caps do device). O explorer consulta LOGPIXELSY (90) na init da shell p/ escalar DPI.
+// Indice desconhecido -> 0 (comportamento documentado do GetDeviceCaps).
+__declspec(dllexport) int GetDeviceCaps(void* hdc, int index) {
+    (void)hdc;
+    switch (index) {
+        case 0:   return 0x4000;   // DRIVERVERSION
+        case 2:   return 0;        // TECHNOLOGY = DT_RASDISPLAY
+        case 4:   return 270;      // HORZSIZE (mm) ~= 1024px @ 96dpi
+        case 6:   return 203;      // VERTSIZE (mm) ~=  768px @ 96dpi
+        case 8:   return 1024;     // HORZRES
+        case 10:  return 768;      // VERTRES
+        case 12:  return 32;       // BITSPIXEL
+        case 14:  return 1;        // PLANES
+        case 24:  return -1;       // NUMCOLORS (device > 8bpp)
+        case 40:  return 36;       // ASPECTX
+        case 42:  return 36;       // ASPECTY
+        case 44:  return 51;       // ASPECTXY
+        case 88:  return 96;       // LOGPIXELSX (DPI horizontal)
+        case 90:  return 96;       // LOGPIXELSY (DPI vertical)
+        case 104: return 0;        // SIZEPALETTE (nao paletizado)
+        case 108: return 24;       // COLORRES
+        case 116: return 60;       // VREFRESH (Hz)
+        case 117: return 768;      // DESKTOPVERTRES
+        case 118: return 1024;     // DESKTOPHORZRES
+        default:  return 0;
+    }
+}
+
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }

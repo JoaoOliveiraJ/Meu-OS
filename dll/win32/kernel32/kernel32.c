@@ -8,7 +8,7 @@ __declspec(dllimport) long NtDeviceIoControlFile(void* handle, unsigned ioctl,
         void* in_buf, unsigned in_len, void* out_buf, unsigned out_len);
 __declspec(dllimport) void NtClose(void* handle);
 __declspec(dllimport) long NtCreateProcess(void* out_handle, const char* image_name, const char* cmdline);
-__declspec(dllimport) long NtCreateThread(void* out_handle, void* process, void* start);
+__declspec(dllimport) long NtCreateThread(void* out_handle, void* process, void* start, void* param);
 __declspec(dllimport) long NtWaitForSingleObject(void* handle, unsigned timeout_ms);
 __declspec(dllimport) long NtWriteFile(void* handle, const void* buf, unsigned len, unsigned* written);
 __declspec(dllimport) long NtReadFile(void* handle, void* buf, unsigned len, unsigned* read);
@@ -153,7 +153,7 @@ __declspec(dllexport) int CreateProcessA(const char* app, char* cmdline, void* p
     // Se lpCommandLine for NULL, o Windows usa lpApplicationName como a linha de comando.
     if (NtCreateProcess(&hproc, app, cmdline ? cmdline : (char*)app) != 0) return 0;   // FALSE
     void* hthr = 0;
-    NtCreateThread(&hthr, hproc, 0);
+    NtCreateThread(&hthr, hproc, 0, 0);
     if (pi) { void** out = (void**)pi; out[0] = hproc; out[1] = hthr; }   // hProcess, hThread
     return 1;   // TRUE
 }
@@ -652,7 +652,7 @@ __declspec(dllexport) void GetNativeSystemInfo(void* si) { GetSystemInfo(si); }
 // stubs ESPECIFICOS e nomeados onde a semantica exige subsistema ainda ausente
 // (threads de ring-3 com param, criacao de processo). Sem catch-all.
 // ============================================================================
-__declspec(dllimport) long NtCreateThread(void* out_handle, void* process, void* start);
+__declspec(dllimport) long NtCreateThread(void* out_handle, void* process, void* start, void* param);
 static long long g_fake_h = 0x2000;
 static void* k32_fake_handle(void) { g_fake_h += 8; return (void*)g_fake_h; }
 
@@ -698,8 +698,17 @@ __declspec(dllexport) int InitOnceComplete(void** once, unsigned flags, void* ct
 
 // ---- processo/thread: threads reais de ring-3 (com param/stack proprios) ainda nao
 //      wired -> handles-sentinela. O thread principal do explorer segue; workers nao. ----
+// CreateThread REAL: registra o threadproc no kernel (NtCreateThread) e devolve o handle.
+// O threadproc so RODA quando alguem faz WaitForSingleObject sobre este handle (modelo
+// cooperativo — ver kernel usermode.c/syscall.c). O explorer real faz exatamente isso: cria
+// a thread da Worker Window e depois bloqueia nela no ~WorkerWindow -> o processo persiste.
 __declspec(dllexport) void* CreateThread(void* sec, unsigned long long stack, void* start, void* param, unsigned flags, unsigned* tid) {
-    (void)sec;(void)stack;(void)start;(void)param;(void)flags; if (tid)*tid=(unsigned)(unsigned long long)k32_fake_handle(); return k32_fake_handle();
+    (void)sec;(void)stack;(void)flags;
+    void* h = 0;
+    NtCreateThread(&h, 0, start, param);
+    if (!h) h = k32_fake_handle();
+    if (tid) *tid = (unsigned)(unsigned long long)h;
+    return h;
 }
 __declspec(dllexport) void* OpenProcess(unsigned acc, int inh, unsigned pid) { (void)acc;(void)inh;(void)pid; return k32_fake_handle(); }
 __declspec(dllexport) void* OpenThread(unsigned acc, int inh, unsigned tid) { (void)acc;(void)inh;(void)tid; return k32_fake_handle(); }

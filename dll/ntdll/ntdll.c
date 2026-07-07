@@ -228,8 +228,8 @@ __declspec(dllexport) void* LdrLoadDll(const char* name) {
 __declspec(dllexport) long NtCreateProcess(void* out_handle, const char* image_name, const char* cmdline) {
     return (long)sc3(SYS_CREATEPROCESS, IP(out_handle), IP(image_name), IP(cmdline));
 }
-__declspec(dllexport) long NtCreateThread(void* out_handle, void* process, void* start) {
-    return (long)sc3(SYS_CREATETHREAD, IP(out_handle), IP(process), IP(start));
+__declspec(dllexport) long NtCreateThread(void* out_handle, void* process, void* start, void* param) {
+    return (long)sc4(SYS_CREATETHREAD, IP(out_handle), IP(process), IP(start), IP(param));
 }
 // process==0 -> encerra o processo corrente (nao retorna).
 __declspec(dllexport) long NtTerminateProcessEx(void* process, unsigned status) {

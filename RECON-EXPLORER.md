@@ -45,22 +45,20 @@
   (stub genérico do `ntoskrnl`/`g_ntexports`). Mexer no loader userland **não toca** no
   pintok. (Confirmado: baseline dourada C0000365 intacta durante todo o diagnóstico.)
 
-## A escada recomendada
-- **Degrau 1 — destravar o START (o explorer CHEGA ao entry point):**
-  1. estender o redirect de API Set (`loader.c`) p/ TODAS as famílias `api-ms-win-*`
-     → DLL implementadora (core→kernelbase, com/winrt→combase, *ntuser*→user32,
-     shcore→shcore, shell→shell32, *shlwapi*→shlwapi, security→advapi32, eventing→ntdll…);
-  2. **STUB genérico p/ import não resolvido** (no-op retorna 0), igual ao stub genérico
-     do `ntoskrnl` — assim TODO import resolve e o explorer entra;
-  3. silenciar/resumir o log por-import (hoje são ~1200 linhas).
-  - Prova do degrau 1: o explorer real **ENTRA** (roda o CRT startup) e vemos o 1º ponto
-    onde precisa de uma função **REAL** (um no-op não basta).
-- **Degrau 2+ — bring-up iterativo (estilo pintok):** trocar no-ops por funções REAIS na
-  ordem que o explorer exige, rodando e vendo onde ele para: `kernelbase`
-  (heap/synch/registry/processthreads), `ntdll` (Rtl/heap/SRW/SEH unwind), `user32`+`gdi32`
-  reais (janela + não-cliente `WM_NC*` + fonte/texto real), `combase`
-  (CoInitialize/apartments/class factory), **registro real**, `shell32` namespace,
-  `uxtheme`/`dwm`. Cada função real é destravada empiricamente.
+## A escada recomendada (SEM stub genérico — tudo implementado DE VERDADE)
+- **Degrau 1 — redirects de API Set p/ as NOSSAS DLLs REAIS + medir o gap honesto:**
+  estender o redirect (`loader.c`) das famílias `api-ms-win-*` p/ as DLLs reais que já
+  temos (crt→ucrtbase, core→kernel32, *ntuser*→user32, security→advapi32). Isso resolve
+  as funções que JÁ implementamos (de verdade) e deixa o resto NÃO resolvido — honesto:
+  a lista de "nao resolvido" vira exatamente o que falta implementar. **Sem catch-all.**
+- **Degrau 2+ — implementar as funções/DLLs que faltam, DE VERDADE, DLL por DLL**
+  (kernelbase, msvcp_win, combase, shell32, shlwapi, shcore, uxtheme, propsys, oleaut32,
+  rpcrt4, dwmapi…), na ordem que o explorer exige, rodando e vendo onde ele para:
+  `kernelbase` (heap/synch/registry/processthreads/memory), `ntdll` (Rtl/heap/SRW/SEH
+  unwind), `user32`+`gdi32` reais (janela + não-cliente `WM_NC*` + fonte/texto real),
+  `combase` (CoInitialize/apartments/class factory), **registro real**, `shell32`
+  namespace, `uxtheme`/`dwm`. Funções genuinamente no-op (ETW/telemetria/WER) viram
+  stubs ESPECÍFICOS e nomeados na DLL certa — **nunca** um catch-all genérico.
 - **Muros duros conhecidos:** WinRT (ativação/`CoreMessaging`/`twinapi`) e DWM.
 
 ## Como reproduzir o diagnóstico

@@ -15,6 +15,16 @@ def redirect(dll):
     if d.startswith('api-ms-win-ntuser-'):        return 'user32.dll'
     if d.startswith('api-ms-win-security-'):      return 'advapi32.dll'
     if d.startswith('api-ms-win-eventing-'):      return 'advapi32.dll'
+    if d.startswith('api-ms-win-shell-'):         return 'shell32.dll'
+    if d.startswith('api-ms-win-shcore-'):        return 'shcore.dll'
+    if d.startswith('ext-ms-win-rtcore-ntuser-'): return 'user32.dll'
+    if d.startswith('ext-ms-win-ntuser-'):        return 'user32.dll'
+    if d.startswith('ext-ms-win-session-winsta-'):return 'user32.dll'
+    if d.startswith('ext-ms-win-gdi-'):           return 'gdi32.dll'
+    if d.startswith('ext-ms-win-shell32-'):       return 'shell32.dll'
+    if d.startswith('ext-ms-win-shell-'):         return 'shell32.dll'
+    if d.startswith('ext-ms-win-security-'):      return 'advapi32.dll'
+    if d.startswith('ext-ms-win-core-'):          return 'kernel32.dll'
     return dll
 def parse(path):
     d=open(path,'rb').read(); e=struct.unpack_from('<I',d,0x3C)[0]; coff=e+4

@@ -104,12 +104,25 @@ static int has_prefix_ci(const char* s, const char* pfx) {
 }
 
 // resolve um import (dll!fn) -> endereco, carregando a DLL se preciso
+// API Sets (api-ms-win-*.dll) sao contratos virtuais: o Windows os encaminha p/ a DLL
+// implementadora REAL. Mapeamos cada familia p/ a NOSSA DLL real (mesmas funcoes por
+// nome). Familias sem implementacao ainda (combase/shell32/shcore/...) NAO tem redirect
+// -> o import fica NAO resolvido (honesto: aparece no log e vira o proximo item a
+// implementar DE VERDADE). NUNCA um stub generico catch-all.
+static const char* apiset_redirect(const char* dll) {
+    if (!dll) return dll;
+    if (has_prefix_ci(dll, "api-ms-win-crt-"))           return "ucrtbase.dll";
+    if (has_prefix_ci(dll, "api-ms-win-core-com"))       return dll;            // combase (a implementar)
+    if (has_prefix_ci(dll, "api-ms-win-core-winrt"))     return dll;            // combase/WinRT (a implementar)
+    if (has_prefix_ci(dll, "api-ms-win-core-"))          return "kernel32.dll"; // kernelbase -> nosso kernel32
+    if (has_prefix_ci(dll, "api-ms-win-rtcore-ntuser-")) return "user32.dll";
+    if (has_prefix_ci(dll, "api-ms-win-ntuser-"))        return "user32.dll";
+    if (has_prefix_ci(dll, "api-ms-win-security-"))      return "advapi32.dll";
+    return dll;
+}
+
 static void* ldr_resolve(const char* dll, const char* fn) {
-    // FASE 3b (Frente 3): os apisets do UCRT (api-ms-win-crt-*.dll) sao redirecionados
-    // p/ a nossa ucrtbase.dll — igual ao Windows, onde esses apisets encaminham p/ o
-    // ucrtbase.dll. Assim um .exe com CRT real resolve _initterm/malloc/exit/etc.
-    if (dll && has_prefix_ci(dll, "api-ms-win-crt-")) dll = "ucrtbase.dll";
-    void* base = ldr_load(dll);
+    void* base = ldr_load(apiset_redirect(dll));
     if (!base) return 0;
     return pe_get_export(base, fn);
 }

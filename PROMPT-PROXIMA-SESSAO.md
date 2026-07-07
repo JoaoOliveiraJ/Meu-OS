@@ -129,9 +129,9 @@ em paralelo mas SEM timer local no TCG do QEMU — pode limitar onde escalonar; 
 - Ordinais privados USER32 que o explorer usa: #2005(ptr,ret ignorado), #2521(GetProcessUIContext
   Information), #2522(hwnd,ret ignorado), #2573/#2574(gate de GetWindowBand)/#2611.
 
-## 🔁 O LOOP — comando de run (15 módulos; NÃO passe de ~16)
+## 🔁 O LOOP — comando de run (16 módulos, com dwmapi; NÃO passe de ~16)
 ```
-.\run.ps1 -Modules build\ntdll.dll,build\kernel32.dll,build\user32.dll,build\gdi32.dll,build\advapi32.dll,build\ucrtbase.dll,build\combase.dll,build\msvcp_win.dll,build\shell32.dll,build\shcore.dll,build\dxgi.dll,build\uxtheme.dll,build\comctl32.dll,build\dui70.dll,build\explorerreal.exe -Headless -TimeoutSec 60
+.\run.ps1 -Modules build\ntdll.dll,build\kernel32.dll,build\user32.dll,build\gdi32.dll,build\advapi32.dll,build\ucrtbase.dll,build\combase.dll,build\msvcp_win.dll,build\shell32.dll,build\shcore.dll,build\dxgi.dll,build\uxtheme.dll,build\comctl32.dll,build\dui70.dll,build\dwmapi.dll,build\explorerreal.exe -Headless -TimeoutSec 60
 ```
 (Se `build\explorerreal.exe` sumiu: `cp C:\Windows\explorer.exe build\explorerreal.exe`.)
 Ver `build\serial.log`. Marco atual: `CreateWindowEx -> HWND #1 'Worker Window'` → `DestroyWindow #1` → sai.
@@ -147,7 +147,8 @@ inline → wndproc associa objeto) → `#2522(hwnd)` → `CreateThreadpoolWork`+
 
 ## 🚧 MUROS/IMPORTS CONHECIDOS (em OUTROS caminhos — o explorer sai antes de chegar neles)
 - **Threads ring-3** (o muro ATUAL — ver plano acima).
-- Imports estáticos NÃO resolvidos → **slot=0** (crasham SE chamados): `dwmapi.dll`(16),
+- ✅ `dwmapi.dll` (16 imports) FEITO nesta sessão (composição OFF; DwmIsCompositionEnabled→FALSE).
+- Imports estáticos NÃO resolvidos → **slot=0** (crasham SE chamados):
   `OLEAUT32`(ordinais), `PROPSYS`(9), `RPCRT4`(8), `SHLWAPI`(nomes+ordinais), `ole32`, `urlmon`,
   `WININET`, `CoreMessaging`, `TWINAPI`, `WTSAPI32`, `IPHLPAPI`, vários `api-ms-win-*` e `ext-ms-win-*`.
   Delay imports NÃO resolvidos → `LdrpNullStub` (retorna 0, NÃO crasha). Implemente por demanda.
@@ -188,8 +189,10 @@ rode o pintok a CADA passo e reverta na hora se `ANTIVM`/`C0000365` mudar.
 ## 📜 COMMITS DA SESSÃO 4 (branch `feat/kernel-foundation-irql-dpc`; push a cada lote)
 - `a480768` feat(user32): explorer CRIA sua Worker Window — CreateWindowInBand real + ATOM único
   0xC000+slot + 6 ordinais privados (.def) + build.ps1 passa o .def.
-- (lote seguinte) feat(user32): GWLP_USERDATA real + WM_NCCREATE inline → a Worker Window associa
+- `f09b51e` feat(user32): GWLP_USERDATA real + WM_NCCREATE inline → a Worker Window associa
   seu objeto e roda o handler real de WM_USER+7 (sem crash) + gate `U32_TRACE` (diagnóstico, off).
+- (lote seguinte) feat(dwmapi): dwmapi.dll nova (16 imports resolvidos; composição OFF) + build.ps1
+  + 16º módulo no run. Removeu 16 slot=0 latentes p/ o caminho pós-threads.
 Mensagens terminam com `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 
 ## 📌 NOTAS / GOTCHAS

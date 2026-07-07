@@ -333,6 +333,11 @@ $uxthemeDef  = Join-Path $dll 'win32\uxtheme\uxtheme.def'
 $comctl32Src = Join-Path $dll 'win32\comctl32\comctl32.c'
 # Frente C (explorer real) — dui70.dll: DirectUI (ponto de apoio p/ LoadLibrary("dui70")).
 $dui70Src    = Join-Path $dll 'win32\dui70\dui70.c'
+# Frente C (explorer real) — dwmapi.dll: Desktop Window Manager (composicao DESLIGADA;
+#   DwmIsCompositionEnabled->FALSE p/ o explorer usar o caminho classico). 8 nomeadas + 8
+#   ordinais privados (via dwmapi.def). Autocontida. ImageBase 0x2A00000 (livre, < 64 MiB).
+$dwmapiSrc   = Join-Path $dll 'win32\dwmapi\dwmapi.c'
+$dwmapiDef   = Join-Path $dll 'win32\dwmapi\dwmapi.def'
 # FASE 3f — testlib: DLL de teste carregada em RUNTIME (LoadLibrary + GetProcAddress).
 $testlibSrc  = Join-Path $dll 'win32\testlib\testlib.c'
 if (Test-Path $ntdllSrc) {
@@ -408,6 +413,13 @@ if (Test-Path $ntdllSrc) {
         & $zig cc @dc '-Wl,--image-base=0x5B00000' '-Wl,--dynamicbase' `
             -o (Join-Path $out 'dui70.dll') $dui70Src
         if ($LASTEXITCODE) { throw "dui70.dll falhou." }
+    }
+    # Frente C (explorer real) — dwmapi.dll: DWM (composicao OFF). 8 nomeadas + 8 ordinais
+    #   privados (dwmapi.def). Autocontida. ImageBase 0x2A00000 (livre, < 64 MiB).
+    if (Test-Path $dwmapiSrc) {
+        & $zig cc @dc '-Wl,--image-base=0x2A00000' "-Wl,--out-implib,$(Join-Path $out 'libdwmapi.a')" `
+            -o (Join-Path $out 'dwmapi.dll') $dwmapiSrc $dwmapiDef
+        if ($LASTEXITCODE) { throw "dwmapi.dll falhou." }
     }
     # FASE 3b (Frente 3) — ucrtbase.dll: CRT minimo (startup do mingw/UCRT). O loader
     #   redireciona os apisets api-ms-win-crt-* p/ ca. Importa ExitProcess do kernel32.

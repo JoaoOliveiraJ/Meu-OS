@@ -325,10 +325,27 @@ static void sys_createprocess(struct regs* r) {
     HANDLE h = ob_create_handle(p);
     if (out) *out = h;
 
-    // (2) Resolve os bytes da imagem do filho (Fase 4a: modulo de boot pelo nome) e
-    //     RODA. Se nao houver a imagem, mantem o comportamento antigo (so o objeto).
-    const void* bytes = ldr_get_module_bytes(name);
-    if (bytes) run_child_image(name, bytes);
+    // (2) Resolve os bytes da imagem do filho e RODA. Fase 4b: se o nome for um caminho
+    //     de DISCO (C:\... ou \Device\Harddisk0\...), le o .exe do volume NTFS (mesma via
+    //     do sys_loadlibrary); senao (Fase 4a) usa um modulo de boot pelo nome. Se nao
+    //     houver a imagem, mantem o comportamento antigo (so o objeto).
+    const char* nt = ntfs_fs_registered() ? ntfs_volume_subpath(name) : 0;
+    if (nt) {
+        NTFS_FILE_INFO fi;
+        if (ntfs_resolve_path(nt, &fi) && !fi.is_dir && fi.size) {
+            void* buf = kmalloc(fi.size);
+            if (buf) {
+                if (ntfs_read_file(fi.mft_record, 0, buf, (uint32_t)fi.size) == (uint32_t)fi.size) {
+                    kputs("[ps] createprocess: lendo o filho do DISCO NTFS: '"); kputs(name); kputs("'\n");
+                    run_child_image(name, buf);
+                }
+                kfree(buf);   // ldr_run ja copiou a imagem (pe_map); o buffer nao e mais preciso
+            }
+        }
+    } else {
+        const void* bytes = ldr_get_module_bytes(name);
+        if (bytes) run_child_image(name, bytes);
+    }
 
     r->rax = (uint64_t)(uint32_t)STATUS_SUCCESS;
 }

@@ -53,6 +53,8 @@ MFT_REC_DIR1     = 25       # \dir1
 MFT_REC_DIR1FILE = 26       # \dir1\file.txt
 MFT_REC_TESTLIB  = 27       # \testlib.dll (NAO-residente: p/ LoadLibrary do disco)
 TESTLIB_LCN      = 32       # LCN dos dados de \testlib.dll (livre, apos a $MFT em LCN 4)
+MFT_REC_CHILD    = 28       # \child.exe  (NAO-residente: p/ CreateProcess do disco, Fase 4b)
+CHILD_LCN        = 512      # LCN dos dados de \child.exe (bem separado de testlib @32)
 
 # Tipos de atributo NTFS.
 ATTR_STANDARD_INFORMATION = 0x10
@@ -242,9 +244,10 @@ def file_ref(rec_no, seq=1):
     return (seq << 48) | rec_no
 
 
-def build_mft(dll_size=0, dll_clusters=0):
+def build_mft(dll_size=0, dll_clusters=0, child_size=0, child_clusters=0):
     """Constroi a tabela de registros da MFT (lista de bytes de 1024).
-    Se dll_size>0, inclui \\testlib.dll como arquivo NAO-RESIDENTE (data run)."""
+    Se dll_size>0, inclui \\testlib.dll (NAO-RESIDENTE). Se child_size>0, inclui
+    \\child.exe (NAO-RESIDENTE) — p/ CreateProcess a partir do disco (Fase 4b)."""
     records = {}
 
     def add_basic(no, name, parent, content, is_dir=False, flags=FILE_ATTR_ARCHIVE):
@@ -279,6 +282,8 @@ def build_mft(dll_size=0, dll_clusters=0):
     ]
     if dll_size:
         root_entries.append((MFT_REC_TESTLIB, 'testlib.dll', FILE_ATTR_ARCHIVE, dll_size))
+    if child_size:
+        root_entries.append((MFT_REC_CHILD, 'child.exe', FILE_ATTR_ARCHIVE, child_size))
     root_index = build_root_index(root_entries)
     root_attrs = [
         make_resident_attr(ATTR_STANDARD_INFORMATION,
@@ -346,6 +351,19 @@ def build_mft(dll_size=0, dll_clusters=0):
                                                 FILE_ATTR_ARCHIVE, dll_size,
                                                 dll_clusters * CLUSTER)),
             make_nonresident_attr(ATTR_DATA, TESTLIB_LCN, dll_clusters, dll_size),
+        ])
+
+    # \child.exe (record 28): $DATA NAO-RESIDENTE (data run p/ CHILD_LCN). Prova o
+    # caminho de CreateProcess a partir de um ARQUIVO no disco (Fase 4b).
+    if child_size:
+        records[MFT_REC_CHILD] = mft_record(MFT_REC_CHILD, [
+            make_resident_attr(ATTR_STANDARD_INFORMATION,
+                               std_info_bytes(FILE_ATTR_ARCHIVE)),
+            make_resident_attr(ATTR_FILE_NAME,
+                               fname_attr_bytes(file_ref(MFT_REC_ROOT), 'child.exe',
+                                                FILE_ATTR_ARCHIVE, child_size,
+                                                child_clusters * CLUSTER)),
+            make_nonresident_attr(ATTR_DATA, CHILD_LCN, child_clusters, child_size),
         ])
 
     # Monta a MFT como um array continuo (registros 0..N; buracos = zeros).
@@ -456,6 +474,13 @@ def main():
             dll_bytes = f.read()
     dll_size = len(dll_bytes)
     dll_clusters = (dll_size + CLUSTER - 1) // CLUSTER if dll_size else 0
+    # EXE opcional a embutir como \child.exe (NAO-residente): arg 4 (caminho). Fase 4b.
+    child_bytes = b''
+    if len(sys.argv) > 4 and sys.argv[4]:
+        with open(sys.argv[4], 'rb') as f:
+            child_bytes = f.read()
+    child_size = len(child_bytes)
+    child_clusters = (child_size + CLUSTER - 1) // CLUSTER if child_size else 0
     total_img_sectors = size_mib * 1024 * 1024 // SECTOR
     part_sectors = total_img_sectors - PART_START_LBA
 
@@ -480,7 +505,7 @@ def main():
     img[backup_off:backup_off + SECTOR] = vbr
 
     # 3) $MFT no LCN escolhido.
-    mft = build_mft(dll_size, dll_clusters)
+    mft = build_mft(dll_size, dll_clusters, child_size, child_clusters)
     mft_off = part_off + mft_lcn * CLUSTER
     img[mft_off:mft_off + len(mft)] = mft
     # $MFTMirr: copia dos 4 primeiros registros.
@@ -491,6 +516,11 @@ def main():
     if dll_size:
         dll_off = part_off + TESTLIB_LCN * CLUSTER
         img[dll_off:dll_off + dll_size] = dll_bytes
+
+    # 5) Dados de \child.exe no CHILD_LCN (data run do $DATA aponta p/ ca). Fase 4b.
+    if child_size:
+        child_off = part_off + CHILD_LCN * CLUSTER
+        img[child_off:child_off + child_size] = child_bytes
 
     with open(out_path, 'wb') as f:
         f.write(img)
@@ -508,6 +538,9 @@ def main():
     if dll_size:
         print("[make-ntfs]   \\testlib.dll (%d bytes, NAO-residente, %d cluster(s) @ LCN %d)" %
               (dll_size, dll_clusters, TESTLIB_LCN))
+    if child_size:
+        print("[make-ntfs]   \\child.exe (%d bytes, NAO-residente, %d cluster(s) @ LCN %d)" %
+              (child_size, child_clusters, CHILD_LCN))
     print("[make-ntfs]   conteudo conhecido de \\hello.txt: %r" % HELLO_TXT)
 
 

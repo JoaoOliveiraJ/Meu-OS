@@ -229,6 +229,17 @@ if (Test-Path $parent) {
     if ($LASTEXITCODE) { throw "Compilacao do parent.c falhou." }
 }
 
+# FRENTE 4 (Fase 4b) — parentdisk.exe: PAI que lanca C:\child.exe a partir do DISCO NTFS
+# (nao de modulo de boot). sys_createprocess detecta o caminho C:\ e le o .exe via NTFS.
+# Exige -Disk (build\disk.img com \child.exe). Roda com:
+#   run.ps1 -Disk -Modules build\ntdll.dll,build\kernel32.dll,build\ucrtbase.dll,build\parentdisk.exe
+$parentdisk = Join-Path $ex 'parentdisk.c'
+if (Test-Path $parentdisk) {
+    Write-Host "[exemplo] apps\parentdisk.c -> build\parentdisk.exe (.exe PAI: CreateProcess do DISCO)"
+    & $zig cc -target x86_64-windows-gnu -o (Join-Path $out 'parentdisk.exe') $parentdisk -lkernel32
+    if ($LASTEXITCODE) { throw "Compilacao do parentdisk.c falhou." }
+}
+
 # FASE 3 — DEMO Named Pipes (IPC): servidor cria \Pipe\Nome e escreve; cliente
 # abre pelo nome e le os mesmos bytes. Importam kernel32 + user32 (GetStdHandle).
 # ImageBases livres e fora do heap (0x2000000..0x3000000) e da regiao do PMM

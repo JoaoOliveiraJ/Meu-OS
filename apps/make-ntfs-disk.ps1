@@ -79,11 +79,14 @@ function New-SyntheticImage {
     if (-not $py) { throw "Python nao encontrado (necessario para o modo sintetico). Instale o Python 3 ou rode como Admin para o modo real." }
     $script = Join-Path $PSScriptRoot 'make-ntfs-image.py'
     if (-not (Test-Path $script)) { throw "Faltando: $script" }
-    # Embute build\testlib.dll como \testlib.dll (NAO-residente) se existir — prova o
-    # LoadLibrary a partir de um ARQUIVO no disco (Fase 3g).
-    $dllEmbed = Join-Path $build 'testlib.dll'
-    if (Test-Path $dllEmbed) { & $py $script $Out $SizeMB $dllEmbed }
-    else                     { & $py $script $Out $SizeMB }
+    # Embute build\testlib.dll como \testlib.dll (arg 3) — prova LoadLibrary de um ARQUIVO
+    # no disco (Fase 3g) — e build\child.exe como \child.exe (arg 4) — prova CreateProcess
+    # a partir do disco (Fase 4b). Ambos NAO-residentes. String vazia = arquivo ausente.
+    $dllEmbed   = Join-Path $build 'testlib.dll'
+    $childEmbed = Join-Path $build 'child.exe'
+    $dllArg   = if (Test-Path $dllEmbed)   { $dllEmbed }   else { '' }
+    $childArg = if (Test-Path $childEmbed) { $childEmbed } else { '' }
+    & $py $script $Out $SizeMB $dllArg $childArg
     if ($LASTEXITCODE) { throw "make-ntfs-image.py falhou (exit $LASTEXITCODE)." }
 }
 

@@ -8,7 +8,7 @@ def redirect(dll):
     d = dll.lower()
     if d.startswith('api-ms-win-crt-'):          return 'ucrtbase.dll'
     if d.startswith('api-ms-win-core-com'):       return 'combase.dll'
-    if d.startswith('api-ms-win-core-winrt'):     return dll
+    if d.startswith('api-ms-win-core-winrt'):     return 'combase.dll'
     if d.startswith('api-ms-win-core-registry'):  return 'advapi32.dll'
     if d.startswith('api-ms-win-core-'):          return 'kernel32.dll'
     if d.startswith('api-ms-win-rtcore-ntuser-'): return 'user32.dll'
@@ -17,6 +17,7 @@ def redirect(dll):
     if d.startswith('api-ms-win-eventing-'):      return 'advapi32.dll'
     if d.startswith('api-ms-win-shell-'):         return 'shell32.dll'
     if d.startswith('api-ms-win-shcore-'):        return 'shcore.dll'
+    if d.startswith('api-ms-win-storage-'):       return 'shell32.dll'
     if d.startswith('ext-ms-win-rtcore-ntuser-'): return 'user32.dll'
     if d.startswith('ext-ms-win-ntuser-'):        return 'user32.dll'
     if d.startswith('ext-ms-win-session-winsta-'):return 'user32.dll'
@@ -25,6 +26,7 @@ def redirect(dll):
     if d.startswith('ext-ms-win-shell-'):         return 'shell32.dll'
     if d.startswith('ext-ms-win-security-'):      return 'advapi32.dll'
     if d.startswith('ext-ms-win-core-'):          return 'kernel32.dll'
+    if d.startswith('userenv'):                   return 'advapi32.dll'
     return dll
 def parse(path):
     d=open(path,'rb').read(); e=struct.unpack_from('<I',d,0x3C)[0]; coff=e+4

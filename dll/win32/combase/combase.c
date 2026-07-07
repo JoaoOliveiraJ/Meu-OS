@@ -35,8 +35,8 @@ typedef struct { unsigned int Data1; unsigned short Data2; unsigned short Data3;
 static void bzero_(void* p, size_t_ n) { unsigned char* d = (unsigned char*)p; for (size_t_ i = 0; i < n; i++) d[i] = 0; }
 static void bcopy_(void* dst, const void* src, size_t_ n) { unsigned char* d = (unsigned char*)dst; const unsigned char* s = (const unsigned char*)src; for (size_t_ i = 0; i < n; i++) d[i] = s[i]; }
 
-// ---- arena bump (task memory + objetos + buffers de stream). Sem free real. ----
-static unsigned char g_comheap[0x100000];   // 1 MiB — cabe no mapeamento de usuario da DLL
+// ---- arena bump (task memory + objetos + buffers de stream + HSTRING). Sem free real. ----
+static unsigned char g_comheap[0x200000];   // 2 MiB — WinRT cria muitas HSTRING na init
 static size_t_ g_comoff = 0;
 static void* arena_alloc(size_t_ cb) {
     cb = (cb + 15) & ~(size_t_)15;
@@ -334,5 +334,114 @@ __declspec(dllexport) HRESULT_ CoCreateGuid(GUID_* pguid) {
 // PropVariantClear: zera o PROPVARIANT (24 bytes no x64) -> VT_EMPTY. As alocacoes
 // contidas nao sao liberadas (arena bump), mas o valor fica limpo (sem crash/uso indevido).
 __declspec(dllexport) HRESULT_ PropVariantClear(void* pvar) { if (pvar) bzero_(pvar, 24); return S_OK_; }
+
+// ====================================================================
+//  WinRT (Win8+: a combase absorveu o runtime WinRT). HSTRING = string
+//  imutavel ref-contada; HSTRING NULL == string vazia (convencao WinRT).
+// ====================================================================
+#define HSTRING_REFERENCE_FLAG 1
+typedef struct { unsigned int flags; unsigned int length; const WCHAR_* buf; long ref; } hstring_t;
+static const WCHAR_ g_wempty[1] = { 0 };
+
+__declspec(dllexport) HRESULT_ WindowsCreateString(const WCHAR_* src, unsigned int len, void** out) {
+    if (!out) return E_POINTER_;
+    *out = 0;
+    if (len == 0) return S_OK_;                         // HSTRING vazia == NULL
+    if (!src) return E_POINTER_;
+    hstring_t* h = (hstring_t*)arena_alloc(sizeof(hstring_t));
+    WCHAR_* copy = (WCHAR_*)arena_alloc((size_t_)(len + 1) * sizeof(WCHAR_));
+    if (!h || !copy) return E_OUTOFMEMORY_;
+    for (unsigned int i = 0; i < len; i++) copy[i] = src[i];
+    copy[len] = 0;
+    h->flags = 0; h->length = len; h->buf = copy; h->ref = 1;
+    *out = h; return S_OK_;
+}
+// fast-pass: usa o HSTRING_HEADER (24 bytes) do chamador como hstring_t; NAO copia.
+__declspec(dllexport) HRESULT_ WindowsCreateStringReference(const WCHAR_* src, unsigned int len, void* header, void** out) {
+    if (!out || !header) return E_POINTER_;
+    *out = 0;
+    if (len == 0) return S_OK_;
+    if (!src) return E_POINTER_;
+    hstring_t* h = (hstring_t*)header;
+    h->flags = HSTRING_REFERENCE_FLAG; h->length = len; h->buf = src; h->ref = 1;
+    *out = h; return S_OK_;
+}
+__declspec(dllexport) HRESULT_ WindowsDeleteString(void* hs) {
+    if (!hs) return S_OK_;
+    hstring_t* h = (hstring_t*)hs;
+    if (h->flags & HSTRING_REFERENCE_FLAG) return S_OK_;   // fast-pass: o chamador e' dono
+    if (h->ref > 0) --h->ref;                              // bump: nao libera de fato
+    return S_OK_;
+}
+__declspec(dllexport) const WCHAR_* WindowsGetStringRawBuffer(void* hs, unsigned int* len) {
+    if (!hs) { if (len) *len = 0; return g_wempty; }
+    hstring_t* h = (hstring_t*)hs;
+    if (len) *len = h->length;
+    return h->buf ? h->buf : g_wempty;
+}
+__declspec(dllexport) unsigned int WindowsGetStringLen(void* hs) { return hs ? ((hstring_t*)hs)->length : 0; }
+__declspec(dllexport) HRESULT_ WindowsDuplicateString(void* hs, void** out) {
+    if (!out) return E_POINTER_;
+    *out = 0;
+    if (!hs) return S_OK_;                                 // dup de vazia == vazia (NULL)
+    hstring_t* h = (hstring_t*)hs;
+    if (!(h->flags & HSTRING_REFERENCE_FLAG)) { ++h->ref; *out = h; return S_OK_; }   // normal: AddRef
+    return WindowsCreateString(h->buf, h->length, out);    // fast-pass: copia real (buffer do chamador pode nao sobreviver)
+}
+__declspec(dllexport) HRESULT_ WindowsCompareStringOrdinal(void* h1, void* h2, int* result) {
+    if (!result) return E_POINTER_;
+    unsigned int l1 = 0, l2 = 0;
+    const WCHAR_* b1 = WindowsGetStringRawBuffer(h1, &l1);
+    const WCHAR_* b2 = WindowsGetStringRawBuffer(h2, &l2);
+    unsigned int n = (l1 < l2) ? l1 : l2;
+    for (unsigned int i = 0; i < n; i++) if (b1[i] != b2[i]) { *result = (b1[i] < b2[i]) ? -1 : 1; return S_OK_; }
+    *result = (l1 == l2) ? 0 : (l1 < l2 ? -1 : 1);
+    return S_OK_;
+}
+__declspec(dllexport) HRESULT_ WindowsSubstringWithSpecifiedLength(void* hs, unsigned int start, unsigned int len, void** out) {
+    if (!out) return E_POINTER_;
+    *out = 0;
+    unsigned int L = 0; const WCHAR_* b = WindowsGetStringRawBuffer(hs, &L);
+    if (start > L || len > L - start) return E_INVALIDARG_;
+    if (len == 0) return S_OK_;
+    return WindowsCreateString(b + start, len, out);
+}
+// buffer mutavel: Preallocate -> (chamador escreve) -> Promote finaliza em HSTRING.
+__declspec(dllexport) HRESULT_ WindowsPreallocateStringBuffer(unsigned int len, WCHAR_** charBuf, void** bufferHandle) {
+    if (!charBuf || !bufferHandle) return E_POINTER_;
+    *charBuf = 0; *bufferHandle = 0;
+    hstring_t* h = (hstring_t*)arena_alloc(sizeof(hstring_t));
+    WCHAR_* buf = (WCHAR_*)arena_alloc((size_t_)(len + 1) * sizeof(WCHAR_));
+    if (!h || !buf) return E_OUTOFMEMORY_;
+    for (unsigned int i = 0; i <= len; i++) buf[i] = 0;
+    h->flags = 0; h->length = len; h->buf = buf; h->ref = 1;
+    *charBuf = buf; *bufferHandle = h; return S_OK_;
+}
+__declspec(dllexport) HRESULT_ WindowsPromoteStringBuffer(void* bufferHandle, void** out) {
+    if (!out) return E_POINTER_;
+    *out = 0;
+    if (!bufferHandle) return S_OK_;
+    hstring_t* h = (hstring_t*)bufferHandle;
+    WCHAR_* buf = (WCHAR_*)h->buf;
+    if (buf) buf[h->length] = 0;                           // garante terminacao
+    if (h->length == 0) return S_OK_;                      // vazia -> NULL
+    *out = h; return S_OK_;
+}
+__declspec(dllexport) HRESULT_ WindowsDeleteStringBuffer(void* bufferHandle) { (void)bufferHandle; return S_OK_; }   // bump: descarta
+
+// ---- WinRT runtime (Ro*). Ativacao: objeto universal (IInspectable degrada em E_NOTIMPL). ----
+__declspec(dllexport) HRESULT_ RoInitialize(unsigned initType) { (void)initType; return S_OK_; }
+__declspec(dllexport) void     RoUninitialize(void) { }
+__declspec(dllexport) HRESULT_ RoActivateInstance(void* activatableClassId, void** instance) { (void)activatableClassId; if (!instance) return E_POINTER_; *instance = universal_object(); return S_OK_; }
+__declspec(dllexport) HRESULT_ RoGetActivationFactory(void* activatableClassId, const GUID_* iid, void** factory) { (void)activatableClassId; (void)iid; if (!factory) return E_POINTER_; *factory = universal_object(); return S_OK_; }
+
+// ---- WinRT error info (mecanismo de erro rico) — no-op honesto aqui ----
+__declspec(dllexport) int      RoOriginateError(HRESULT_ error, void* message) { (void)error; (void)message; return 1; }
+__declspec(dllexport) int      RoOriginateLanguageException(HRESULT_ error, void* message, void* langException) { (void)error; (void)message; (void)langException; return 1; }
+__declspec(dllexport) void     RoTransformError(HRESULT_ oldError, HRESULT_ newError, void* message) { (void)oldError; (void)newError; (void)message; }
+__declspec(dllexport) HRESULT_ GetRestrictedErrorInfo(void** ppRestrictedErrorInfo) { if (ppRestrictedErrorInfo) *ppRestrictedErrorInfo = 0; return S_OK_; }   // sem info -> *pp=NULL
+__declspec(dllexport) HRESULT_ SetRestrictedErrorInfo(void* pRestrictedErrorInfo) { (void)pRestrictedErrorInfo; return S_OK_; }
+__declspec(dllexport) HRESULT_ RoGetMatchingRestrictedErrorInfo(HRESULT_ hr, void** ppRestrictedErrorInfo) { (void)hr; if (ppRestrictedErrorInfo) *ppRestrictedErrorInfo = 0; return S_FALSE_; }
+__declspec(dllexport) void     RoFailFastWithErrorContext(HRESULT_ error) { (void)error; }   // no-op: prefere continuar a matar o processo
 
 int DllMain(void* h, unsigned reason, void* rsv) { (void)h; (void)reason; (void)rsv; return 1; }

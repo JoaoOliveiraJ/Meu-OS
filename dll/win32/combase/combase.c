@@ -35,6 +35,37 @@ typedef struct { unsigned int Data1; unsigned short Data2; unsigned short Data3;
 static void bzero_(void* p, size_t_ n) { unsigned char* d = (unsigned char*)p; for (size_t_ i = 0; i < n; i++) d[i] = 0; }
 static void bcopy_(void* dst, const void* src, size_t_ n) { unsigned char* d = (unsigned char*)dst; const unsigned char* s = (const unsigned char*)src; for (size_t_ i = 0; i < n; i++) d[i] = s[i]; }
 
+// ---- DIAGNOSTICO de bring-up (TEMPORARIO): escreve na serial via SYS_WRITE (rax=1,
+// rdi=string) por int 0x80. Sem import -> a combase segue autocontida. Loga qual objeto
+// COM/WinRT o explorer pede, p/ descobrir a decisao de saida. Remover depois.
+#define COMBASE_DBG 0   // 1 = loga CLSID/IID/classe-WinRT na serial (diagnostico do bring-up)
+#if COMBASE_DBG
+static void dbg_puts(const char* s) { unsigned long long ret; __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(1ULL), "D"(s) : "memory", "rcx", "r11"); }
+static const char g_hx[] = "0123456789ABCDEF";
+static void dbg_guid(const char* label, const GUID_* g) {
+    char b[96]; int i = 0; for (const char* p = label; *p; p++) b[i++] = *p;
+    if (g) { b[i++]='{';
+        for (int s=28;s>=0;s-=4) b[i++]=g_hx[(g->Data1>>s)&0xF]; b[i++]='-';
+        for (int s=12;s>=0;s-=4) b[i++]=g_hx[((unsigned)g->Data2>>s)&0xF]; b[i++]='-';
+        for (int s=12;s>=0;s-=4) b[i++]=g_hx[((unsigned)g->Data3>>s)&0xF]; b[i++]='-';
+        b[i++]=g_hx[g->Data4[0]>>4]; b[i++]=g_hx[g->Data4[0]&0xF];
+        b[i++]=g_hx[g->Data4[1]>>4]; b[i++]=g_hx[g->Data4[1]&0xF]; b[i++]='-';
+        for (int k=2;k<8;k++){ b[i++]=g_hx[g->Data4[k]>>4]; b[i++]=g_hx[g->Data4[k]&0xF]; }
+        b[i++]='}';
+    } else { b[i++]='N'; b[i++]='U'; b[i++]='L'; b[i++]='L'; }
+    b[i++]='\n'; b[i++]=0; dbg_puts(b);
+}
+static void dbg_wstr(const char* label, const unsigned short* w, unsigned wlen) {
+    char b[160]; int i = 0; for (const char* p = label; *p; p++) b[i++] = *p;
+    if (w) { unsigned n = wlen < 100 ? wlen : 100; for (unsigned k = 0; k < n; k++) { unsigned short c = w[k]; b[i++] = (c >= 32 && c < 127) ? (char)c : '.'; } }
+    else { b[i++]='N'; b[i++]='U'; b[i++]='L'; b[i++]='L'; }
+    b[i++]='\n'; b[i++]=0; dbg_puts(b);
+}
+#else
+#define dbg_guid(a,b) ((void)0)
+#define dbg_wstr(a,b,c) ((void)0)
+#endif
+
 // ---- arena bump (task memory + objetos + buffers de stream + HSTRING). Sem free real. ----
 static unsigned char g_comheap[0x200000];   // 2 MiB — WinRT cria muitas HSTRING na init
 static size_t_ g_comoff = 0;
@@ -229,8 +260,10 @@ __declspec(dllexport) HRESULT_ CoWaitForMultipleHandles(unsigned flags, unsigned
 // ====================================================================
 __declspec(dllexport) HRESULT_ CoGetMalloc(unsigned ctx, void** ppMalloc) { (void)ctx; if (!ppMalloc) return E_POINTER_; imalloc_init(); *ppMalloc = &g_imalloc; return S_OK_; }
 __declspec(dllexport) HRESULT_ CoCreateInstance(const GUID_* clsid, void* outer, unsigned ctx, const GUID_* iid, void** ppv) {
-    (void)clsid; (void)outer; (void)ctx; (void)iid;
+    (void)outer; (void)ctx;
     if (!ppv) return E_POINTER_;
+    dbg_guid("[cb] CoCreateInstance clsid=", clsid); dbg_guid("[cb]            iid=", iid);   // no-op se COMBASE_DBG=0
+    (void)clsid; (void)iid;
     *ppv = universal_object();     // ponteiro NAO-NULO c/ vtable; metodos -> E_NOTIMPL (degrada)
     return S_OK_;
 }
@@ -432,8 +465,18 @@ __declspec(dllexport) HRESULT_ WindowsDeleteStringBuffer(void* bufferHandle) { (
 // ---- WinRT runtime (Ro*). Ativacao: objeto universal (IInspectable degrada em E_NOTIMPL). ----
 __declspec(dllexport) HRESULT_ RoInitialize(unsigned initType) { (void)initType; return S_OK_; }
 __declspec(dllexport) void     RoUninitialize(void) { }
-__declspec(dllexport) HRESULT_ RoActivateInstance(void* activatableClassId, void** instance) { (void)activatableClassId; if (!instance) return E_POINTER_; *instance = universal_object(); return S_OK_; }
-__declspec(dllexport) HRESULT_ RoGetActivationFactory(void* activatableClassId, const GUID_* iid, void** factory) { (void)activatableClassId; (void)iid; if (!factory) return E_POINTER_; *factory = universal_object(); return S_OK_; }
+// WinRT activation: nao temos classes WinRT registradas -> falha LIMPA (REGDB_E_CLASSNOTREG).
+// Devolver um objeto universal aqui "sucedia" a ativacao mas os metodos davam E_NOTIMPL,
+// o que trava o fallback (o explorer tenta MRT e, se falhar limpo, cai p/ recursos classicos).
+#define REGDB_E_CLASSNOTREG ((HRESULT_)0x80040154L)
+__declspec(dllexport) HRESULT_ RoActivateInstance(void* activatableClassId, void** instance) {
+    unsigned int L=0; const WCHAR_* nm=WindowsGetStringRawBuffer(activatableClassId,&L); dbg_wstr("[cb] RoActivateInstance class=", nm, L); (void)nm; (void)L;
+    if (!instance) return E_POINTER_; *instance = 0; return REGDB_E_CLASSNOTREG;   // sem classes WinRT registradas
+}
+__declspec(dllexport) HRESULT_ RoGetActivationFactory(void* activatableClassId, const GUID_* iid, void** factory) {
+    unsigned int L=0; const WCHAR_* nm=WindowsGetStringRawBuffer(activatableClassId,&L); dbg_wstr("[cb] RoGetActivationFactory class=", nm, L); dbg_guid("[cb]            factory-iid=", iid); (void)nm; (void)L; (void)iid;
+    if (!factory) return E_POINTER_; *factory = 0; return REGDB_E_CLASSNOTREG;
+}
 
 // ---- WinRT error info (mecanismo de erro rico) — no-op honesto aqui ----
 __declspec(dllexport) int      RoOriginateError(HRESULT_ error, void* message) { (void)error; (void)message; return 1; }

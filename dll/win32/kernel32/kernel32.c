@@ -297,6 +297,133 @@ __declspec(dllexport) unsigned long long VirtualQuery(void* addr, MEUOS_MBI* mbi
     return sizeof(MEUOS_MBI);
 }
 
+// ===========================================================================
+// kernelbase (via api-ms-win-core-* -> kernel32): 1o lote p/ o explorer.exe REAL.
+// Funcoes PURAS DE USUARIO, implementadas DE VERDADE (sem syscall): strings largas,
+// Str*/Path* (shlwapi via core), comparacao ordinal, MulDiv, conversao MB<->WC. Os
+// SRW locks sao corretos p/ o modelo single-threaded atual (sem contencao), igual as
+// critical sections ja existentes acima. Backadas por kernel (heap/VirtualAlloc/
+// registro/threads) vem em lotes seguintes. Ver RECON-EXPLORER.md.
+// ===========================================================================
+typedef unsigned short K32_WCHAR;
+static K32_WCHAR k32_wlower(K32_WCHAR c) { return (c >= 'A' && c <= 'Z') ? (K32_WCHAR)(c + 32) : c; }
+
+__declspec(dllexport) int lstrlenW(const K32_WCHAR* s) { int n = 0; if (s) while (s[n]) n++; return n; }
+__declspec(dllexport) int lstrcmpW(const K32_WCHAR* a, const K32_WCHAR* b) {
+    while (*a && (*a == *b)) { a++; b++; } return (int)*a - (int)*b;
+}
+__declspec(dllexport) int lstrcmpiW(const K32_WCHAR* a, const K32_WCHAR* b) {
+    while (*a && (k32_wlower(*a) == k32_wlower(*b))) { a++; b++; }
+    return (int)k32_wlower(*a) - (int)k32_wlower(*b);
+}
+
+__declspec(dllexport) K32_WCHAR* CharNextW(const K32_WCHAR* s) { return (K32_WCHAR*)(s && *s ? s + 1 : s); }
+__declspec(dllexport) char*      CharNextA(const char* s)      { return (char*)(s && *s ? s + 1 : s); }
+__declspec(dllexport) K32_WCHAR* CharLowerBuffW(K32_WCHAR* s, unsigned len) {
+    if (s) for (unsigned i = 0; i < len; i++) s[i] = k32_wlower(s[i]);
+    return s;
+}
+
+// Str* (shlwapi-legacy; chegam via api-ms-win-core-shlwapi-*)
+__declspec(dllexport) K32_WCHAR* StrChrW(const K32_WCHAR* s, K32_WCHAR c) {
+    if (s) for (; *s; s++) if (*s == c) return (K32_WCHAR*)s; return 0;
+}
+__declspec(dllexport) K32_WCHAR* StrChrIW(const K32_WCHAR* s, K32_WCHAR c) {
+    c = k32_wlower(c); if (s) for (; *s; s++) if (k32_wlower(*s) == c) return (K32_WCHAR*)s; return 0;
+}
+__declspec(dllexport) K32_WCHAR* StrRChrW(const K32_WCHAR* s, const K32_WCHAR* end, K32_WCHAR c) {
+    const K32_WCHAR* r = 0; if (!s) return 0; if (!end) { end = s; while (*end) end++; }
+    for (; s < end; s++) if (*s == c) r = s; return (K32_WCHAR*)r;
+}
+__declspec(dllexport) K32_WCHAR* StrStrIW(const K32_WCHAR* h, const K32_WCHAR* n) {
+    if (!h || !n || !*n) return (K32_WCHAR*)h;
+    for (; *h; h++) { const K32_WCHAR* a = h; const K32_WCHAR* b = n;
+        while (*a && *b && k32_wlower(*a) == k32_wlower(*b)) { a++; b++; }
+        if (!*b) return (K32_WCHAR*)h; }
+    return 0;
+}
+__declspec(dllexport) int StrCmpW(const K32_WCHAR* a, const K32_WCHAR* b)  { return lstrcmpW(a, b); }
+__declspec(dllexport) int StrCmpIW(const K32_WCHAR* a, const K32_WCHAR* b) { return lstrcmpiW(a, b); }
+__declspec(dllexport) int StrCmpNIW(const K32_WCHAR* a, const K32_WCHAR* b, int n) {
+    for (; n > 0; n--, a++, b++) { K32_WCHAR ca = k32_wlower(*a), cb = k32_wlower(*b);
+        if (ca != cb) return (int)ca - (int)cb; if (!ca) break; }
+    return 0;
+}
+__declspec(dllexport) int StrToIntW(const K32_WCHAR* s) {
+    int sign = 1, v = 0; if (!s) return 0;
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s == '-') { sign = -1; s++; } else if (*s == '+') s++;
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (int)(*s - '0'); s++; }
+    return v * sign;
+}
+
+// Path* (via api-ms-win-core-shlwapi/path)
+__declspec(dllexport) K32_WCHAR* PathFindFileNameW(const K32_WCHAR* p) {
+    const K32_WCHAR* r = p; if (!p) return 0;
+    for (; *p; p++) if (*p == '\\' || *p == '/') r = p + 1;
+    return (K32_WCHAR*)r;
+}
+__declspec(dllexport) K32_WCHAR* PathFindExtensionW(const K32_WCHAR* p) {
+    const K32_WCHAR* dot = 0; const K32_WCHAR* q = p; if (!p) return 0;
+    for (; *q; q++) { if (*q == '\\' || *q == '/') dot = 0; else if (*q == '.') dot = q; }
+    return (K32_WCHAR*)(dot ? dot : q);
+}
+
+// CompareStringOrdinal -> CSTR_LESS_THAN(1)/EQUAL(2)/GREATER_THAN(3)
+__declspec(dllexport) int CompareStringOrdinal(const K32_WCHAR* a, int la, const K32_WCHAR* b, int lb, int ignoreCase) {
+    if (la < 0) la = lstrlenW(a); if (lb < 0) lb = lstrlenW(b);
+    int n = la < lb ? la : lb;
+    for (int i = 0; i < n; i++) { K32_WCHAR ca = a[i], cb = b[i];
+        if (ignoreCase) { ca = k32_wlower(ca); cb = k32_wlower(cb); }
+        if (ca != cb) return ca < cb ? 1 : 3; }
+    return la == lb ? 2 : (la < lb ? 1 : 3);
+}
+
+__declspec(dllexport) int MulDiv(int a, int b, int c) {
+    if (c == 0) return -1;
+    long long r = (long long)a * (long long)b;
+    r += (r >= 0 ? c / 2 : -(c / 2));   // arredonda p/ o mais proximo
+    return (int)(r / c);
+}
+
+// Conversao MB<->WC (por ora: ASCII/Latin-1, byte<->WCHAR; sem tabelas de codepage).
+// cbMultiByte/cchWideChar == -1 => string terminada em NUL. Tamanho de saida 0 =>
+// devolve o tamanho necessario (contrato do Win32).
+__declspec(dllexport) int MultiByteToWideChar(unsigned cp, unsigned flags, const char* mb,
+        int cbMB, K32_WCHAR* wc, int cchWC) {
+    (void)cp; (void)flags; if (!mb) return 0;
+    int n = cbMB; if (n < 0) { n = 0; while (mb[n]) n++; n++; }   // inclui o NUL
+    if (cchWC == 0) return n;
+    int w = n < cchWC ? n : cchWC;
+    for (int i = 0; i < w; i++) wc[i] = (K32_WCHAR)(unsigned char)mb[i];
+    return w;
+}
+__declspec(dllexport) int WideCharToMultiByte(unsigned cp, unsigned flags, const K32_WCHAR* wc,
+        int cchWC, char* mb, int cbMB, const char* defChar, int* usedDef) {
+    (void)cp; (void)flags; (void)defChar; if (usedDef) *usedDef = 0; if (!wc) return 0;
+    int n = cchWC; if (n < 0) { n = 0; while (wc[n]) n++; n++; }   // inclui o NUL
+    if (cbMB == 0) return n;
+    int w = n < cbMB ? n : cbMB;
+    for (int i = 0; i < w; i++) mb[i] = (wc[i] < 256) ? (char)wc[i] : '?';
+    return w;
+}
+
+// Critical sections (complementos): as basicas (Init/Enter/Leave/Delete) ja existem
+// acima como no-op (correto sem contencao, single-threaded).
+__declspec(dllexport) int  InitializeCriticalSectionAndSpinCount(void* cs, unsigned spin) { (void)cs; (void)spin; return 1; }
+__declspec(dllexport) int  InitializeCriticalSectionEx(void* cs, unsigned spin, unsigned flags) { (void)cs; (void)spin; (void)flags; return 1; }
+__declspec(dllexport) int  TryEnterCriticalSection(void* cs) { (void)cs; return 1; }
+
+// SRW locks: no modelo single-threaded atual nao ha contencao, entao a aquisicao e'
+// sempre imediata (mesma logica das critical sections). Vira real quando o escalonador
+// de ring-3 estiver ligado (thread por thread).
+__declspec(dllexport) void InitializeSRWLock(void* l)          { (void)l; }
+__declspec(dllexport) void AcquireSRWLockExclusive(void* l)    { (void)l; }
+__declspec(dllexport) void ReleaseSRWLockExclusive(void* l)    { (void)l; }
+__declspec(dllexport) void AcquireSRWLockShared(void* l)       { (void)l; }
+__declspec(dllexport) void ReleaseSRWLockShared(void* l)       { (void)l; }
+__declspec(dllexport) int  TryAcquireSRWLockExclusive(void* l) { (void)l; return 1; }
+
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }

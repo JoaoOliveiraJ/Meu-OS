@@ -66,6 +66,8 @@ enum {
     SYS_USERSETCURSORPOS = 47,
     // --- FASE 3f: LoadLibrary em runtime (carrega DLL registrada, devolve a base). ---
     SYS_LOADLIBRARY = 48,
+    // --- Frente C (explorer real): tempo p/ o usermode (le o KUSER_SHARED_DATA). ---
+    SYS_QUERYSYSTEMTIME = 49,
 };
 
 // "Console device": handles padrao do Win32 (GetStdHandle). Sao pseudo-handles
@@ -1059,6 +1061,20 @@ static void sys_user_setcursorpos(struct regs* r) {
     r->rax = 1;
 }
 
+// Frente C (explorer real): tempo do sistema p/ o usermode. Le o KUSER_SHARED_DATA
+// (mapeado em 0xFFFFF78000000000, atualizado por mm_kuser_tick): SystemTime (FILETIME
+// 100ns @ +0x20) e TickCount em ms (@ +0x14). O CRT do explorer chama isto no
+// __security_init_cookie (GetSystemTimeAsFileTime/GetTickCount). out = {int64 SystemTime; u32 TickCount}.
+static void sys_querysystemtime(struct regs* r) {
+    struct meuos_timeinfo { long long SystemTime; uint32_t TickCount; };
+    struct meuos_timeinfo* out = (struct meuos_timeinfo*)(uintptr_t)r->rdi;
+    if (!out) { r->rax = (uint64_t)0xC000000Du; return; }   // STATUS_INVALID_PARAMETER
+    volatile uint8_t* kuser = (volatile uint8_t*)0xFFFFF78000000000ULL;
+    out->SystemTime = *(volatile long long*)(kuser + 0x20);   // KSYSTEM_TIME (Low@0x20, High1@0x24)
+    out->TickCount  = *(volatile uint32_t*)(kuser + 0x14);    // ms (paging.c: g_ticks*10)
+    r->rax = 0;   // STATUS_SUCCESS
+}
+
 // ---- SSDT: tabela central de serviços ----
 typedef void (*syscall_fn)(struct regs*);
 static syscall_fn s_ssdt[] = {
@@ -1111,6 +1127,7 @@ static syscall_fn s_ssdt[] = {
     sys_user_getcursorpos,      // 46 (FASE 11)
     sys_user_setcursorpos,      // 47 (FASE 11)
     sys_loadlibrary,            // 48 (FASE 3f: LoadLibrary runtime)
+    sys_querysystemtime,        // 49 (Frente C: tempo p/ o explorer real)
 };
 #define SSDT_COUNT (sizeof(s_ssdt) / sizeof(s_ssdt[0]))
 

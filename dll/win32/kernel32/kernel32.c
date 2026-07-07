@@ -24,6 +24,9 @@ __declspec(dllimport) long NtEnumProcesses(unsigned index, void* out);
 __declspec(dllimport) long NtEnumDrivers(unsigned index, void* out);
 __declspec(dllimport) long NtLoadDriver(const char* name);
 __declspec(dllimport) long NtUnloadDriver(const char* name);
+// Frente C (explorer real): tempo do sistema + info de processo (do ntdll).
+__declspec(dllimport) long NtQuerySystemTime(void* out);
+__declspec(dllimport) long NtQueryInformationProcess(void* h, unsigned cls, void* buf, unsigned len, unsigned* ret);
 
 #define INVALID_HANDLE_VALUE ((void*)(long long)-1)
 
@@ -423,6 +426,69 @@ __declspec(dllexport) void ReleaseSRWLockExclusive(void* l)    { (void)l; }
 __declspec(dllexport) void AcquireSRWLockShared(void* l)       { (void)l; }
 __declspec(dllexport) void ReleaseSRWLockShared(void* l)       { (void)l; }
 __declspec(dllexport) int  TryAcquireSRWLockExclusive(void* l) { (void)l; return 1; }
+
+// ===========================================================================
+// kernelbase lote 2: TEMPO + IDs + perf counter. O CRT do explorer usa isto no
+// __security_init_cookie (o 1o ponto onde ele parava). Implementado DE VERDADE:
+// tempo via syscall novo (kernel le o KUSER_SHARED_DATA), PID via o syscall de
+// processo que ja existe (EPROCESS real), perf counter via RDTSC (instrucao de
+// usuario; CR4.TSD=0). Ver RECON-EXPLORER.md.
+// ===========================================================================
+typedef struct { unsigned dwLowDateTime, dwHighDateTime; } K32_FILETIME;
+struct k32_timeinfo { long long SystemTime; unsigned TickCount; };
+// subset do PROCESS_BASIC_INFORMATION (offsets casam com o kernel): UniqueProcessId @ 0x20.
+struct k32_pbi { unsigned ExitStatus, Reserved0;
+                 unsigned long long PebBaseAddress, AffinityMask, BasePriority,
+                                    UniqueProcessId, InheritedFrom; };
+
+__declspec(dllexport) void GetSystemTimeAsFileTime(K32_FILETIME* ft) {
+    struct k32_timeinfo ti; ti.SystemTime = 0; ti.TickCount = 0;
+    NtQuerySystemTime(&ti);
+    if (ft) { ft->dwLowDateTime = (unsigned)ti.SystemTime;
+              ft->dwHighDateTime = (unsigned)((unsigned long long)ti.SystemTime >> 32); }
+}
+__declspec(dllexport) void GetSystemTimePreciseAsFileTime(K32_FILETIME* ft) { GetSystemTimeAsFileTime(ft); }
+__declspec(dllexport) unsigned GetTickCount(void) {
+    struct k32_timeinfo ti; ti.SystemTime = 0; ti.TickCount = 0; NtQuerySystemTime(&ti); return ti.TickCount;
+}
+__declspec(dllexport) unsigned long long GetTickCount64(void) {
+    struct k32_timeinfo ti; ti.SystemTime = 0; ti.TickCount = 0; NtQuerySystemTime(&ti);
+    return (unsigned long long)ti.TickCount;
+}
+__declspec(dllexport) unsigned GetCurrentProcessId(void) {
+    struct k32_pbi pbi; for (unsigned i = 0; i < sizeof(pbi); i++) ((char*)&pbi)[i] = 0;
+    NtQueryInformationProcess(0, 0 /*ProcessBasicInformation*/, &pbi, (unsigned)sizeof(pbi), 0);
+    return (unsigned)pbi.UniqueProcessId;
+}
+__declspec(dllexport) unsigned GetCurrentThreadId(void) {
+    // Modelo single-threaded (sem escalonador de ring-3 ligado): id distinto do PID
+    // so p/ dar entropia ao cookie. Vira real quando houver threads de usuario.
+    return GetCurrentProcessId() ^ 0x1000u;
+}
+__declspec(dllexport) void* GetCurrentProcess(void) { return (void*)(long long)-1; }  // pseudo-handle NT
+__declspec(dllexport) void* GetCurrentThread(void)  { return (void*)(long long)-2; }  // pseudo-handle NT
+__declspec(dllexport) int QueryPerformanceCounter(long long* c) {
+    unsigned lo, hi; __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    if (c) *c = ((long long)hi << 32) | lo;
+    return 1;
+}
+__declspec(dllexport) int QueryPerformanceFrequency(long long* f) {
+    if (f) *f = 3000000000LL;   // TSC ~3 GHz (i7-9700K); consistente com QPC=rdtsc
+    return 1;
+}
+
+// --- Entry-point / SEH setup: o __scrt_common_main_seh do explorer chama ISTO
+//     primeiro (ANTES do cookie). Descoberto desmontando o entry real. ---
+__declspec(dllexport) int IsDebuggerPresent(void) { return 0; }   // nao estamos sob depurador
+__declspec(dllexport) int IsProcessorFeaturePresent(unsigned f) {
+    // PF_XMMI_INSTRUCTIONS_AVAILABLE(6)/PF_XMMI64(10) = SSE/SSE2: temos (long mode c/
+    // SSE ligado). PF_NX(12): temos. Demais features: conservador (0).
+    return (f == 6 || f == 10 || f == 12) ? 1 : 0;
+}
+__declspec(dllexport) long UnhandledExceptionFilter(void* info) { (void)info; return 0; } // EXCEPTION_CONTINUE_SEARCH
+__declspec(dllexport) int TerminateProcess(void* hproc, unsigned code) {
+    (void)hproc; NtTerminateProcess(code); return 1;   // (so o processo corrente por ora)
+}
 
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;

@@ -13,6 +13,9 @@ param(
     [switch]$Headless,
     [int]$TimeoutSec = 0,
     [string[]]$Modules,
+    # Cenario nomeado (mapa nome->modulos abaixo). Ex.: -Scenario desktop | pintok.
+    # -Modules tem prioridade se passado. 'full' (ou sem -Scenario) = lista completa.
+    [string]$Scenario,
     [switch]$Screendump,
     [int]$QmpPort = 4444,
     # FASE 3c — injeta teclas via QMP 'send-key' apos o boot (prova de entrada de
@@ -44,6 +47,37 @@ if (-not $qemu) {
     }
 }
 if (-not $qemu) { throw "QEMU nao encontrado. Rode .\setup.ps1" }
+
+# Cenarios nomeados: mapa nome -> lista de modulos (leaf names em build\). ADITIVO;
+# nao toca no caminho default (sem -Scenario e sem -Modules = lista completa "full").
+#   .\run.ps1 -Scenario desktop                          # login -> desktop, SEM o desfile de testes
+#   .\run.ps1 -Scenario pintok -Headless -TimeoutSec 40  # baseline anti-cheat (Riot Vanguard)
+$scenarios = @{
+    # Desktop enxuto: so as DLLs que csrss/winlogon/explorer precisam + o caminho
+    # login -> shell persistente. SEM apps de teste (test/sysinfo/pipe*/dx*/cmd/...)
+    # e SEM os draw-once redundantes (win10ui/desktop). O virtio-gpu/tablet/teclado
+    # sao drivers do KERNEL (ja embutidos), nao modulos de boot.
+    'desktop' = @('ntdll.dll', 'kernel32.dll', 'user32.dll', 'gdi32.dll', 'advapi32.dll',
+                  'secur32.dll', 'credui.dll',
+                  'csrss.exe', 'winlogon.exe', 'explorer.exe')
+    # Baseline do pintok.sys (Riot Vanguard): so o driver ring-0.
+    'pintok'  = @('pintok.sys')
+}
+if ($Scenario -and $Scenario -ne 'full') {
+    if (-not $scenarios.ContainsKey($Scenario)) {
+        throw "Cenario '$Scenario' desconhecido. Opcoes: $(($scenarios.Keys | Sort-Object) -join ', '), full"
+    }
+    if (-not $Modules -or $Modules.Count -eq 0) {
+        $Modules = @()
+        foreach ($d in $scenarios[$Scenario]) {
+            $p = Join-Path $build $d
+            if (Test-Path $p) { $Modules += $p }
+        }
+        if (-not $Modules -or $Modules.Count -eq 0) {
+            throw "Cenario '$Scenario': nenhum modulo encontrado em build\. Rode .\build.ps1"
+        }
+    }
+}
 
 # Modulos a carregar. Default = os exemplos compilados em build\.
 if (-not $Modules -or $Modules.Count -eq 0) {

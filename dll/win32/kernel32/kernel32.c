@@ -625,6 +625,272 @@ __declspec(dllexport) void GetSystemInfo(void* si) {
 }
 __declspec(dllexport) void GetNativeSystemInfo(void* si) { GetSystemInfo(si); }
 
+// ============================================================================
+// Frente C (explorer real) — kernel32 lote A: threadpool + InitOnce + processo/thread
+// + excecao + debug + tempo. O explorer importa ~248 funcoes (via api-ms-win-core-*);
+// implementamos por fases. Impl reais onde da (threadpool Work sincrono, InitOnce);
+// stubs ESPECIFICOS e nomeados onde a semantica exige subsistema ainda ausente
+// (threads de ring-3 com param, criacao de processo). Sem catch-all.
+// ============================================================================
+__declspec(dllimport) long NtCreateThread(void* out_handle, void* process, void* start);
+static long long g_fake_h = 0x2000;
+static void* k32_fake_handle(void) { g_fake_h += 8; return (void*)g_fake_h; }
+
+// ---- Threadpool: Work/Simple rodam SINCRONO no submit (sem escalonador de callbacks
+//      assincronos em ring-3); Timer/Wait sao no-op (nunca disparam). ----
+typedef struct { void* cb; void* ctx; } k32_tp_t;
+static k32_tp_t* k32_tp_new(void* cb, void* ctx) { k32_tp_t* o = (k32_tp_t*)HeapAlloc(0, 0, sizeof(k32_tp_t)); if (o){ o->cb=cb; o->ctx=ctx; } return o; }
+__declspec(dllexport) void* CreateThreadpoolWork(void* cb, void* ctx, void* env) { (void)env; return k32_tp_new(cb, ctx); }
+__declspec(dllexport) void SubmitThreadpoolWork(void* work) { k32_tp_t* o=(k32_tp_t*)work; if (o && o->cb) ((void(*)(void*,void*,void*))o->cb)(0, o->ctx, work); }
+__declspec(dllexport) void WaitForThreadpoolWorkCallbacks(void* work, int cancel) { (void)work;(void)cancel; }
+__declspec(dllexport) void CloseThreadpoolWork(void* work) { (void)work; }
+__declspec(dllexport) int TrySubmitThreadpoolCallback(void* cb, void* ctx, void* env) { (void)env; if (cb) ((void(*)(void*,void*))cb)(0, ctx); return 1; }
+__declspec(dllexport) void* CreateThreadpoolTimer(void* cb, void* ctx, void* env) { (void)env; return k32_tp_new(cb, ctx); }
+__declspec(dllexport) void SetThreadpoolTimer(void* timer, void* due, unsigned period, unsigned window) { (void)timer;(void)due;(void)period;(void)window; }
+__declspec(dllexport) void WaitForThreadpoolTimerCallbacks(void* timer, int cancel) { (void)timer;(void)cancel; }
+__declspec(dllexport) void CloseThreadpoolTimer(void* timer) { (void)timer; }
+__declspec(dllexport) void* CreateThreadpoolWait(void* cb, void* ctx, void* env) { (void)env; return k32_tp_new(cb, ctx); }
+__declspec(dllexport) void SetThreadpoolWait(void* wait, void* handle, void* timeout) { (void)wait;(void)handle;(void)timeout; }
+__declspec(dllexport) void WaitForThreadpoolWaitCallbacks(void* wait, int cancel) { (void)wait;(void)cancel; }
+__declspec(dllexport) void CloseThreadpoolWait(void* wait) { (void)wait; }
+
+// ---- InitOnce: INIT_ONCE = { void* Ptr }. Single-threaded. ----
+#define K32_INITONCE_DONE ((void*)(unsigned long long)2)
+__declspec(dllexport) int InitOnceExecuteOnce(void** once, void* fn, void* param, void** ctx) {
+    if (once && *once == K32_INITONCE_DONE) { if (ctx)*ctx=0; return 1; }
+    void* lctx = 0; int ok = fn ? ((int(*)(void**,void*,void**))fn)(once, param, &lctx) : 1;
+    if (ok && once) *once = K32_INITONCE_DONE; if (ctx)*ctx=lctx; return ok;
+}
+__declspec(dllexport) int InitOnceBeginInitialize(void** once, unsigned flags, int* pending, void** ctx) {
+    (void)flags; if (once && *once == K32_INITONCE_DONE) { if (pending)*pending=0; if (ctx)*ctx=0; return 1; }
+    if (pending)*pending=1; if (ctx)*ctx=0; return 1;   // caller inicializa e chama Complete
+}
+__declspec(dllexport) int InitOnceComplete(void** once, unsigned flags, void* ctx) { (void)flags;(void)ctx; if (once)*once=K32_INITONCE_DONE; return 1; }
+
+// ---- processo/thread: threads reais de ring-3 (com param/stack proprios) ainda nao
+//      wired -> handles-sentinela. O thread principal do explorer segue; workers nao. ----
+__declspec(dllexport) void* CreateThread(void* sec, unsigned long long stack, void* start, void* param, unsigned flags, unsigned* tid) {
+    (void)sec;(void)stack;(void)start;(void)param;(void)flags; if (tid)*tid=(unsigned)(unsigned long long)k32_fake_handle(); return k32_fake_handle();
+}
+__declspec(dllexport) void* OpenProcess(unsigned acc, int inh, unsigned pid) { (void)acc;(void)inh;(void)pid; return k32_fake_handle(); }
+__declspec(dllexport) void* OpenThread(unsigned acc, int inh, unsigned tid) { (void)acc;(void)inh;(void)tid; return k32_fake_handle(); }
+__declspec(dllexport) unsigned GetProcessId(void* h) { (void)h; return 1; }
+__declspec(dllexport) int ProcessIdToSessionId(unsigned pid, unsigned* sid) { (void)pid; if (sid)*sid=1; return 1; }
+__declspec(dllexport) int GetExitCodeProcess(void* h, unsigned* code) { (void)h; if (code)*code=259; return 1; }   // STILL_ACTIVE
+__declspec(dllexport) unsigned ResumeThread(void* h) { (void)h; return 0; }
+__declspec(dllexport) int SetThreadPriority(void* h, int pri) { (void)h;(void)pri; return 1; }
+__declspec(dllexport) int GetThreadPriority(void* h) { (void)h; return 0; }
+__declspec(dllexport) int SetThreadPriorityBoost(void* h, int dis) { (void)h;(void)dis; return 1; }
+__declspec(dllexport) long SetThreadDescription(void* h, const void* d) { (void)h;(void)d; return 0; }   // S_OK
+__declspec(dllexport) unsigned GetThreadUILanguage(void) { return 0x0409; }
+__declspec(dllexport) int QueueUserAPC(void* fn, void* thread, unsigned long long data) { (void)fn;(void)thread;(void)data; return 1; }
+__declspec(dllexport) int CreateProcessW(const void* app, void* cmd, void* pa, void* ta, int inh, unsigned flags, void* env, const void* cwd, void* si, void* pi) {
+    (void)app;(void)cmd;(void)pa;(void)ta;(void)inh;(void)flags;(void)env;(void)cwd;(void)si;(void)pi; return 0;   // sem spawn (falha graciosa)
+}
+__declspec(dllexport) int QueryFullProcessImageNameW(void* h, unsigned flags, void* buf, unsigned* size) { (void)h;(void)flags;(void)buf; if (size)*size=0; return 0; }
+__declspec(dllexport) int GetProcessMitigationPolicy(void* h, int pol, void* buf, unsigned long long len) { (void)h;(void)pol; if (buf){ unsigned char* b=(unsigned char*)buf; for (unsigned long long i=0;i<len;i++) b[i]=0; } return 1; }
+__declspec(dllexport) int SetProcessInformation(void* h, int cls, void* info, unsigned long len) { (void)h;(void)cls;(void)info;(void)len; return 1; }
+__declspec(dllexport) int SetPriorityClass(void* h, unsigned cls) { (void)h;(void)cls; return 1; }
+__declspec(dllexport) unsigned GetPriorityClass(void* h) { (void)h; return 0x20; }   // NORMAL_PRIORITY_CLASS
+
+// ---- excecao (sem SEH ring-3 ativo): RaiseException nao propaga; FailFast encerra. ----
+__declspec(dllexport) void RaiseException(unsigned code, unsigned flags, unsigned n, const void* args) { (void)code;(void)flags;(void)n;(void)args; }
+__declspec(dllexport) void RaiseFailFastException(void* rec, void* ctx, unsigned flags) { (void)rec;(void)ctx;(void)flags; ExitProcess(0xC0000409u); }
+__declspec(dllexport) unsigned RemoveVectoredExceptionHandler(void* h) { (void)h; return 1; }
+
+// ---- debug ----
+__declspec(dllexport) void OutputDebugStringW(const void* s) { (void)s; }
+__declspec(dllexport) void DebugBreak(void) { }
+__declspec(dllexport) void* DelayLoadFailureHook(const char* dll, const char* fn) { (void)dll;(void)fn; return 0; }
+__declspec(dllexport) unsigned SetErrorMode(unsigned mode) { (void)mode; return 0; }
+
+// ---- tempo: data/hora FIXA plausivel (sem RTC ring-3 aqui); conversoes basicas. ----
+typedef struct { unsigned short wYear,wMonth,wDayOfWeek,wDay,wHour,wMinute,wSecond,wMilliseconds; } SYSTEMTIME_;
+__declspec(dllexport) void GetSystemTime(void* st) { if (!st) return; SYSTEMTIME_* s=(SYSTEMTIME_*)st;
+    s->wYear=2026; s->wMonth=7; s->wDayOfWeek=2; s->wDay=7; s->wHour=12; s->wMinute=0; s->wSecond=0; s->wMilliseconds=0; }
+__declspec(dllexport) void GetLocalTime(void* st) { GetSystemTime(st); }
+__declspec(dllexport) int FileTimeToSystemTime(const void* ft, void* st) { (void)ft; GetSystemTime(st); return 1; }
+__declspec(dllexport) int SystemTimeToFileTime(const void* st, void* ft) { (void)st; if (ft) *(unsigned long long*)ft = 0x01DCADE6C0000000ULL; return 1; }
+__declspec(dllexport) int SystemTimeToTzSpecificLocalTime(const void* tz, const void* st, void* local) {
+    (void)tz; if (st && local) { const unsigned char* a=(const unsigned char*)st; unsigned char* b=(unsigned char*)local; for (int i=0;i<16;i++) b[i]=a[i]; } return 1;
+}
+__declspec(dllexport) long CompareFileTime(const void* a, const void* b) {
+    unsigned long long x = a?*(const unsigned long long*)a:0, y = b?*(const unsigned long long*)b:0;
+    return x<y ? -1 : (x>y ? 1 : 0);
+}
+
+// ============================================================================
+// Frente C (explorer real) — kernel32 lote B: synch/modulo/arquivo/NLS/path/recurso/
+// mapeamento/global-heap/job/misc. Impl reais onde barato (Global/LocalAlloc no heap,
+// path/string, GetModuleFileName, CompareStringW); stubs ESPECIFICOS onde o subsistema
+// falta (arquivo/recurso -> "nao encontrado"; mapeamento -> RAM anonima). Sem catch-all.
+// ============================================================================
+__declspec(dllimport) void* LdrLoadDll(const char* name);
+typedef unsigned short wchar16;   // UTF-16 (wide) do Win32
+static unsigned k32_wlen(const wchar16* s){ unsigned n=0; if(s) while(s[n]) n++; return n; }
+static void k32_asctow(wchar16* d, const char* s, int cap){ int i=0; if(!d||cap<=0) return; for(; s[i] && i<cap-1; i++) d[i]=(wchar16)(unsigned char)s[i]; d[i]=0; }
+static void k32_wtoasc(char* d, const wchar16* s, int cap){ int i=0; if(!d||cap<=0) return; for(; s && s[i] && i<cap-1; i++) d[i]=(char)s[i]; d[i]=0; }
+typedef struct { unsigned long long size; } k32_map_t;
+static void* k32_mapnew(unsigned long long size){ k32_map_t* m=(k32_map_t*)HeapAlloc(0,0,sizeof(k32_map_t)); if(m) m->size=size?size:0x1000; return m; }
+
+// ---- synch: objetos por handle-sentinela; SleepEx dorme; waits de pool no-op ----
+__declspec(dllexport) void* OpenSemaphoreW(unsigned acc, int inh, const wchar16* n) { (void)acc;(void)inh;(void)n; return k32_fake_handle(); }
+__declspec(dllexport) void* OpenMutexW(unsigned acc, int inh, const wchar16* n) { (void)acc;(void)inh;(void)n; return k32_fake_handle(); }
+__declspec(dllexport) unsigned SleepEx(unsigned ms, int alertable) { (void)alertable; Sleep(ms); return 0; }
+__declspec(dllexport) int RegisterWaitForSingleObject(void** wait, void* obj, void* cb, void* ctx, unsigned ms, unsigned flags) { (void)obj;(void)cb;(void)ctx;(void)ms;(void)flags; if (wait)*wait=k32_fake_handle(); return 1; }
+__declspec(dllexport) int UnregisterWaitEx(void* wait, void* ev) { (void)wait;(void)ev; return 1; }
+__declspec(dllexport) void* CreateTimerQueueTimer(void** timer, void* queue, void* cb, void* param, unsigned due, unsigned period, unsigned flags) { (void)queue;(void)cb;(void)param;(void)due;(void)period;(void)flags; if (timer)*timer=k32_fake_handle(); return (void*)(long long)1; }
+__declspec(dllexport) int ChangeTimerQueueTimer(void* queue, void* timer, unsigned due, unsigned period) { (void)queue;(void)timer;(void)due;(void)period; return 1; }
+__declspec(dllexport) int DeleteTimerQueueTimer(void* queue, void* timer, void* ev) { (void)queue;(void)timer;(void)ev; return 1; }
+
+// ---- modulo ----
+__declspec(dllexport) int FreeLibrary(void* h) { (void)h; return 1; }
+__declspec(dllexport) void* LoadLibraryExW(const wchar16* name, void* file, unsigned flags) {
+    (void)file;(void)flags; char nb[128]; k32_wtoasc(nb, name, sizeof(nb)); return LdrLoadDll(nb);
+}
+__declspec(dllexport) unsigned GetModuleFileNameW(void* mod, wchar16* buf, unsigned size) {
+    (void)mod; k32_asctow(buf, "C:\\Windows\\explorer.exe", (int)size); return k32_wlen(buf);
+}
+__declspec(dllexport) unsigned GetModuleFileNameA(void* mod, char* buf, unsigned size) {
+    (void)mod; const char* s="C:\\Windows\\explorer.exe"; unsigned i=0; if(buf) for(; s[i] && i<size-1; i++) buf[i]=s[i]; if(buf&&size) buf[i]=0; return i;
+}
+__declspec(dllexport) void* ResolveDelayLoadedAPI(void* pa, const void* dd, void* dh, void* fh, void* thunk, unsigned flags) { (void)pa;(void)dd;(void)dh;(void)fh;(void)thunk;(void)flags; return 0; }
+
+// ---- arquivo: sem volume montado p/ o explorer -> "nao encontrado"/falha graciosa ----
+#define K32_INVALID_FILE_ATTR 0xFFFFFFFFu
+__declspec(dllexport) void* CreateFileW(const wchar16* n, unsigned a, unsigned s, void* sec, unsigned d, unsigned f, void* t) { (void)n;(void)a;(void)s;(void)sec;(void)d;(void)f;(void)t; return INVALID_HANDLE_VALUE; }
+__declspec(dllexport) int DeleteFileW(const wchar16* n) { (void)n; return 0; }
+__declspec(dllexport) int CopyFileW(const wchar16* a, const wchar16* b, int fail) { (void)a;(void)b;(void)fail; return 0; }
+__declspec(dllexport) unsigned GetFileAttributesW(const wchar16* n) { (void)n; return K32_INVALID_FILE_ATTR; }
+__declspec(dllexport) int GetFileAttributesExW(const wchar16* n, int lvl, void* info) { (void)n;(void)lvl;(void)info; return 0; }
+__declspec(dllexport) int GetFileInformationByHandleEx(void* h, int cls, void* buf, unsigned len) { (void)h;(void)cls;(void)buf;(void)len; return 0; }
+__declspec(dllexport) void* FindFirstFileW(const wchar16* n, void* data) { (void)n;(void)data; return INVALID_HANDLE_VALUE; }
+__declspec(dllexport) int FindNextFileW(void* h, void* data) { (void)h;(void)data; return 0; }
+__declspec(dllexport) int FindClose(void* h) { (void)h; return 1; }
+__declspec(dllexport) unsigned SearchPathW(const wchar16* path, const wchar16* file, const wchar16* ext, unsigned len, wchar16* buf, wchar16** part) { (void)path;(void)file;(void)ext;(void)len;(void)buf;(void)part; return 0; }
+__declspec(dllexport) unsigned GetTempPathW(unsigned len, wchar16* buf) { k32_asctow(buf, "C:\\Windows\\Temp\\", (int)len); return k32_wlen(buf); }
+__declspec(dllexport) unsigned GetCurrentDirectoryW(unsigned len, wchar16* buf) { k32_asctow(buf, "C:\\Windows", (int)len); return k32_wlen(buf); }
+__declspec(dllexport) unsigned GetSystemDirectoryW(wchar16* buf, unsigned len) { k32_asctow(buf, "C:\\Windows\\System32", (int)len); return k32_wlen(buf); }
+__declspec(dllexport) unsigned GetWindowsDirectoryW(wchar16* buf, unsigned len) { k32_asctow(buf, "C:\\Windows", (int)len); return k32_wlen(buf); }
+__declspec(dllexport) unsigned GetLongPathNameW(const wchar16* s, wchar16* buf, unsigned len) { unsigned i=0; if(buf&&s) for(; s[i] && i<len-1; i++) buf[i]=s[i]; if(buf&&len) buf[i]=0; return i; }
+
+// ---- NLS/locale: defaults en-US; CompareStringW real ----
+__declspec(dllexport) int CompareStringW(unsigned loc, unsigned flags, const wchar16* a, int la, const wchar16* b, int lb) {
+    (void)loc;(void)flags; int ia=0, ib=0;
+    for (;;) { if ((la>=0 && ia>=la) || !a[ia]) break; if ((lb>=0 && ib>=lb) || !b[ib]) break;
+        wchar16 ca=a[ia], cb=b[ib]; if (ca>='a'&&ca<='z') ca-=32; if (cb>='a'&&cb<='z') cb-=32;
+        if (ca!=cb) return ca<cb ? 1 : 3; ia++; ib++; }
+    int ra = (la>=0 && ia>=la) || !a[ia], rb = (lb>=0 && ib>=lb) || !b[ib];
+    if (ra && rb) return 2; return ra ? 1 : 3;   // CSTR_LESS/EQUAL/GREATER = 1/2/3
+}
+__declspec(dllexport) int GetLocaleInfoW(unsigned loc, unsigned lctype, wchar16* buf, int len) { (void)loc;(void)lctype; if (buf&&len>0){ buf[0]='0'; if(len>1) buf[1]=0; } return 2; }
+__declspec(dllexport) int GetLocaleInfoEx(const wchar16* loc, unsigned lctype, wchar16* buf, int len) { (void)loc;(void)lctype; if (buf&&len>0){ buf[0]='0'; if(len>1) buf[1]=0; } return 2; }
+__declspec(dllexport) unsigned short GetUserDefaultLangID(void) { return 0x0409; }
+__declspec(dllexport) unsigned short GetUserDefaultUILanguage(void) { return 0x0409; }
+__declspec(dllexport) int GetUserDefaultLocaleName(wchar16* buf, int len) { k32_asctow(buf, "en-US", len); return (int)k32_wlen(buf)+1; }
+__declspec(dllexport) int GetUserDefaultGeoName(wchar16* buf, int len) { k32_asctow(buf, "US", len); return (int)k32_wlen(buf)+1; }
+__declspec(dllexport) int GetDateFormatW(unsigned loc, unsigned flags, const void* st, const wchar16* fmt, wchar16* buf, int len) { (void)loc;(void)flags;(void)st;(void)fmt; k32_asctow(buf, "07/07/2026", len); return (int)k32_wlen(buf)+1; }
+__declspec(dllexport) int GetDateFormatEx(const wchar16* loc, unsigned flags, const void* st, const wchar16* fmt, wchar16* buf, int len, const wchar16* cal) { (void)loc;(void)flags;(void)st;(void)fmt;(void)cal; k32_asctow(buf, "07/07/2026", len); return (int)k32_wlen(buf)+1; }
+__declspec(dllexport) int GetTimeFormatEx(const wchar16* loc, unsigned flags, const void* st, const wchar16* fmt, wchar16* buf, int len) { (void)loc;(void)flags;(void)st;(void)fmt; k32_asctow(buf, "12:00:00", len); return (int)k32_wlen(buf)+1; }
+__declspec(dllexport) int GetCalendarInfoW(unsigned loc, unsigned cal, unsigned type, wchar16* buf, int len, unsigned* val) { (void)loc;(void)cal;(void)type;(void)buf;(void)len; if (val)*val=0; return 0; }
+__declspec(dllexport) unsigned GetTimeZoneInformation(void* tz) { (void)tz; return 0; }   // TIME_ZONE_ID_UNKNOWN
+__declspec(dllexport) unsigned GetDynamicTimeZoneInformation(void* tz) { (void)tz; return 0; }
+__declspec(dllexport) int FindStringOrdinal(unsigned flags, const wchar16* src, int sl, const wchar16* val, int vl, int ci) { (void)flags;(void)src;(void)sl;(void)val;(void)vl;(void)ci; return -1; }
+
+// ---- path (shlwapi/pathcch via core-shlwapi/core-path redirect): string ops reais ----
+__declspec(dllexport) int PathFileExistsW(const wchar16* p) { (void)p; return 0; }
+__declspec(dllexport) int PathIsURLW(const wchar16* p) { (void)p; return 0; }
+__declspec(dllexport) int PathIsFileSpecW(const wchar16* p) { if(!p) return 1; for(; *p; p++) if(*p=='\\'||*p==':') return 0; return 1; }
+__declspec(dllexport) int PathGetDriveNumberW(const wchar16* p) { if (p && p[0] && p[1]==':'){ wchar16 c=p[0]; if(c>='a'&&c<='z') c-=32; if(c>='A'&&c<='Z') return c-'A'; } return -1; }
+__declspec(dllexport) wchar16* PathRemoveFileSpecW(wchar16* p) { if(!p) return p; wchar16* last=0; for(wchar16* q=p; *q; q++) if(*q=='\\') last=q; if(last) *last=0; else p[0]=0; return p; }
+__declspec(dllexport) void PathRemoveBlanksW(wchar16* p) { if(!p) return; wchar16* s=p; while(*s==' ') s++; wchar16* d=p; while(*s) *d++=*s++; while(d>p && d[-1]==' ') d--; *d=0; }
+__declspec(dllexport) int PathQuoteSpacesW(wchar16* p) { (void)p; return 0; }
+__declspec(dllexport) wchar16* PathGetArgsW(const wchar16* p) { if(!p) return 0; int q=0; for(; *p; p++){ if(*p=='"') q=!q; else if(*p==' '&&!q) return (wchar16*)(p+1); } return (wchar16*)p; }
+__declspec(dllexport) wchar16* PathCombineW(wchar16* dst, const wchar16* dir, const wchar16* file) {
+    if(!dst) return 0; int i=0; if(dir){ while(dir[i]){ dst[i]=dir[i]; i++; } if(i && dst[i-1]!='\\'){ dst[i++]='\\'; } }
+    if(file){ int j=0; if(file[0]=='\\') j=1; while(file[j]){ dst[i++]=file[j++]; } } dst[i]=0; return dst;
+}
+__declspec(dllexport) wchar16* PathCommonPrefixW(const wchar16* a, const wchar16* b, wchar16* out) { (void)a;(void)b; if(out) out[0]=0; return 0; }
+__declspec(dllexport) int PathParseIconLocationW(wchar16* p) { (void)p; return 0; }
+__declspec(dllexport) long PathAllocCombine(const wchar16* a, const wchar16* b, unsigned flags, wchar16** out) { (void)a;(void)b;(void)flags; if(out)*out=0; return (long)0x80070057; }   // E_INVALIDARG
+__declspec(dllexport) long PathCchCombine(wchar16* dst, unsigned long long cch, const wchar16* dir, const wchar16* file) { (void)cch; return PathCombineW(dst, dir, file) ? 0 : (long)0x80070057; }
+__declspec(dllexport) long PathCchAppend(wchar16* p, unsigned long long cch, const wchar16* more) { (void)cch; if(!p) return (long)0x80070057; unsigned n=k32_wlen(p); if(n && p[n-1]!='\\') p[n++]='\\'; int j=0; if(more){ if(more[0]=='\\') j=1; while(more[j]) p[n++]=more[j++]; } p[n]=0; return 0; }
+__declspec(dllexport) long PathCchAddExtension(wchar16* p, unsigned long long cch, const wchar16* ext) { (void)cch; if(!p||!ext) return (long)0x80070057; unsigned n=k32_wlen(p); int j=0; while(ext[j]) p[n++]=ext[j++]; p[n]=0; return 0; }
+__declspec(dllexport) long PathCchRemoveFileSpec(wchar16* p, unsigned long long cch) { (void)cch; PathRemoveFileSpecW(p); return 0; }
+__declspec(dllexport) int StrCmpICA(const char* a, const char* b) { for(;*a&&*b;a++,b++){ char x=*a,y=*b; if(x>='A'&&x<='Z')x+=32; if(y>='A'&&y<='Z')y+=32; if(x!=y) return (unsigned char)x-(unsigned char)y; } return (unsigned char)*a-(unsigned char)*b; }
+__declspec(dllexport) int StrCmpICW(const wchar16* a, const wchar16* b) { for(;*a&&*b;a++,b++){ wchar16 x=*a,y=*b; if(x>='A'&&x<='Z')x+=32; if(y>='A'&&y<='Z')y+=32; if(x!=y) return (int)x-(int)y; } return (int)*a-(int)*b; }
+__declspec(dllexport) int StrCmpNICW(const wchar16* a, const wchar16* b, int n) { for(int i=0;i<n&&(*a||*b);i++,a++,b++){ wchar16 x=*a,y=*b; if(x>='A'&&x<='Z')x+=32; if(y>='A'&&y<='Z')y+=32; if(x!=y) return (int)x-(int)y; } return 0; }
+__declspec(dllexport) int UrlUnescapeW(wchar16* url, wchar16* out, unsigned* len, unsigned flags) { (void)out;(void)len;(void)flags;(void)url; return 0; }   // S_OK (no-op)
+__declspec(dllexport) long SHLoadIndirectString(const wchar16* src, wchar16* out, unsigned outlen, void* r) { (void)r; if(out&&outlen){ int i=0; if(src) for(; src[i] && (unsigned)i<outlen-1; i++) out[i]=src[i]; out[i]=0; } return 0; }
+__declspec(dllexport) unsigned SHExpandEnvironmentStringsW(const wchar16* src, wchar16* out, unsigned outlen) { unsigned i=0; if(out&&src) for(; src[i] && i<outlen-1; i++) out[i]=src[i]; if(out&&outlen) out[i]=0; return i+1; }
+__declspec(dllexport) unsigned ExpandEnvironmentStringsW(const wchar16* src, wchar16* out, unsigned outlen) { return SHExpandEnvironmentStringsW(src, out, outlen); }
+__declspec(dllexport) long QISearch(void* that, const void* map, const void* iid, void** ppv) { (void)that;(void)map;(void)iid; if(ppv)*ppv=0; return (long)0x80004002; }   // E_NOINTERFACE
+__declspec(dllexport) long HashData(const void* data, unsigned len, unsigned char* out, unsigned outlen) { (void)data; for(unsigned i=0;i<outlen;i++) out[i]=0; (void)len; return 0; }
+
+// ---- recurso: sem tabela de recursos carregada -> "nao encontrado" ----
+__declspec(dllexport) void* FindResourceW(void* mod, const wchar16* name, const wchar16* type) { (void)mod;(void)name;(void)type; return 0; }
+__declspec(dllexport) void* FindResourceExW(void* mod, const wchar16* type, const wchar16* name, unsigned short lang) { (void)mod;(void)type;(void)name;(void)lang; return 0; }
+__declspec(dllexport) void* LoadResource(void* mod, void* res) { (void)mod;(void)res; return 0; }
+__declspec(dllexport) void* LockResource(void* res) { (void)res; return 0; }
+__declspec(dllexport) unsigned SizeofResource(void* mod, void* res) { (void)mod;(void)res; return 0; }
+__declspec(dllexport) int LoadStringW(void* mod, unsigned id, wchar16* buf, int len) { (void)mod;(void)id; if (buf&&len>0) buf[0]=0; return 0; }
+
+// ---- mapeamento de arquivo: anonimo -> RAM zerada (NtVirtualAlloc) ----
+__declspec(dllexport) void* CreateFileMappingW(void* file, void* sec, unsigned prot, unsigned hi, unsigned lo, const wchar16* name) { (void)file;(void)sec;(void)prot;(void)hi;(void)name; return k32_mapnew(lo); }
+__declspec(dllexport) void* OpenFileMappingW(unsigned acc, int inh, const wchar16* name) { (void)acc;(void)inh;(void)name; return 0; }
+__declspec(dllexport) void* MapViewOfFile(void* mapping, unsigned acc, unsigned hi, unsigned lo, unsigned long long bytes) { (void)acc;(void)hi;(void)lo; k32_map_t* m=(k32_map_t*)mapping; unsigned long long n = bytes ? bytes : (m?m->size:0x1000); if(!n) n=0x1000; return NtVirtualAlloc(n); }
+__declspec(dllexport) int UnmapViewOfFile(const void* addr) { (void)addr; return 1; }
+
+// ---- global/local heap: real, sobre o HeapAlloc do kernel32 ----
+__declspec(dllexport) void* GlobalAlloc(unsigned flags, unsigned long long size) { void* p=HeapAlloc(0, (flags&0x40)?0x8:0, size?size:1); return p; }   // GMEM_ZEROINIT=0x40
+__declspec(dllexport) void* GlobalFree(void* p) { (void)p; return 0; }
+__declspec(dllexport) void* GlobalLock(void* p) { return p; }
+__declspec(dllexport) int GlobalUnlock(void* p) { (void)p; return 1; }
+__declspec(dllexport) unsigned GlobalGetAtomNameW(unsigned short atom, wchar16* buf, int len) { (void)atom; if(buf&&len>0) buf[0]=0; return 0; }
+__declspec(dllexport) void* LocalAlloc(unsigned flags, unsigned long long size) { return HeapAlloc(0, (flags&0x40)?0x8:0, size?size:1); }   // LMEM_ZEROINIT=0x40
+__declspec(dllexport) void* LocalFree(void* p) { (void)p; return 0; }
+__declspec(dllexport) void* LocalReAlloc(void* p, unsigned long long size, unsigned flags) { return HeapReAlloc(0, (flags&0x40)?0x8:0, p, size); }
+
+// ---- job objects / snapshot / actctx / power / misc: stubs especificos ----
+__declspec(dllexport) void* CreateJobObjectW(void* sec, const wchar16* name) { (void)sec;(void)name; return k32_fake_handle(); }
+__declspec(dllexport) int AssignProcessToJobObject(void* job, void* proc) { (void)job;(void)proc; return 1; }
+__declspec(dllexport) int SetInformationJobObject(void* job, int cls, void* info, unsigned len) { (void)job;(void)cls;(void)info;(void)len; return 1; }
+__declspec(dllexport) int QueryInformationJobObject(void* job, int cls, void* info, unsigned len, unsigned* ret) { (void)job;(void)cls;(void)info;(void)len; if(ret)*ret=0; return 0; }
+__declspec(dllexport) void* CreateToolhelp32Snapshot(unsigned flags, unsigned pid) { (void)flags;(void)pid; return INVALID_HANDLE_VALUE; }
+__declspec(dllexport) int Process32FirstW(void* snap, void* entry) { (void)snap;(void)entry; return 0; }
+__declspec(dllexport) int Process32NextW(void* snap, void* entry) { (void)snap;(void)entry; return 0; }
+__declspec(dllexport) void* CreateActCtxW(void* actctx) { (void)actctx; return INVALID_HANDLE_VALUE; }
+__declspec(dllexport) int ActivateActCtx(void* actctx, unsigned long long* cookie) { (void)actctx; if(cookie)*cookie=0; return 1; }
+__declspec(dllexport) int DeactivateActCtx(unsigned flags, unsigned long long cookie) { (void)flags;(void)cookie; return 1; }
+__declspec(dllexport) void ReleaseActCtx(void* actctx) { (void)actctx; }
+__declspec(dllexport) void* PowerCreateRequest(void* ctx) { (void)ctx; return k32_fake_handle(); }
+__declspec(dllexport) int PowerSetRequest(void* req, int type) { (void)req;(void)type; return 1; }
+__declspec(dllexport) int GetSystemPowerStatus(void* st) { if(st){ unsigned char* b=(unsigned char*)st; for(int i=0;i<12;i++) b[i]=0; b[0]=1; b[1]=255; } return 1; }   // AC online
+__declspec(dllexport) int DuplicateHandle(void* sp, void* sh, void* tp, void** th, unsigned acc, int inh, unsigned opt) { (void)sp;(void)tp;(void)acc;(void)inh;(void)opt; if(th)*th=sh; return 1; }
+__declspec(dllexport) void* CreateIoCompletionPort(void* file, void* existing, unsigned long long key, unsigned threads) { (void)file;(void)existing;(void)key;(void)threads; return k32_fake_handle(); }
+__declspec(dllexport) int GetQueuedCompletionStatus(void* port, unsigned* bytes, unsigned long long* key, void** ov, unsigned ms) { (void)port;(void)key;(void)ms; if(bytes)*bytes=0; if(ov)*ov=0; return 0; }
+__declspec(dllexport) int OpenProcessToken(void* proc, unsigned acc, void** tok) { (void)proc;(void)acc; if(tok)*tok=k32_fake_handle(); return 1; }
+__declspec(dllexport) int OpenThreadToken(void* thr, unsigned acc, int self, void** tok) { (void)thr;(void)acc;(void)self; if(tok)*tok=0; return 0; }
+__declspec(dllexport) unsigned FormatMessageW(unsigned flags, const void* src, unsigned msgid, unsigned lang, wchar16* buf, unsigned size, void* args) { (void)src;(void)msgid;(void)lang;(void)args;(void)flags; if(buf&&size>0) buf[0]=0; return 0; }
+__declspec(dllexport) int GetComputerNameW(wchar16* buf, unsigned* size) { const char* n="MEUOS"; if(buf&&size){ k32_asctow(buf, n, (int)*size); *size=k32_wlen(buf); } return 1; }
+__declspec(dllexport) int GetProductInfo(unsigned a, unsigned b, unsigned c, unsigned d, unsigned* type) { (void)a;(void)b;(void)c;(void)d; if(type)*type=0x30; return 1; }   // PRODUCT_PROFESSIONAL
+__declspec(dllexport) int GetLogicalProcessorInformation(void* buf, unsigned* len) { (void)buf; if(len)*len=0; return 0; }
+__declspec(dllexport) int GetPhysicallyInstalledSystemMemory(unsigned long long* kb) { if(kb)*kb=256*1024; return 1; }   // 256 MiB
+__declspec(dllexport) int GetOsSafeBootMode(unsigned* mode) { if(mode)*mode=0; return 1; }
+__declspec(dllexport) long CheckElevation(const wchar16* path, unsigned* flags, void* a, void* b, void* c) { (void)path;(void)a;(void)b;(void)c; if(flags)*flags=0; return 0; }
+__declspec(dllexport) long CheckElevationEnabled(int* enabled) { if(enabled)*enabled=0; return 0; }
+__declspec(dllexport) int ApiSetQueryApiSetPresence(const void* ns, unsigned char* present) { (void)ns; if(present)*present=0; return 1; }
+__declspec(dllexport) int VerifyVersionInfoW(void* vi, unsigned type, unsigned long long cond) { (void)vi;(void)type;(void)cond; return 1; }
+__declspec(dllexport) long RegisterApplicationRestart(const wchar16* cmd, unsigned flags) { (void)cmd;(void)flags; return 0; }
+__declspec(dllexport) int SetProcessShutdownParameters(unsigned level, unsigned flags) { (void)level;(void)flags; return 1; }
+__declspec(dllexport) int SetTermsrvAppInstallMode(int enable) { (void)enable; return 0; }
+__declspec(dllexport) int IsBadWritePtr(void* p, unsigned long long len) { (void)p;(void)len; return 0; }   // assume gravavel
+// BiPt* (background intelligent-transfer broker): genuinamente no-op aqui
+__declspec(dllexport) long BiPtAssociateApplicationEntryPoint(void* a, void* b, void* c) { (void)a;(void)b;(void)c; return 0; }
+__declspec(dllexport) long BiPtEnumerateWorkItemsForPackageName(void* a, void* b, void* c, void* d) { (void)a;(void)b;(void)c;(void)d; return 0; }
+__declspec(dllexport) long BiPtQueryWorkItem(void* a, void* b, void* c, void* d, void* e) { (void)a;(void)b;(void)c;(void)d;(void)e; return 0; }
+__declspec(dllexport) void BiPtFreeMemory(void* p) { (void)p; }
+
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }

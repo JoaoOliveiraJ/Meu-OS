@@ -15,8 +15,20 @@ commitando sozinho. **NUNCA um stub genérico catch-all** — só stubs ESPECÍF
 **Prefira IMPLEMENTAR a só diagnosticar** — o diagnóstico é meio, não fim; cada sessão deve
 DERRUBAR muro(s) de verdade e commitar. Rode `pintok` a cada mudança de kernel.
 
-Disciplina: **build → rodar o explorer → diagnosticar → implementar REAL → build → pintok
-(SE mexeu no kernel `src/ntos/...`) → commit + push**. Builds/QEMU em background (~1 min).
+**COMENTÁRIOS: escreva comentários GRANDES e MUITO EXPLICATIVOS** no código (em PT-BR), como já
+é o estilo do projeto — explique O QUE a função faz, POR QUE (a mecânica do NT/Windows por trás),
+e o CONTEXTO do explorer real (qual RVA/função do explorer exercita aquilo). Cada stub/ordinal/
+função nova leva um bloco de comentário dizendo de onde o explorer chama e por que o retorno é
+aquele. Nada de comentário de 1 linha seco — o próximo eu (e o usuário) precisam entender tudo
+sem reabrir o diagnóstico. Vale para .c do kernel E das DLLs.
+
+**pintok: DESTRAVADO pelo usuário nesta sessão** — não deixe o pintok te BLOQUEAR. Pode mexer no
+kernel (threads/scheduler) à vontade; se precisar mexer no intercept de CPUID/RDTSC, deixe
+comentado e reative quando for testar o pintok. Ainda assim, rode o pintok de vez em quando p/
+saber onde está (`.\run.ps1 -Scenario pintok -Headless -TimeoutSec 40`), mas NÃO pare por ele.
+
+Disciplina: **build → rodar o explorer → diagnosticar → implementar REAL (com comentário GRANDE)
+→ build → commit + push**. Builds/QEMU em background (~1 min).
 Zig: `tools\zig-windows-x86_64-0.13.0\zig.exe`. **PowerShell**: aspas nos args `-Wl,...`
 (a vírgula vira operador de array): `& $zig cc ... "-Wl,--image-base=0x5900000" ...`.
 Rebuild rápido de UMA dll (ex.: user32, que importa do ntdll — **inclui o .def dos ordinais!**):
@@ -34,6 +46,11 @@ Detalhes: `RECON-EXPLORER.md` + memória `run-real-explorer-mission`. Modelo est
 implementar as DLLs/mecânicas do NT que o binário real precisa, uma por uma, diagnóstico-first.
 
 ## 📍 ESTADO — MARCOS DESTA SESSÃO (sessão 4)
+0. 🎉🎉 **O explorer real PERSISTE (NÃO SAI MAIS) — implementei THREADS RING-3 cooperativas
+   (commit `d591fab`).** A thread da Worker Window ENTRA EM RING 3 e roda código real; o
+   `wWinMain` fica preso no `WaitForSingleObject(worker)` do `~WorkerWindow` → NÃO chega ao
+   `DestroyWindow`/`ExitProcess`. Serial: `[thread] worker ring-3: start=... teb=...`, SEM
+   `DestroyWindow #1`, SEM `processo encerrou`. → ver "PRÓXIMA FRONTEIRA" (muro dentro da threadproc).
 1. 🎉 **O explorer CRIA sua Worker Window (HWND #1).** Serial:
    `[win32k] RegisterClass 'Worker Window'` → `[win32k] CreateWindowEx -> HWND #1 classe='Worker Window'`.
 2. 🎉 **A Worker Window associa seu objeto C++ (GWLP_USERDATA) e roda o handler real** de
@@ -58,11 +75,45 @@ seu objeto (cai em DefWindowProc). Fix (user32): armazenamento REAL de Window Lo
 wndproc lê `lpCreateParams` no offset 0 e faz `SetWindowLongPtrW(hwnd,-21,obj)`). DefWindowProc*
 agora devolve TRUE p/ WM_NCCREATE. Threei o `lpParam` por todos os `CreateWindow*`.
 
-## ⇒ A PRÓXIMA FRONTEIRA = THREADS RING-3 PREEMPTIVAS (feature grande de kernel)
-Depois de criar a Worker Window, o explorer **destrói a janela e sai limpo (status 0, SEM crash)**:
-`CreateWindowEx -> HWND #1` → `[win32k] DestroyWindow #1` → `processo pid=1 encerrou (status=0x0)`.
+## ⇒ A PRÓXIMA FRONTEIRA = import NÃO resolvido DENTRO da threadproc da Worker Window
+As threads ring-3 JÁ FUNCIONAM (commit `d591fab`, cooperativas — ver "COMO AS THREADS FUNCIONAM"
+abaixo). Agora a threadproc da Worker Window (**RVA 0x72270**, runtime 0x0438B270) roda: faz o
+prólogo + stack-cookie, `GetProcessHeap`+`HeapAlloc` (resolvem), e então **chama um import NÃO
+RESOLVIDO (IAT=0 → `call [0]` → rip=0 → Page Fault)**. Serial:
+`[EXCECAO] ... rip=0x0 ...` + `[bringup] ring-3 chamou import NAO resolvido (IAT=0)`.
 
-### Diagnóstico (GROUND TRUTH — RVAs p/ `disrange.py`/`callers.py`; base 0x04319000)
+**Como atacar:** `python disrange.py 0x72270 200` e ache o 1º `call [rip+...]` cujo alvo é um
+import de DLL que NÃO temos (SHLWAPI/OLEAUT32/PROPSYS/RPCRT4/ole32/CoreMessaging/etc.) OU um
+apiset que não redireciona. Implemente essa função (na DLL certa, com comentário GRANDE) ou crie
+a DLL + adicione aos `-Modules`. Provável: init de TLS/thread, ou um objeto do desktop. Ligue o
+`U32_TRACE` e/ou o `[bringup]` já dá o rip; use `whocalls.py`/`ripref.py` p/ mapear. Depois que a
+threadproc passar, o loop de mensagem da Worker Window (`sub_7e8e0`, `MsgWaitForMultipleObjectsEx`)
+deve rodar — aí falta o win32k ENTREGAR mensagens (WM_PAINT do wallpaper) p/ a Worker Window
+desenhar o desktop. (Nosso `MsgWaitForMultipleObjectsEx`→WAIT_TIMEOUT 0x102; o loop provavelmente
+faz PeekMessage — verifique o que ele chama e implemente a entrega real.)
+
+## ⚙️ COMO AS THREADS RING-3 FUNCIONAM (implementado nesta sessão — commit `d591fab`)
+Modelo COOPERATIVO que reaproveita a preempção de UMA thread ring-3 (o explorer já rodava sobre o
+contexto da idle/boot, e o timer já preemptava/retomava esse ring-3):
+- `kernel32 CreateThread(start,param)` → `NtCreateThread` (agora **4 args**, `param` em r10) →
+  `sys_createthread` (syscall.c) REGISTRA o worker pendente em `g_ring3_threads[]` e devolve o
+  handle (não roda ainda).
+- `sys_waitforsingleobject(handle)`: se `handle` é de um worker pendente, chama
+  `usermode_run_worker(start,param)` (usermode.c) → aloca **pilha 256 KiB (pmm_alloc_contiguous +
+  mm_map_user) + TEB próprio** (PEB compartilhado) e **IRETQ p/ a threadproc(param)** (rcx=param,
+  gs.base=TEB). A thread principal que chamou (o `WaitForSingleObject(worker)` do `~WorkerWindow`)
+  é ABANDONADA aqui → a threadproc VIRA a thread ring-3 corrente. O processo PERSISTE.
+- Limitações conhecidas (p/ evoluir): (a) é 1 worker por vez de fato ativo (o main fica parado);
+  se o explorer criar N threads e esperar TODAS, só a 1ª roda — evoluir p/ threads ring-3
+  PREEMPTIVAS de verdade (TSS rsp0 + gs.base por thread no `ki_quantum_end`; ver notas abaixo).
+  (b) se a threadproc RETORNA (não deveria — é loop), cai em rip=[stack] indefinido.
+- **Evolução p/ preemptivas** (quando precisar de várias threads simultâneas): dar a cada thread
+  ring-3 um KTHREAD (`ki_create_thread`) cujo entry (ring0) faz `enter_ring3_arg`; no
+  `ki_quantum_end` (sched.c) setar `tss_set_rsp0(next->kstack_top)` + `HalWriteMsr(GS_BASE,
+  next->user_teb)` a cada troca (guardar `kstack_top`/`user_teb`/`is_ring3` no `ki_thread_t`).
+  TSS é único (só CPU0 roda ring-3). Sem swapgs no kernel (gs.base tolerado em qualquer valor).
+
+### Diagnóstico HISTÓRICO (por que saía antes — RVAs p/ `disrange.py`; base 0x04319000)
 - **`wWinMain` (RVA 0x23350)** faz TODO o setup do shell e **RETORNA** — **NÃO há loop de mensagem
   no corpo do wWinMain**. O main NÃO importa GetMessage/PeekMessage/DispatchMessage. Usa
   `MsgWaitForMultipleObjectsEx`, mas isso está em `sub_7e8e0` (RVA 0x7e8e0), na THREAD da janela.
@@ -191,8 +242,9 @@ rode o pintok a CADA passo e reverta na hora se `ANTIVM`/`C0000365` mudar.
   0xC000+slot + 6 ordinais privados (.def) + build.ps1 passa o .def.
 - `f09b51e` feat(user32): GWLP_USERDATA real + WM_NCCREATE inline → a Worker Window associa
   seu objeto e roda o handler real de WM_USER+7 (sem crash) + gate `U32_TRACE` (diagnóstico, off).
-- (lote seguinte) feat(dwmapi): dwmapi.dll nova (16 imports resolvidos; composição OFF) + build.ps1
-  + 16º módulo no run. Removeu 16 slot=0 latentes p/ o caminho pós-threads.
+- `0259593` feat(dwmapi): dwmapi.dll nova (16 imports resolvidos; composição OFF) + build.ps1 + 16º módulo.
+- `d591fab` feat(kernel): **THREADS RING-3 cooperativas** (usermode.c/h + syscall.c + ntdll + kernel32)
+  → o explorer PERSISTE (não sai mais); a threadproc entra em ring-3 e roda até um import não resolvido.
 Mensagens terminam com `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 
 ## 📌 NOTAS / GOTCHAS

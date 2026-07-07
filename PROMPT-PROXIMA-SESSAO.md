@@ -35,15 +35,19 @@ Ele registra a classe e **SAI limpo (status=0x0) SEM chamar `CreateWindowExW`** 
 `[win32k] CreateWindowEx -> HWND`). O `wWinMain` **RETORNA 0** (→ CRT → `ExitProcess(0)`),
 SEM criar janela nem thread. O bail está **ENTRE** o register e o create. NÃO é função
 faltando (não há `[gpa] MISS` depois do RegisterClass): é uma **decisão interna** do wWinMain.
+**CONFIRMADO: NÃO há crash** — o `isr.c` logaria `[bringup] excecao em RING-3` + `Sistema
+parado` numa falha; não aparece. Logo o explorer NÃO está chamando CreateWindowExW e derefando
+lixo — ele decide retornar 0 de propósito. (Descarta a hipótese do ATOM-crash; ver suspeito a.)
 
 ### Como atacar (o que investigar primeiro)
 1. **RE do bail pós-RegisterClass("Worker Window").** "Worker Window" = a WorkerW do DESKTOP
    (papel de parede), não a taskbar. O explorer registra a classe do desktop e desiste antes
    de criar. Descubra o que ele checa logo após: prováveis suspeitos —
-   - **`CreateWindowExW` chamado com o ATOM** devolvido por `RegisterClassW` (hoje devolvo
-     ATOM=1 fixo; `u32_wpool` trata className<0x10000 como ATOM e passa cru → `find_wndproc`
-     derefaria endereço pequeno). Torne o ATOM único (0xC000+slot) e resolva ATOM→nome no
-     CreateWindowExW (user32.c). PODE ser o muro (se o explorer usa o atom p/ criar).
+   - **ATOM (bug latente, NÃO o muro confirmado):** `RegisterClassW` devolve ATOM=1 fixo;
+     `u32_wpool` trata className<0x10000 como ATOM cru → `find_wndproc` derefaria endereço
+     pequeno. Como NÃO há crash, o explorer NÃO chega a CreateWindowExW — então isto é bug
+     latente, corrija (ATOM único 0xC000+slot + resolva ATOM→nome), mas NÃO espere que mova
+     o muro. O muro é ANTES: a decisão do wWinMain de não criar a janela.
    - Um objeto COM/serviço do desktop (ex.: `IShellDesktopTray`, `SHDesktopMessageLoop`) que
      falha e faz o wWinMain retornar 0.
    - **DWM/composição** (`dwmapi` tem 16 imports NÃO resolvidos — ver abaixo).

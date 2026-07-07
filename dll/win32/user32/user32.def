@@ -1,26 +1,13 @@
-; user32.def — exports informativos da user32.dll do MeuOS.
+; user32.def — SO os ordinais PRIVADOS/noname que o explorer real importa por ORDINAL.
+; Os exports NOMEADOS vem de __declspec(dllexport) no user32.c (aditivo a este .def, igual
+; ao uxtheme.def). Estes noname sao funcoes privadas do user32 da MS; retornos escolhidos
+; para nao provocar bail (ver comentarios no user32.c). #2522 e' o chamado logo apos criar
+; a "Worker Window" (retorno ignorado pelo explorer).
 LIBRARY user32.dll
 EXPORTS
-MessageBoxA
-RegisterClassA
-CreateWindowExA
-ShowWindow
-DestroyWindow
-GetMessageA
-TranslateMessage
-DispatchMessageA
-DefWindowProcA
-PostQuitMessage
-PostMessageA
-InvalidateRect
-GetDC
-ReleaseDC
-BeginPaint
-EndPaint
-FillRect
-SetFocus
-PostKeyToWindow
-CreateDesktopWindowA
-CreateConsoleWindowA
-GetCursorPos
-SetCursorPos
+    User32_ord2005 @2005 NONAME
+    User32_ord2521_GetProcessUIContextInformation @2521 NONAME
+    User32_ord2522 @2522 NONAME
+    User32_ord2573 @2573 NONAME
+    User32_ord2574 @2574 NONAME
+    User32_ord2611 @2611 NONAME

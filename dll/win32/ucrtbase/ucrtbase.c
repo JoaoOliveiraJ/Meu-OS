@@ -685,6 +685,84 @@ __declspec(dllexport) float  _o_roundf(float x) { return roundf(x); }
 __declspec(dllexport) double _o_sqrt(double x)  { return sqrt(x); }
 __declspec(dllexport) double _o_pow(double b, double e) { return pow(b, e); }
 
+// ---------------------------------------------------------------------------
+// Frente C (explorer real): variantes de STRING do printf/scanf (formata em BUFFER,
+// nao stream) que o explorer importa via crt-private. Reusa o va_list x64 (char*,
+// 8 bytes/arg) e o mesmo motor de formatacao; versao WIDE (wchar16) abaixo.
+// ---------------------------------------------------------------------------
+static void ucrt_putuw(wchar16* out, int* pos, int cap, unsigned long long v, int base, int upper, int width, wchar16 pad) {
+    wchar16 tmp[32]; int t = 0; const char* dig = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    if (v == 0) tmp[t++] = '0';
+    while (v) { tmp[t++] = (wchar16)dig[v % base]; v /= base; }
+    while (t < width) tmp[t++] = pad;
+    while (t > 0 && *pos < cap) out[(*pos)++] = tmp[--t];
+}
+// formatador WIDE -> buffer wide. %s/%ls = wide; %hs = narrow; numericos como o narrow.
+static int ucrt_vfmtw(wchar16* out, int cap, const wchar16* fmt, char* ap) {
+    int pos = 0;
+    for (const wchar16* p = fmt; *p && pos < cap; p++) {
+        if (*p != '%') { out[pos++] = *p; continue; }
+        p++; wchar16 pad = ' '; int width = 0, lng = 0, sht = 0;
+        if (*p == '0') { pad = '0'; p++; }
+        while (*p >= '0' && *p <= '9') { width = width*10 + (*p - '0'); p++; }
+        while (*p == 'l') { lng++; p++; }
+        while (*p == 'h') { sht++; p++; }
+        wchar16 c = *p;
+        if (c == 's') {
+            if (sht) { const char* s = *(char**)ap; ap += 8; if (!s) s = ""; while (*s && pos<cap) out[pos++]=(wchar16)(unsigned char)*s++; }
+            else { const wchar16* s = *(wchar16**)ap; ap += 8; while (s && *s && pos<cap) out[pos++]=*s++; }
+        } else if (c == 'c') { int ch = (int)*(long long*)ap; ap += 8; if (pos<cap) out[pos++]=(wchar16)ch; }
+        else if (c == 'd' || c == 'i') { long long v = *(long long*)ap; ap += 8; if (!lng) v=(int)v;
+            if (v<0) { if (pos<cap) out[pos++]='-'; ucrt_putuw(out,&pos,cap,(unsigned long long)(-v),10,0,width,pad); }
+            else ucrt_putuw(out,&pos,cap,(unsigned long long)v,10,0,width,pad); }
+        else if (c == 'u') { unsigned long long v=*(unsigned long long*)ap; ap+=8; if (!lng) v=(unsigned)v; ucrt_putuw(out,&pos,cap,v,10,0,width,pad); }
+        else if (c == 'x' || c == 'X') { unsigned long long v=*(unsigned long long*)ap; ap+=8; if (!lng) v=(unsigned)v; ucrt_putuw(out,&pos,cap,v,16,c=='X',width,pad); }
+        else if (c == 'p') { unsigned long long v=*(unsigned long long*)ap; ap+=8; if (pos<cap) out[pos++]='0'; if (pos<cap) out[pos++]='x'; ucrt_putuw(out,&pos,cap,v,16,0,16,'0'); }
+        else if (c == '%') { if (pos<cap) out[pos++]='%'; }
+        else { if (pos<cap) out[pos++]='%'; if (pos<cap) out[pos++]=c; }
+    }
+    return pos;
+}
+__declspec(dllexport) int __stdio_common_vswprintf(unsigned long long opt, wchar16* buf, size_t_ count, const wchar16* fmt, void* loc, void* valist) {
+    (void)opt;(void)loc; if (!buf || !count) return -1;
+    int cap = (int)(count > 0x7fffffff ? 0x7fffffff : count);
+    int n = ucrt_vfmtw(buf, cap-1, fmt, (char*)valist); buf[n]=0; return n;
+}
+__declspec(dllexport) int __stdio_common_vswprintf_s(unsigned long long opt, wchar16* buf, size_t_ count, const wchar16* fmt, void* loc, void* valist) {
+    return __stdio_common_vswprintf(opt, buf, count, fmt, loc, valist);
+}
+__declspec(dllexport) int __stdio_common_vsnwprintf_s(unsigned long long opt, wchar16* buf, size_t_ count, size_t_ maxcount, const wchar16* fmt, void* loc, void* valist) {
+    (void)maxcount; return __stdio_common_vswprintf(opt, buf, count, fmt, loc, valist);
+}
+__declspec(dllexport) int __stdio_common_vsnprintf_s(unsigned long long opt, char* buf, size_t_ count, size_t_ maxcount, const char* fmt, void* loc, void* valist) {
+    (void)opt;(void)loc;(void)maxcount; if (!buf || !count) return -1;
+    int cap = (int)(count > 0x7fffffff ? 0x7fffffff : count);
+    int n = ucrt_vfmt(buf, cap-1, fmt, (char*)valist); buf[n]=0; return n;
+}
+__declspec(dllexport) int __stdio_common_vswscanf(unsigned long long opt, const wchar16* buf, size_t_ count, const wchar16* fmt, void* loc, void* valist) {
+    (void)opt;(void)count;(void)loc; const wchar16* s = buf; char* ap = (char*)valist; int assigned = 0;
+    for (const wchar16* p = fmt; *p; p++) {
+        if (*p==' '||*p=='\t'||*p=='\n') { while (*s==' '||*s=='\t'||*s=='\n') s++; continue; }
+        if (*p != '%') { if (*s==*p) s++; else break; continue; }
+        p++; while (*p>='0'&&*p<='9') p++; while (*p=='l'||*p=='h') p++; wchar16 c = *p;
+        while (*s==' '||*s=='\t'||*s=='\n') s++;
+        if (c=='d'||c=='i'||c=='u') { long long v=0; int neg=0; if (*s=='-'){neg=1;s++;} if (!(*s>='0'&&*s<='9')) break; while (*s>='0'&&*s<='9'){v=v*10+(*s-'0');s++;} if (neg) v=-v; int* d=*(int**)ap; ap+=8; *d=(int)v; assigned++; }
+        else if (c=='x'||c=='X') { unsigned long long v=0; int any=0; for(;;){ wchar16 h=*s; int dv; if(h>='0'&&h<='9')dv=h-'0'; else if(h>='a'&&h<='f')dv=h-'a'+10; else if(h>='A'&&h<='F')dv=h-'A'+10; else break; v=v*16+dv; s++; any=1; } if(!any) break; unsigned* d=*(unsigned**)ap; ap+=8; *d=(unsigned)v; assigned++; }
+        else if (c=='s') { wchar16* d=*(wchar16**)ap; ap+=8; while (*s && !(*s==' '||*s=='\t'||*s=='\n')) *d++=*s++; *d=0; assigned++; }
+        else break;
+    }
+    return assigned;
+}
+// aliases _o_ (mesma impl; o explorer importa a variante _o_ via crt-private) --------
+__declspec(dllexport) int _o___stdio_common_vswprintf(unsigned long long o, wchar16* b, size_t_ c, const wchar16* f, void* l, void* v) { return __stdio_common_vswprintf(o,b,c,f,l,v); }
+__declspec(dllexport) int _o___stdio_common_vswprintf_s(unsigned long long o, wchar16* b, size_t_ c, const wchar16* f, void* l, void* v) { return __stdio_common_vswprintf_s(o,b,c,f,l,v); }
+__declspec(dllexport) int _o___stdio_common_vsnwprintf_s(unsigned long long o, wchar16* b, size_t_ c, size_t_ m, const wchar16* f, void* l, void* v) { return __stdio_common_vsnwprintf_s(o,b,c,m,f,l,v); }
+__declspec(dllexport) int _o___stdio_common_vsnprintf_s(unsigned long long o, char* b, size_t_ c, size_t_ m, const char* f, void* l, void* v) { return __stdio_common_vsnprintf_s(o,b,c,m,f,l,v); }
+__declspec(dllexport) int _o___stdio_common_vswscanf(unsigned long long o, const wchar16* b, size_t_ c, const wchar16* f, void* l, void* v) { return __stdio_common_vswscanf(o,b,c,f,l,v); }
+__declspec(dllexport) double    _o__difftime64(long long a, long long b) { return _difftime64(a,b); }
+__declspec(dllexport) void*     _o__localtime64(long long* t) { return _localtime64(t); }
+__declspec(dllexport) long long _o__mktime64(void* tm) { return _mktime64(tm); }
+
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }

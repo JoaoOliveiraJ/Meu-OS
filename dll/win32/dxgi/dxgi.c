@@ -847,6 +847,10 @@ __declspec(dllexport) void DXGISetPresentBackend(void* fn) {
     g_dxgk_present_do = (DxgkPresentDO_fn)fn;
 }
 
+// Frente C (explorer real): o explorer declara suporte a remocao de adaptador (DXGI 1.4+).
+// Sem hot-plug de GPU aqui -> aceita a declaracao (S_OK).
+__declspec(dllexport) HRESULT DXGIDeclareAdapterRemovalSupport(void) { return 0; }
+
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }

@@ -314,6 +314,10 @@ $secur32Src  = Join-Path $dll 'win32\secur32\secur32.c'
 $creduiSrc   = Join-Path $dll 'win32\credui\credui.c'
 # Frente C (explorer real) — combase.dll: COM base minimo (CoTaskMemAlloc + Co* init).
 $combaseSrc  = Join-Path $dll 'win32\combase\combase.c'
+# Frente C (explorer real) — msvcp_win.dll: STL do C++ (MSVC) minima. 97 exports com
+#   nomes MANGLED (mutex/thread/call_once/collate/iostream/locale) via msvcp_win.def.
+$msvcpwinSrc = Join-Path $dll 'win32\msvcp_win\msvcp_win.c'
+$msvcpwinDef = Join-Path $dll 'win32\msvcp_win\msvcp_win.def'
 # FASE 3f — testlib: DLL de teste carregada em RUNTIME (LoadLibrary + GetProcAddress).
 $testlibSrc  = Join-Path $dll 'win32\testlib\testlib.c'
 if (Test-Path $ntdllSrc) {
@@ -345,6 +349,14 @@ if (Test-Path $ntdllSrc) {
         & $zig cc @dc '-Wl,--image-base=0x5500000' '-Wl,--dynamicbase' `
             -o (Join-Path $out 'combase.dll') $combaseSrc
         if ($LASTEXITCODE) { throw "combase.dll falhou." }
+    }
+    # Frente C (explorer real) — msvcp_win.dll: STL do C++ (MSVC) minima. 97 exports
+    #   (mutex/thread/call_once/collate/iostream/locale) com nomes MANGLED via .def.
+    #   ImageBase 0x5600000 (livre, apos combase 0x5500000). Autocontido (sem ntdll).
+    if (Test-Path $msvcpwinSrc) {
+        & $zig cc @dc '-Wl,--image-base=0x5600000' '-Wl,--dynamicbase' `
+            -o (Join-Path $out 'msvcp_win.dll') $msvcpwinSrc $msvcpwinDef
+        if ($LASTEXITCODE) { throw "msvcp_win.dll falhou." }
     }
     # FASE 3b (Frente 3) — ucrtbase.dll: CRT minimo (startup do mingw/UCRT). O loader
     #   redireciona os apisets api-ms-win-crt-* p/ ca. Importa ExitProcess do kernel32.

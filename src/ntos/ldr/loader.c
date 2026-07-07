@@ -129,13 +129,54 @@ static void* ldr_resolve(const char* dll, const char* fn) {
     return pe_get_export(base, fn);
 }
 
+// Frente C: base >= 64 MiB cai no territorio gerenciado pelo PMM (o mesmo pool que
+// o pmm_alloc_contiguous entrega ao VirtualAlloc do explorer). Uma DLL mapeada FIXA
+// nessa faixa seria CORROMPIDA quando o heap do explorer crescesse e o PMM reentregasse
+// esses frames. Abaixo disso e' regiao de identidade fora do PMM (segura).
+#define LDR_PMM_TERRITORY 0x4000000ULL
+
+static int pe_has_relocs(const void* image);   // definido adiante
+
 void* ldr_load(const char* name) {
     int i = find_mod(name);
     if (i < 0) { kputs("[ldr] DLL nao registrada: "); kputs(name); kputc('\n'); return 0; }
     if (s_mods[i].base) return s_mods[i].base;          // ja carregada
 
     void* entry = 0;
-    void* base = pe_map(s_mods[i].bytes, &entry);
+    void* base  = 0;
+
+    // DLLs cuja base PREFERIDA cai no territorio do PMM (>= 64 MiB): nao da p/ mapear
+    // no lugar preferido (o VirtualAlloc do explorer reusaria os frames e corromperia a
+    // DLL — provado pelo #UD em msvcp_win apos o heap crescer). Alocamos frames
+    // RESERVADOS no PMM e RELOCAMOS a imagem (elas tem .reloc/--dynamicbase), igual o
+    // ldr_run faz p/ .exe de base alta. Frames do PMM ficam marcados como usados, entao
+    // o VirtualAlloc nunca os reentrega. DLLs de base baixa seguem o caminho original.
+    // Aplica a QUALQUER base preferida no territorio do PMM. Se a DLL tem .reloc,
+    // pe_relocate corrige os enderecos absolutos; se NAO tem (as nossas stubs sao
+    // position-independent — clang x64 usa RIP-relative), pe_relocate e' no-op e a
+    // imagem funciona no novo lugar mesmo assim. O ponto e' tirar a DLL da faixa que
+    // o VirtualAlloc reusaria; sem .reloc-gate porque a stub sem relocs e' justamente
+    // a que pode ser movida em seguranca.
+    pe_info_t pi;
+    if (pe_parse(s_mods[i].bytes, &pi) && pi.preferred >= LDR_PMM_TERRITORY) {
+        uint64_t pages = (pi.size_image + 0xFFFu) / 0x1000u;
+        uint64_t alt   = pmm_alloc_contiguous(pages);
+        if (!alt || alt >= 0x40000000ULL) { kputs("[ldr] sem RAM contigua p/ DLL de base alta: "); kputs(name); kputc('\n'); return 0; }
+        base = pe_map_at(s_mods[i].bytes, alt, &entry);
+        if (!base) return 0;
+        s_mods[i].base = base;                          // registra ANTES de resolver (evita loop)
+        uint64_t map_sz = (pi.size_image + 0x1FFFFFull) & ~0x1FFFFFull;
+        if (map_sz < 0x200000u) map_sz = 0x200000u;
+        mm_map_user(alt, map_sz);                       // DLL acessivel ao usuario
+        uint32_t n = pe_relocate(base, pi.preferred);
+        kputs("[ldr] carregando (PMM+reloc) "); kputs(s_mods[i].name);
+        kputs(" @ "); kput_hex(alt); kputs(" (pref "); kput_hex(pi.preferred);
+        kputs(", relocs="); kput_dec(n); kputs(")\n");
+        pe_bind_imports(base, ldr_resolve);             // resolve os imports da DLL (recursivo)
+        return base;
+    }
+
+    base = pe_map(s_mods[i].bytes, &entry);
     if (!base) return 0;
     s_mods[i].base = base;                              // registra ANTES de resolver (evita loop)
     mm_map_user((uint64_t)(uintptr_t)base, 0x200000);   // DLL acessivel ao usuario

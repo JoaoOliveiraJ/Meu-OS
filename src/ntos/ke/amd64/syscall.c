@@ -68,6 +68,8 @@ enum {
     SYS_LOADLIBRARY = 48,
     // --- Frente C (explorer real): tempo p/ o usermode (le o KUSER_SHARED_DATA). ---
     SYS_QUERYSYSTEMTIME = 49,
+    // --- Frente C (explorer real): VirtualAlloc (backing do HeapAlloc). ---
+    SYS_VIRTUALALLOC = 50,
 };
 
 // "Console device": handles padrao do Win32 (GetStdHandle). Sao pseudo-handles
@@ -1075,6 +1077,21 @@ static void sys_querysystemtime(struct regs* r) {
     r->rax = 0;   // STATUS_SUCCESS
 }
 
+// Frente C (explorer real): VirtualAlloc. Aloca `size` bytes de frames CONTIGUOS no 1o
+// GiB (identity-mapped) + abre o bit USER -> devolve o VA (== fisico). Backing do
+// HeapAlloc do explorer. size = r->rdi. Devolve 0 se sem RAM.
+extern uint64_t pmm_alloc_contiguous(uint64_t num_pages);
+extern void     mm_map_user(uint64_t addr, uint64_t size);
+static void sys_virtualalloc(struct regs* r) {
+    uint64_t size = r->rdi;
+    if (!size) { r->rax = 0; return; }
+    uint64_t pages = (size + 0xFFF) >> 12;
+    uint64_t phys = pmm_alloc_contiguous(pages);
+    if (!phys) { r->rax = 0; return; }
+    mm_map_user(phys, size);
+    r->rax = phys;   // VA == phys (identidade, 1o GiB)
+}
+
 // ---- SSDT: tabela central de serviços ----
 typedef void (*syscall_fn)(struct regs*);
 static syscall_fn s_ssdt[] = {
@@ -1128,6 +1145,7 @@ static syscall_fn s_ssdt[] = {
     sys_user_setcursorpos,      // 47 (FASE 11)
     sys_loadlibrary,            // 48 (FASE 3f: LoadLibrary runtime)
     sys_querysystemtime,        // 49 (Frente C: tempo p/ o explorer real)
+    sys_virtualalloc,           // 50 (Frente C: VirtualAlloc p/ o heap do explorer)
 };
 #define SSDT_COUNT (sizeof(s_ssdt) / sizeof(s_ssdt[0]))
 

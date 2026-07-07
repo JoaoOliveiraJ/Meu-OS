@@ -181,6 +181,86 @@ __declspec(dllexport) long RegCloseKey(HKEY hKey) {
     return ERROR_SUCCESS;
 }
 
+// ============================================================================
+//  Registro — variantes WIDE (W) que o explorer.exe REAL importa (via
+//  api-ms-win-core-registry -> advapi32). Convertem nome wide->narrow e encaminham
+//  p/ os mesmos Nt* (registro stub do kernel). Chave/valor ausente -> nao encontrado
+//  / enumeracao vazia (HONESTO: o registro stub esta vazio; app bem-feito usa default).
+// ============================================================================
+typedef unsigned short REG_WCHAR;
+static void reg_w2n(const REG_WCHAR* w, char* n, int max) {
+    int i = 0; if (w) while (w[i] && i < max-1) { n[i] = (char)w[i]; i++; } n[i] = 0;
+}
+#define ERROR_NO_MORE_ITEMS 259
+
+__declspec(dllexport) long RegOpenKeyExW(HKEY hKey, const REG_WCHAR* subKey, DWORD opt, DWORD sam, HKEY* phk) {
+    char n[512]; reg_w2n(subKey, n, sizeof(n)); return RegOpenKeyExA(hKey, n, opt, sam, phk);
+}
+__declspec(dllexport) long RegQueryValueExW(HKEY hKey, const REG_WCHAR* val, DWORD* res, DWORD* type, void* data, DWORD* cb) {
+    char n[256]; reg_w2n(val, n, sizeof(n)); return RegQueryValueExA(hKey, n, res, type, data, cb);
+}
+__declspec(dllexport) long RegGetValueW(HKEY hKey, const REG_WCHAR* sub, const REG_WCHAR* val, DWORD flags, DWORD* type, void* data, DWORD* cb) {
+    (void)sub; (void)flags; return RegQueryValueExW(hKey, val, 0, type, data, cb);
+}
+__declspec(dllexport) long RegCreateKeyExW(HKEY hKey, const REG_WCHAR* sub, DWORD res, REG_WCHAR* cls, DWORD opt, DWORD sam, void* sa, HKEY* phk, DWORD* disp) {
+    (void)res; (void)cls; (void)opt; (void)sa; char n[512]; reg_w2n(sub, n, sizeof(n));
+    long st = RegOpenKeyExA(hKey, n, 0, sam, phk);
+    if (st != ERROR_SUCCESS && phk) *phk = hKey;    // devolve a raiz p/ nao travar a criacao
+    if (disp) *disp = 2;                            // REG_OPENED_EXISTING_KEY
+    return ERROR_SUCCESS;
+}
+__declspec(dllexport) long RegEnumKeyExW(HKEY h, DWORD i, REG_WCHAR* nm, DWORD* cn, DWORD* r, REG_WCHAR* cl, DWORD* ccl, void* ft) {
+    (void)h;(void)i;(void)nm;(void)cn;(void)r;(void)cl;(void)ccl;(void)ft; return ERROR_NO_MORE_ITEMS;
+}
+__declspec(dllexport) long RegEnumValueW(HKEY h, DWORD i, REG_WCHAR* nm, DWORD* cn, DWORD* r, DWORD* type, void* data, DWORD* cb) {
+    (void)h;(void)i;(void)nm;(void)cn;(void)r;(void)type;(void)data;(void)cb; return ERROR_NO_MORE_ITEMS;
+}
+__declspec(dllexport) long RegQueryInfoKeyW(HKEY h, REG_WCHAR* cl, DWORD* ccl, DWORD* r, DWORD* nsub, DWORD* msub, DWORD* mcl, DWORD* nval, DWORD* mval, DWORD* mdata, DWORD* sec, void* ft) {
+    (void)h;(void)cl;(void)ccl;(void)r;(void)msub;(void)mcl;(void)mval;(void)mdata;(void)sec;(void)ft;
+    if (nsub) *nsub = 0; if (nval) *nval = 0; return ERROR_SUCCESS;   // chave vazia
+}
+__declspec(dllexport) long RegSetValueExW(HKEY h, const REG_WCHAR* v, DWORD r, DWORD type, const void* data, DWORD cb) {
+    (void)h;(void)v;(void)r;(void)type;(void)data;(void)cb; return ERROR_SUCCESS;
+}
+__declspec(dllexport) long RegSetKeyValueW(HKEY h, const REG_WCHAR* sub, const REG_WCHAR* v, DWORD type, const void* data, DWORD cb) {
+    (void)h;(void)sub;(void)v;(void)type;(void)data;(void)cb; return ERROR_SUCCESS;
+}
+__declspec(dllexport) long RegDeleteValueW(HKEY h, const REG_WCHAR* v)  { (void)h;(void)v; return ERROR_SUCCESS; }
+__declspec(dllexport) long RegDeleteKeyExW(HKEY h, const REG_WCHAR* sub, DWORD sam, DWORD r) { (void)h;(void)sub;(void)sam;(void)r; return ERROR_SUCCESS; }
+__declspec(dllexport) long RegDeleteKeyValueW(HKEY h, const REG_WCHAR* sub, const REG_WCHAR* v) { (void)h;(void)sub;(void)v; return ERROR_SUCCESS; }
+__declspec(dllexport) long RegDeleteTreeW(HKEY h, const REG_WCHAR* sub) { (void)h;(void)sub; return ERROR_SUCCESS; }
+__declspec(dllexport) long RegNotifyChangeKeyValue(HKEY h, int w, DWORD f, HKEY ev, int a) { (void)h;(void)w;(void)f;(void)ev;(void)a; return ERROR_SUCCESS; }
+__declspec(dllexport) long RegGetKeySecurity(HKEY h, DWORD si, void* sd, DWORD* cb) { (void)h;(void)si;(void)sd; if (cb) *cb = 0; return ERROR_SUCCESS; }
+__declspec(dllexport) long RegSetKeySecurity(HKEY h, DWORD si, void* sd) { (void)h;(void)si;(void)sd; return ERROR_SUCCESS; }
+__declspec(dllexport) long RegOpenCurrentUser(DWORD sam, HKEY* phk) { (void)sam; if (phk) *phk = (HKEY)(unsigned long long)0x80000001ULL; return ERROR_SUCCESS; }
+__declspec(dllexport) long RegisterApplicationRestart(const REG_WCHAR* cmd, DWORD flags) { (void)cmd; (void)flags; return 0; }
+
+// ============================================================================
+//  ETW (Event Tracing for Windows) — api-ms-win-eventing-* -> advapi32. NAO fazemos
+//  tracing; todos no-op HONESTOS (ERROR_SUCCESS / provider nao-habilitado). O explorer
+//  registra providers de trace na init do shell; ignoramos sem afetar a logica dele.
+// ============================================================================
+__declspec(dllexport) long EventRegister(const void* guid, void* cb, void* ctx, unsigned long long* handle) {
+    (void)guid;(void)cb;(void)ctx; if (handle) *handle = 0; return 0;
+}
+__declspec(dllexport) long EventUnregister(unsigned long long h) { (void)h; return 0; }
+__declspec(dllexport) long EventWrite(unsigned long long h, const void* d, unsigned c, void* data) { (void)h;(void)d;(void)c;(void)data; return 0; }
+__declspec(dllexport) long EventWriteTransfer(unsigned long long h, const void* d, const void* a, const void* r, unsigned c, void* data) { (void)h;(void)d;(void)a;(void)r;(void)c;(void)data; return 0; }
+__declspec(dllexport) long EventWriteEx(unsigned long long h, const void* d, unsigned long long f, unsigned long long fl, const void* a, const void* r, unsigned c, void* data) { (void)h;(void)d;(void)f;(void)fl;(void)a;(void)r;(void)c;(void)data; return 0; }
+__declspec(dllexport) int  EventEnabled(unsigned long long h, const void* d) { (void)h;(void)d; return 0; }
+__declspec(dllexport) int  EventProviderEnabled(unsigned long long h, unsigned char lvl, unsigned long long kw) { (void)h;(void)lvl;(void)kw; return 0; }
+__declspec(dllexport) long EventSetInformation(unsigned long long h, int cls, void* info, unsigned len) { (void)h;(void)cls;(void)info;(void)len; return 0; }
+__declspec(dllexport) long EventActivityIdControl(unsigned code, void* id) { (void)code;(void)id; return 0; }
+__declspec(dllexport) long RegisterTraceGuidsW(void* cb, void* ctx, const void* ctrl, unsigned cnt, void* reg, const unsigned short* mof, const unsigned short* res, unsigned long long* handle) {
+    (void)cb;(void)ctx;(void)ctrl;(void)cnt;(void)reg;(void)mof;(void)res; if (handle) *handle = 0; return 0;
+}
+__declspec(dllexport) long UnregisterTraceGuids(unsigned long long h) { (void)h; return 0; }
+__declspec(dllexport) unsigned long long GetTraceLoggerHandle(void* buf) { (void)buf; return 0; }
+__declspec(dllexport) unsigned char GetTraceEnableLevel(unsigned long long h) { (void)h; return 0; }
+__declspec(dllexport) unsigned long long GetTraceEnableFlags(unsigned long long h) { (void)h; return 0; }
+__declspec(dllexport) unsigned long TraceEventInstance(unsigned long long h, void* ev, void* inst) { (void)h;(void)ev;(void)inst; return 0; }
+__declspec(dllexport) unsigned long TraceEvent(unsigned long long h, void* ev) { (void)h;(void)ev; return 0; }
+
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }

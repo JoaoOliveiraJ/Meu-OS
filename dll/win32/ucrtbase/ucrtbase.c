@@ -54,6 +54,29 @@ __declspec(dllexport) int strncmp(const char* a, const char* b, size_t_ n) {
     return 0;
 }
 
+// mem* reais (o explorer os importa do CRT). O `volatile` evita que o clang reconheca
+// o loop e emita uma CHAMADA a memcpy/memset DENTRO delas mesmas (recursao infinita).
+__declspec(dllexport) void* memcpy(void* d, const void* s, size_t_ n) {
+    volatile unsigned char* dp = (volatile unsigned char*)d;
+    const volatile unsigned char* sp = (const volatile unsigned char*)s;
+    for (size_t_ i = 0; i < n; i++) dp[i] = sp[i]; return d;
+}
+__declspec(dllexport) void* memmove(void* d, const void* s, size_t_ n) {
+    volatile unsigned char* dp = (volatile unsigned char*)d;
+    const volatile unsigned char* sp = (const volatile unsigned char*)s;
+    if ((void*)dp < (const void*)sp) { for (size_t_ i = 0; i < n; i++) dp[i] = sp[i]; }
+    else { for (size_t_ i = n; i > 0; i--) dp[i-1] = sp[i-1]; }
+    return d;
+}
+__declspec(dllexport) void* memset(void* d, int c, size_t_ n) {
+    volatile unsigned char* dp = (volatile unsigned char*)d;
+    for (size_t_ i = 0; i < n; i++) dp[i] = (unsigned char)c; return d;
+}
+__declspec(dllexport) int memcmp(const void* a, const void* b, size_t_ n) {
+    const unsigned char* pa = (const unsigned char*)a; const unsigned char* pb = (const unsigned char*)b;
+    for (size_t_ i = 0; i < n; i++) if (pa[i] != pb[i]) return (int)pa[i] - (int)pb[i]; return 0;
+}
+
 // ---------------------------------------------------------------------------
 //  runtime startup — argv/env, _initterm, config, exit.
 // ---------------------------------------------------------------------------

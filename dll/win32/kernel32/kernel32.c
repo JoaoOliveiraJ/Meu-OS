@@ -27,6 +27,7 @@ __declspec(dllimport) long NtUnloadDriver(const char* name);
 // Frente C (explorer real): tempo do sistema + info de processo (do ntdll).
 __declspec(dllimport) long NtQuerySystemTime(void* out);
 __declspec(dllimport) long NtQueryInformationProcess(void* h, unsigned cls, void* buf, unsigned len, unsigned* ret);
+__declspec(dllimport) void* NtVirtualAlloc(unsigned long long size);   // Frente C: backing do heap
 
 #define INVALID_HANDLE_VALUE ((void*)(long long)-1)
 
@@ -549,6 +550,80 @@ __declspec(dllexport) void* CreateSemaphoreExW(void* a, long ini, long mx, const
 __declspec(dllexport) int   ReleaseSemaphore(void* h, long c, long* prev) { (void)h;(void)c; if (prev) *prev = 0; return 1; }
 __declspec(dllexport) unsigned WaitForSingleObjectEx(void* h, unsigned ms, int al) { (void)h;(void)ms;(void)al; return 0; } // WAIT_OBJECT_0
 __declspec(dllexport) unsigned WaitForMultipleObjectsEx(unsigned n, void* h, int all, unsigned ms, int al) { (void)n;(void)h;(void)all;(void)ms;(void)al; return 0; }
+
+// --- VirtualAlloc + HEAP real (api-ms-win-core-memory/heap). Backing por VirtualAlloc
+//     (syscall -> frames contiguos no kernel). O heap e' bump com header de tamanho por
+//     bloco; HeapFree e' no-op por ora (free-list real depois). O explorer aloca muito
+//     na init do shell -> precisa de heap de verdade, nao o bump de 128 KiB do ucrtbase. ---
+__declspec(dllexport) void* VirtualAlloc(void* addr, unsigned long long size, unsigned type, unsigned prot) {
+    (void)addr; (void)type; (void)prot; return NtVirtualAlloc(size);
+}
+__declspec(dllexport) int VirtualFree(void* addr, unsigned long long size, unsigned type) { (void)addr;(void)size;(void)type; return 1; }
+
+static unsigned char*      k32_heap_cur  = 0;
+static unsigned long long  k32_heap_left = 0;
+__declspec(dllexport) void* GetProcessHeap(void) { return (void*)(long long)0x00420000; }  // handle sentinela
+__declspec(dllexport) void* HeapAlloc(void* heap, unsigned flags, unsigned long long size) {
+    (void)heap;
+    unsigned long long need = (size + 16 + 15) & ~15ULL;               // +16 header, alinhado a 16
+    if (need > k32_heap_left) {
+        unsigned long long chunk = need > 0x1000000ULL ? need : 0x1000000ULL;  // 16 MiB ou o pedido
+        k32_heap_cur  = (unsigned char*)NtVirtualAlloc(chunk);
+        k32_heap_left = k32_heap_cur ? chunk : 0;
+        if (!k32_heap_cur) return 0;
+    }
+    unsigned char* base = k32_heap_cur; k32_heap_cur += need; k32_heap_left -= need;
+    *(unsigned long long*)base = size;                                 // header: tamanho pedido
+    void* p = base + 16;
+    if (flags & 0x8u) { for (unsigned long long i = 0; i < size; i++) ((unsigned char*)p)[i] = 0; } // HEAP_ZERO_MEMORY
+    return p;
+}
+__declspec(dllexport) int HeapFree(void* heap, unsigned flags, void* p) { (void)heap;(void)flags;(void)p; return 1; } // bump: no-op
+__declspec(dllexport) unsigned long long HeapSize(void* heap, unsigned flags, const void* p) {
+    (void)heap;(void)flags; return p ? *(const unsigned long long*)((const unsigned char*)p - 16) : 0;
+}
+__declspec(dllexport) void* HeapReAlloc(void* heap, unsigned flags, void* p, unsigned long long size) {
+    if (!p) return HeapAlloc(heap, flags, size);
+    unsigned long long old = *(unsigned long long*)((unsigned char*)p - 16);
+    void* np = HeapAlloc(heap, flags & ~0x8u, size);
+    if (np) { unsigned long long c = old < size ? old : size; for (unsigned long long i = 0; i < c; i++) ((unsigned char*)np)[i] = ((unsigned char*)p)[i]; }
+    return np;
+}
+__declspec(dllexport) void* HeapCreate(unsigned opts, unsigned long long init, unsigned long long mx) { (void)opts;(void)init;(void)mx; return (void*)(long long)0x00430000; }
+__declspec(dllexport) int HeapDestroy(void* h) { (void)h; return 1; }
+__declspec(dllexport) int HeapValidate(void* h, unsigned f, const void* p) { (void)h;(void)f;(void)p; return 1; }
+__declspec(dllexport) int HeapSetInformation(void* h, int cls, void* info, unsigned long long len) { (void)h;(void)cls;(void)info;(void)len; return 1; }
+
+// --- Versao do SO + info do sistema (api-ms-win-core-sysinfo). O explorer checa se
+//     e' Windows 10 (major=10). Reportamos Win10 build 19045 (o real que rodamos). ---
+__declspec(dllexport) int GetVersionExW(void* info) {
+    if (!info) return 0;
+    unsigned char* c = (unsigned char*)info; unsigned* p = (unsigned*)info; // p[0]=size (do caller)
+    p[1] = 10; p[2] = 0; p[3] = 19045; p[4] = 2;    // Major=10 Minor=0 Build=19045 Platform=NT
+    for (int i = 0x14; i < 0x114; i++) c[i] = 0;    // szCSDVersion[128] (wide) = ""
+    if (p[0] >= 0x11C) {                            // OSVERSIONINFOEXW
+        for (int i = 0x114; i < 0x11C; i++) c[i] = 0;
+        c[0x11A] = 1;                               // wProductType = VER_NT_WORKSTATION
+    }
+    return 1;
+}
+__declspec(dllexport) int GetVersionExA(void* info) {
+    if (!info) return 0;
+    unsigned char* c = (unsigned char*)info; unsigned* p = (unsigned*)info;
+    p[1] = 10; p[2] = 0; p[3] = 19045; p[4] = 2;
+    for (int i = 0x14; i < 0x94; i++) c[i] = 0;     // szCSDVersion[128] (narrow) = ""
+    return 1;
+}
+__declspec(dllexport) unsigned GetVersion(void) { return 0x0000000A; }   // major 10, minor 0, NT
+__declspec(dllexport) void GetSystemInfo(void* si) {
+    if (!si) return; unsigned char* c = (unsigned char*)si; for (int i = 0; i < 0x30; i++) c[i] = 0;
+    *(unsigned short*)(c + 0)      = 9;        // wProcessorArchitecture = AMD64
+    *(unsigned*)(c + 4)            = 4096;     // dwPageSize
+    *(unsigned long long*)(c+0x18) = 1;        // dwActiveProcessorMask
+    *(unsigned*)(c + 0x20)        = 2;         // dwNumberOfProcessors
+    *(unsigned*)(c + 0x28)        = 0x10000;   // dwAllocationGranularity
+}
+__declspec(dllexport) void GetNativeSystemInfo(void* si) { GetSystemInfo(si); }
 
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;

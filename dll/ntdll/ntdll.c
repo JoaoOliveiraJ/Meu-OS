@@ -39,6 +39,8 @@ enum {
     SYS_LOADLIBRARY = 48,
     // --- Frente C: tempo do sistema p/ o usermode (explorer real) ---
     SYS_QUERYSYSTEMTIME = 49,
+    // --- Frente C: VirtualAlloc (heap do explorer) ---
+    SYS_VIRTUALALLOC = 50,
 };
 
 // long long = 64-bit no Windows (LLP64), para nao truncar ponteiros.
@@ -96,6 +98,9 @@ static long long sc6(long long n, long long a1, long long a2, long long a3,
 // Frente C (explorer real): tempo do sistema (o kernel le o KUSER_SHARED_DATA).
 // out = { long long SystemTime; unsigned TickCount; }.
 __declspec(dllexport) long NtQuerySystemTime(void* out) { return (long)sc1(SYS_QUERYSYSTEMTIME, IP(out)); }
+
+// Frente C (explorer real): VirtualAlloc (backing do HeapAlloc). Devolve o VA (0 = falha).
+__declspec(dllexport) void* NtVirtualAlloc(unsigned long long size) { return (void*)(__INTPTR_TYPE__)sc1(SYS_VIRTUALALLOC, (long long)size); }
 
 // "Native API" (Nt*): o ponto onde o modo usuário entra no kernel.
 __declspec(dllexport) long NtUserMessageBox(const char* text, const char* caption) {

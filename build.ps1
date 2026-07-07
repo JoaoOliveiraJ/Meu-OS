@@ -206,10 +206,15 @@ if (Test-Path $loaddisk) {
 
 # FRENTE 4 (Fase 4a) — child.exe: um .exe FILHO simples (CRT REAL) para ser LANCADO por
 # outro processo. Prova que o filho REALMENTE executa quando o pai chama CreateProcess.
+# ImageBase ALTO (0x140000000) + .reloc: o pai fica na base padrao de EXE (0x400000) e a
+# faixa baixa de 1 GiB e' identity-mapped/compartilhada entre processos; sem a base alta o
+# filho mapearia em 0x400000 e sobrescreveria a imagem do pai. Com base alta o ldr_run
+# reloca o filho para uma regiao PMM distinta (>= 64 MiB) e os dois coexistem.
 $child = Join-Path $ex 'child.c'
 if (Test-Path $child) {
-    Write-Host "[exemplo] apps\child.c -> build\child.exe (.exe FILHO, CRT REAL)"
-    & $zig cc -target x86_64-windows-gnu -o (Join-Path $out 'child.exe') $child -lkernel32
+    Write-Host "[exemplo] apps\child.c -> build\child.exe (.exe FILHO, CRT REAL, base ALTA relocavel)"
+    & $zig cc -target x86_64-windows-gnu '-Wl,--image-base=0x140000000' '-Wl,--dynamicbase' `
+        -o (Join-Path $out 'child.exe') $child -lkernel32
     if ($LASTEXITCODE) { throw "Compilacao do child.c falhou." }
 }
 

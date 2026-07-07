@@ -33,6 +33,7 @@ static uint64_t make_seg(uint8_t access, uint8_t flags) {
 }
 
 void tss_set_rsp0(unsigned long long rsp0) { g_tss.rsp0 = rsp0; }
+unsigned long long tss_get_rsp0(void) { return g_tss.rsp0; }
 
 void gdt_init(void) {
     gdt[0] = 0;

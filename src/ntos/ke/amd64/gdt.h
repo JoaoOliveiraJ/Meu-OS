@@ -13,3 +13,8 @@ void gdt_init(void);
 
 // Define o RSP0 do TSS (pilha de kernel usada quando ring 3 -> ring 0).
 void tss_set_rsp0(unsigned long long rsp0);
+
+// Le o RSP0 atual do TSS. Usado para salvar/restaurar em torno de uma execucao
+// ANINHADA (ex.: sys_createprocess roda o filho com uma segunda pilha de kernel,
+// senao o int 0x80 do filho destroi o trap frame do pai na pilha compartilhada).
+unsigned long long tss_get_rsp0(void);

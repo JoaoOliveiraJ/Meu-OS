@@ -1,0 +1,5 @@
+LIBRARY uxtheme.dll
+EXPORTS
+    ux_ord86_immersive @86 NONAME
+    ux_ord126_immersive @126 NONAME
+    ux_ord138_IsDarkModeAllowedForWindow @138 NONAME

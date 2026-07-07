@@ -324,6 +324,10 @@ $shell32Def  = Join-Path $dll 'win32\shell32\shell32.def'
 # Frente C (explorer real) — shcore.dll: SHELL CORE (DPI/stream/registro/thread/appid).
 $shcoreSrc   = Join-Path $dll 'win32\shcore\shcore.c'
 $shcoreDef   = Join-Path $dll 'win32\shcore\shcore.def'
+# Frente C (explorer real) — uxtheme.dll: Visual Styles (tema INATIVO/classico). 25 funcoes
+#   por nome + 3 ordinais privados (#86/#126/#138 immersive/dark-mode) via uxtheme.def.
+$uxthemeSrc  = Join-Path $dll 'win32\uxtheme\uxtheme.c'
+$uxthemeDef  = Join-Path $dll 'win32\uxtheme\uxtheme.def'
 # FASE 3f — testlib: DLL de teste carregada em RUNTIME (LoadLibrary + GetProcAddress).
 $testlibSrc  = Join-Path $dll 'win32\testlib\testlib.c'
 if (Test-Path $ntdllSrc) {
@@ -377,6 +381,14 @@ if (Test-Path $ntdllSrc) {
         & $zig cc @dc '-Wl,--image-base=0x5800000' '-Wl,--dynamicbase' `
             -o (Join-Path $out 'shcore.dll') $shcoreSrc $shcoreDef
         if ($LASTEXITCODE) { throw "shcore.dll falhou." }
+    }
+    # Frente C (explorer real) — uxtheme.dll: Visual Styles em modo CLASSICO (tema inativo).
+    #   ImageBase 0x5900000 (livre, apos shcore 0x5800000). Autocontido (int 0x80 p/ log,
+    #   sem ntdll) -> caminho PMM+reloc limpo, igual a combase. .def pina 3 ordinais privados.
+    if (Test-Path $uxthemeSrc) {
+        & $zig cc @dc '-Wl,--image-base=0x5900000' '-Wl,--dynamicbase' `
+            -o (Join-Path $out 'uxtheme.dll') $uxthemeSrc $uxthemeDef
+        if ($LASTEXITCODE) { throw "uxtheme.dll falhou." }
     }
     # FASE 3b (Frente 3) — ucrtbase.dll: CRT minimo (startup do mingw/UCRT). O loader
     #   redireciona os apisets api-ms-win-crt-* p/ ca. Importa ExitProcess do kernel32.

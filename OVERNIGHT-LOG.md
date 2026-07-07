@@ -426,3 +426,66 @@ Antes: o kernel ja listava `\testlib.dll (2560 bytes) -> MFT #27` na raiz (metad
 "Sistema parado"). NOTA: o leitor NAO-residente do NTFS agora esta EXERCITADO end-to-end (era
 usado so p/ residente antes). Deferido: rodar um .EXE do disco (precisa CreateProcess executar a
 imagem — processos = trilha sensivel, melhor supervisionada).
+
+## MARCO 9 — Frente 4 Fase 4a/4b: CreateProcess REALMENTE executa um .exe FILHO (o grande item aberto) FEITO
+
+O item de MAIOR risco do projeto: um PAI lanca um FILHO (`CreateProcess`), o filho RODA de
+verdade (imprime), e o PAI ESPERA e CONTINUA. Antes, `sys_createprocess` so criava o objeto
+EPROCESS (o comentario do kernel32 dizia "Nao executa a imagem"). Feito em 3 incrementos, com
+regressao do pintok a cada passo e revert-on-failure. Sem escalonador ligado p/ apps, o filho
+roda SINCRONO e ANINHADO dentro do syscall (o `WaitForSingleObject` volta na hora).
+
+### Diagnostico primeiro (3 agentes + 1 agente de validacao de plano)
+O caminho que ja roda um .exe (`ldr_run -> usermode_enter`) usa endereços FIXOS compartilhados
+(pilha/TEB/PEB em 0x600000; setjmp global `g_user_exit`; gs-base) e a UNICA pilha de kernel. O
+filho "pisa" em tudo isso. A validacao de plano pegou um BUG CATASTROFICO no desenho inicial:
+o kernel tem UMA pilha de kernel (`gdt.c` `kstack[16384]`) e a porta do `int 0x80` nao usa IST
+(`idt.c` `ist=0`), entao o `int 0x80` do FILHO reusa o topo da MESMA pilha e sobrescreve o trap
+frame do PAI -> o pai NUNCA voltaria (#GP deterministico). Confirmado lendo gdt.c/idt.c.
+
+### A cirurgia (aditiva) — `run_child_image()` em syscall.c salva/restaura 5 itens em torno do ldr_run do filho
+1. **TSS.RSP0 -> SEGUNDA pilha de kernel** p/ o filho (`kmalloc` 32 KiB; `tss_get_rsp0`/`tss_set_rsp0`).
+   ESTE e o fix critico: o filho roda suas syscalls numa pilha propria; o trap frame do pai fica intacto.
+2. `g_user_exit[5]` (o setjmp/longjmp global; o setjmp do filho o sobrescreve).
+3. a janela `[0x600000,0x700000)` = pilha+TEB+PEB do pai (`kmalloc` 1 MiB; qword copy).
+4. CR3 (`mm_get_cr3`/`mm_switch_cr3`).  5. `IA32_GS_BASE` (a saida do filho poe KPCR; o pai quer o TEB).
+   + `fxsave`/`fxrstor` (FPU/SSE/MXCSR).
+
+### Pecas
+- **src/ntos/ke/amd64/gdt.c/.h**: `tss_get_rsp0()` (getter aditivo).
+- **src/ntos/ke/amd64/syscall.c**: `run_child_image()` + `sys_createprocess` roda a imagem (4a: modulo
+  de boot via `ldr_get_module_bytes`; 4b: DISCO via `ntfs_resolve_path`+`ntfs_read_file`, mirror do
+  sys_loadlibrary). SSDT slot 7 inalterado; so ring-3 chega ali -> pintok-safe (pintok e ring-0).
+- **apps/parent.c + child.c** (4a) e **apps/parentdisk.c** (4b) + blocos no build.ps1.
+- **child compilado com ImageBase ALTO (0x140000000)+.reloc**: o pai fica em 0x400000 e a faixa
+  baixa de 1 GiB e' identity-mapped/COMPARTILHADA entre os CR3s por-processo; sem base alta o filho
+  mapearia em 0x400000 e sobrescreveria FISICAMENTE a imagem do pai (causou #GP no 1o teste). Com
+  base alta o ldr_run reloca o filho p/ uma regiao PMM distinta (@0x431C000, 53 relocacoes).
+- **apps/make-ntfs-image.py + make-ntfs-disk.ps1**: embutem `\child.exe` (record MFT 28, $DATA
+  nao-residente @ LCN 512) alem do `\testlib.dll` (record 27 @ LCN 32).
+
+### Provas
+- **4a (modulo de boot)** `run.ps1 -Modules ...,parent.exe,child.exe`:
+  `[parent] lancando` -> `[ps] rodando o filho 'child.exe' (sincrono)` -> `[child] estou vivo (2+2=4)`
+  -> `[ps] pai restaurado` -> `[parent] filho terminou, continuo executando`. (child roda 2x: aninhado
+  + o laço de boot roda o modulo child.exe sozinho depois.)
+- **4b (disco NTFS)** `run.ps1 -Disk -Modules ...,parentdisk.exe` (child SO no disco, prova limpa):
+  `[parent-disk] lancando C:\child.exe` -> `[ps] lendo o filho do DISCO NTFS` -> reloc @0x431C000 ->
+  `[child] estou vivo (2+2=4)` -> `[ps] pai restaurado` -> `[parent-disk] filho (do disco) terminou`.
+
+### Regressao (a cada incremento)
+Pintok C0000365 intacto (P1/P2/P3 PROVA PASSOU, CPUID x3 -> i7-9700K, `intercept totals CPUID x3
+... ANTIVM x0`, SEM "Sistema parado"). loaddisk ainda le `\testlib.dll` (testlib_add(7,8)=15) —
+sem regressao do NTFS apos mexer na geracao do disco. Commits: 67d28c2 (4a prep), a7401e9 (4a), 92aed9c (4b).
+
+### Limitacoes conhecidas (nao travam; proximos passos)
+- Vazam por chamada: o CR3 do filho (3 frames), a regiao de imagem contigua, os objetos EPROCESS.
+  Falta `mm_destroy_address_space` + teardown -> incremento futuro.
+- Dois EPROCESS por filho (o do handle vs. o do ldr_run) — cosmetico (nao ha GetExitCodeProcess).
+- Lancar um .exe ARBITRARIO (base 0x400000 fixa) exige relocacao por-processo NO KERNEL (hoje o
+  filho precisa ser compilado base-alta). E' o proximo passo p/ generalizar (ex.: um cmd.exe real
+  lançando programas quaisquer).
+- Concorrencia real (CreateThread em paralelo) exige pilhas por-processo em VAs distintas + o
+  escalonador (`ki_create_thread` existe, mas fica desligado durante o pintok).
+- Deferido: argumentos de linha de comando reais do pai p/ o filho (argv[0] do CRT e' fixo
+  "crthello.exe"; `_acmdln=""`). Baixo risco, separado (Fase 4c).

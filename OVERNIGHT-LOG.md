@@ -487,5 +487,35 @@ sem regressao do NTFS apos mexer na geracao do disco. Commits: 67d28c2 (4a prep)
   lançando programas quaisquer).
 - Concorrencia real (CreateThread em paralelo) exige pilhas por-processo em VAs distintas + o
   escalonador (`ki_create_thread` existe, mas fica desligado durante o pintok).
-- Deferido: argumentos de linha de comando reais do pai p/ o filho (argv[0] do CRT e' fixo
-  "crthello.exe"; `_acmdln=""`). Baixo risco, separado (Fase 4c).
+
+## MARCO 9b — Frente 4 Fase 4c: ARGUMENTOS de linha de comando REAIS (pai -> filho) FEITA
+
+O pai passa uma cmdline no `CreateProcess` e o filho a recebe como `argc`/`argv` REAIS no
+`main(argc, argv)`. Antes o `argv[0]` era o literal fixo `"crthello.exe"`.
+
+Encanamento (pai -> filho): `kernel32 CreateProcessA` passa `lpCommandLine` (antes descartava) ->
+`ntdll NtCreateProcess` (3o arg cmdline, `sc3`) -> `sys_createprocess` le `r->rdx` -> `run_child_image`
+chama `usermode_set_cmdline` -> `build_teb_peb` do filho grava a cmdline em `PEB+0x800` (0x601800) ->
+`ucrtbase meuos_parse_cmdline()` le 0x601800 e tokeniza em `argv[]`. Limpa depois (o ucrtbase e'
+compartilhado entre processos; reset ao default quando vazio p/ o filho standalone nao herdar).
+
+**O ACHADO que custou o tempo:** o argv NAO vinha por `__p___argc`. Diagnostico: dump da import
+table do child (script Python) -> usa `__p___argc`/`_configure_narrow_argv` (NAO `__getmainargs`
+importado); testes-sentinela em `__p___argc` nao pegavam. Fonte no `crtexe.c` do zig/mingw-w64:
+o argv e' montado em `pre_cpp_init` (secao `.CRT$XC`), chamado pelo `_initterm(__xc_a,__xc_z)` (via
+`__getmainargs` estatico -> `_configure_narrow_argv` + `__p___argc`). **Nosso `_initterm` era NO-OP**
+(pulava a tabela de inicializadores de proposito) -> `pre_cpp_init` nunca rodava -> `argc=0`. Fix:
+`_initterm`/`_initterm_e` agora CHAMAM a tabela. `pre_c_init`/`pre_cpp_init` so usam funcs que ja
+temos, sem cascata. Tambem exporta `__argc/__argv/__wargv` como DADOS.
+
+Provado: 4a `parent "child.exe alpha beta 42"` -> filho `argc=4 [child.exe,alpha,beta,42]`, standalone
+`argc=1` (reset OK); 4b `parentdisk "child.exe do-disco 7"` -> filho do disco `argc=3`.
+
+Regressao AMPLA (o `_initterm` afeta TODOS os apps CRT): crthello, echoin(scanf teclado), filecat,
+guihello(GUI/WinMain), loadlib, loaddisk — TODOS rodam; pintok C0000365 intacto; zero "Sistema parado".
+Commit 780560f.
+
+### Limitacoes ainda abertas
+- Deferido: argumentos por `GetCommandLineA`/wide (`wmain`/`GetCommandLineW`) e aspas na cmdline
+  (o tokenizer v1 quebra so por espaco). O parent nao deve reler `argv` apos CreateProcess se ele
+  proprio tiver args (ucrtbase compartilhado).

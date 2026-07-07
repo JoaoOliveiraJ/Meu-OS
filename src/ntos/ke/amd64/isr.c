@@ -419,6 +419,21 @@ void isr_handler(struct regs* r) {
             kput_hex(*(volatile uint64_t*)(uintptr_t)r->rsp);
             kputs(" (desmonte o .exe nesse endereco p/ achar a funcao)\n");
         }
+        // Frente C (bring-up): qualquer OUTRA excecao de RING-3 (CPL=3) — ex.: #UD
+        // (opcode invalido, pulou p/ dado/lixo), #GP. rip = instrucao que faltou; o
+        // topo da pilha traz candidatos ao endereco de RETORNO do CALL que desviou
+        // p/ ca (desmontar o .exe/DLL nesse endereco = achar o call-site). So no
+        // caminho de halt; pintok e' ring-0 (CPL=0) e nunca entra aqui.
+        else if ((r->cs & 3) == 3) {
+            kputs("  [bringup] excecao em RING-3: rip="); kput_hex(r->rip);
+            kputs(" rsp="); kput_hex(r->rsp);
+            kputs("\n  [bringup] stack[rsp..]= ");
+            for (int q = 0; q < 5; q++) {
+                kput_hex(*(volatile uint64_t*)(uintptr_t)(r->rsp + 8 * (uint64_t)q));
+                kputc(' ');
+            }
+            kputs("\n  (desmonte o .exe/DLL nesses enderecos p/ achar o call-site)\n");
+        }
         kputs("\nSistema parado.\n");
         for (;;) __asm__ volatile ("cli; hlt");
     }

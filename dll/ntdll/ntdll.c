@@ -549,6 +549,44 @@ __declspec(dllexport) long RtlpEnsureBufferSize(unsigned flags, void* buf, unsig
 __declspec(dllexport) long LdrResSearchResource(void* base, void* info, unsigned long level, unsigned long flags, void** addr, unsigned long* size, void* a, void* b) {
     (void)base;(void)info;(void)level;(void)flags;(void)a;(void)b; if (addr)*addr=0; if (size)*size=0; return STATUS_NOT_FOUND_; }
 
+// ===================================================================
+//  Feature Configuration ("Feature Staging"/Velocity) — ntdll (Win10 1809+).
+//  Componentes do shell (WIL/feature-manager) leem flags de feature em MASSA na init.
+//  Sem estas funcoes (GetProcAddress -> NULL), o explorer caia num LOOP (Register+Query
+//  repetidos sem fim) e TRAVAVA. Implementacao HONESTA: NENHUM override de feature esta'
+//  configurado -> cada feature usa o DEFAULT de compilacao.
+// ===================================================================
+// RTL_FEATURE_CONFIGURATION: featureId(4) + bitfield(4: group:4,enabledState:2,...) + payload(4).
+typedef struct { unsigned featureId; unsigned flags; unsigned variantPayload; } RTL_FEATURE_CONFIGURATION_;
+
+__declspec(dllexport) long RtlQueryFeatureConfiguration(unsigned featureId, unsigned sectionType,
+        long long* changeStamp, RTL_FEATURE_CONFIGURATION_* config) {
+    (void)sectionType;
+    if (changeStamp) *changeStamp = 0;                       // nunca muda
+    if (config) { config->featureId = featureId; config->flags = 0; config->variantPayload = 0; } // enabledState=Default(0)
+    return STATUS_SUCCESS_;                                  // "sem override" -> usa o default de compilacao
+}
+__declspec(dllexport) long RtlRegisterFeatureConfigurationChangeNotification(void* callback,
+        void* context, void* unused, void** registration) {
+    (void)callback; (void)context; (void)unused;
+    if (registration) *registration = (void*)(unsigned long long)1; // token nao-nulo; callback nunca dispara
+    return STATUS_SUCCESS_;
+}
+__declspec(dllexport) long RtlUnregisterFeatureConfigurationChangeNotification(void* registration) {
+    (void)registration; return STATUS_SUCCESS_;
+}
+__declspec(dllexport) long RtlQueryAllFeatureConfigurations(void* a, long long* changeStamp, void* c, unsigned* d) {
+    (void)a;(void)c; if (changeStamp) *changeStamp = 0; if (d) *d = 0; return STATUS_SUCCESS_; // 0 features configuradas
+}
+
+// RtlDllShutdownInProgress: FALSE em operacao normal (nao estamos no teardown). O CRT/loader
+// checa isto p/ decidir se roda destrutores. BOOLEAN (unsigned char).
+__declspec(dllexport) unsigned char RtlDllShutdownInProgress(void) { return 0; }
+
+// RtlDisownModuleHeapAllocation(heap, ptr): renuncia a posse de uma alocacao no unload de um
+// modulo. Sem rastreio de posse aqui -> no-op com sucesso.
+__declspec(dllexport) long RtlDisownModuleHeapAllocation(void* heap, void* ptr) { (void)heap;(void)ptr; return STATUS_SUCCESS_; }
+
 // Frente C: stub de retorno-0 acessivel em ring-3, usado pelo loader como FALLBACK dos
 // imports de DELAY-LOAD nao resolvidos (DLLs OPCIONAIS ausentes: NInput/SndVolSSO/...).
 // Sem SEH ativo o explorer nao pode capturar a falha de delay-load; apontar o slot p/ um

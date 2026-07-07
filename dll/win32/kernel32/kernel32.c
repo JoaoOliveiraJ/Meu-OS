@@ -438,6 +438,16 @@ __declspec(dllexport) void AcquireSRWLockShared(void* l)       { (void)l; }
 __declspec(dllexport) void ReleaseSRWLockShared(void* l)       { (void)l; }
 __declspec(dllexport) int  TryAcquireSRWLockExclusive(void* l) { (void)l; return 1; }
 
+// Condition variables — mesma logica single-threaded (sem contencao, sem outra thread p/
+// sinalizar). Initialize/Wake sao no-ops; o Sleep "acorda" imediatamente (TRUE) p/ o
+// chamador reavaliar o predicado, sem bloquear (bloquear travaria — nao ha quem sinalize).
+// Vira real com o escalonador de ring-3 (thread por thread).
+__declspec(dllexport) void InitializeConditionVariable(void* cv)                          { (void)cv; }
+__declspec(dllexport) void WakeConditionVariable(void* cv)                                { (void)cv; }
+__declspec(dllexport) void WakeAllConditionVariable(void* cv)                             { (void)cv; }
+__declspec(dllexport) int  SleepConditionVariableCS(void* cv, void* cs, unsigned ms)      { (void)cv;(void)cs;(void)ms; return 1; }
+__declspec(dllexport) int  SleepConditionVariableSRW(void* cv, void* l, unsigned ms, unsigned fl) { (void)cv;(void)l;(void)ms;(void)fl; return 1; }
+
 // ===========================================================================
 // kernelbase lote 2: TEMPO + IDs + perf counter. O CRT do explorer usa isto no
 // __security_init_cookie (o 1o ponto onde ele parava). Implementado DE VERDADE:

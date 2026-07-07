@@ -14,103 +14,114 @@ commitando sozinho. **NUNCA um stub genérico catch-all** — só stubs ESPECÍF
 
 Disciplina: **build → rodar o explorer → diagnosticar → implementar REAL → build → pintok
 (SE mexeu no kernel `src/ntos/...`) → commit + push**. Builds/QEMU em background (~1 min).
+Zig: `tools\zig-windows-x86_64-0.13.0\zig.exe`. Rebuild rápido de UMA dll (ex.: combase):
+`& $zig cc -target x86_64-windows-gnu -shared -nostdlib -e DllMain -Wl,--image-base=0x5500000 -Wl,--dynamicbase -o build\combase.dll dll\win32\combase\combase.c`
 
 ## 🎯 A MISSÃO
 Rodar o **binário REAL** `C:\Windows\explorer.exe` no MeuOS. NÃO escrever um explorer.
 Detalhes: `RECON-EXPLORER.md` + memória `run-real-explorer-mission`.
 
-## 📍 ESTADO — MARCO: o explorer NÃO CRASHA na init; encerra limpo no MRT
-Carrega, resolve TODOS os imports, roda a init COMPLETA de COM + WinRT em ring-3 SEM
-exceção, e encerra **LIMPO** via `ExitProcess(0)` (`[ps] pid=1 encerrou status=0x0`) ANTES
-de criar janela. Memória: `explorer-com-winrt-clean-mrt-frontier`.
+## 📍 ESTADO — MARCO: o explorer entra no caminho do SHELL/DESKTOP (modo 3) e roda a init da taskbar
+Ele carrega, resolve os imports, roda a init COMPLETA de COM+WinRT+**MRT** SEM crashar,
+entra no `wWinMain`, escolhe o **modo 3 (shell/desktop)** e roda a init REAL da taskbar/menu
+(lê ShellServiceObjects, StartPage, SettingSync, SearchboxTaskbarMode/Width, StartColorMenu,
+Accent...). Encerra **LIMPO** via `ExitProcess(0)` na fase de **construção da UI da taskbar**.
+Base do explorer: **0x04319000** (determinística). Memória: `explorer-com-winrt-clean-mrt-frontier`.
 
-## ⇒ A PRÓXIMA FRONTEIRA = SISTEMA DE RECURSOS **MRT** (WinRT ResourceManager)
-O explorer EXIGE o `Windows.ApplicationModel.Resources.Core.ResourceManager` p/ carregar
-recursos de UI. **RE já feito** (com o SCAFFOLD abaixo) mapeou a sequência exata:
-1. `CoCreateInstance {0000034B}`/`{0000015B}` = CLSID_GlobalOptions/IGlobalOptions (benigno, slots 3/4 → E_NOTIMPL ok).
-2. `GetDC` (DPI ok) → `LoadLibrary("comctl32.dll")` falha (data-driven, **não-fatal**).
-3. `CoCreateInstance {660B90C8-73A9-4B58-8CAE-355B7F55341B}`/`{BA5A92AE-...}` (classe COM de MRT).
-4. `RoGetActivationFactory(ResourceManager)` factory-iid `{4A8EAC58-B652-459D-8DE1-239471E8B22B}`
-   → o explorer chama a **factory slot 7** (get da ResourceManager). Devolvendo um objeto,
-   ele chama **manager slot 6** (get MainResourceMap ~ `get_MainResourceMap` público é slot 6),
-   depois **map slots 8 e 9**, e então **CRASHA em rip=0x464C89B** (RVA 0x33389B) num
-   `mov rcx,[rdi+0x30]; mov rax,[rcx]` — a interface em `rdi+0x30` ficou LIXO porque o
-   scaffold devolve objetos FALSOS (não seta os out-params certos). ⇒ precisa de objetos
-   MRT REAIS (ResourceManager/ResourceMap/ResourceContext com métodos e DADOS reais).
-   Import genuíno descoberto no caminho e JÁ IMPLEMENTADO: `SspiCli!GetUserNameExW` (advapi32).
+Diagnóstico PROVOU o ponto de saída: o explorer chama **`ExitProcess(0)` EXPLÍCITO** (retorno
+0 do wWinMain → CRT exit) e **NUNCA chama `CreateThread`** → não é problema de thread ainda;
+ele bila na construção da UI porque falta o framework de UI (dui70/DirectUI) + tema (UxTheme).
 
-⚠️ A factory-iid `{4A8EAC58}` NÃO está no SDK público (o header ABI
-`Windows Kits/10/Include/10.0.26100.0/winrt/windows.applicationmodel.resources.core.h` tem
-`IResourceManagerStatics`{get_Current slot6, IsResourceReference slot7} e `IResourceManager`
-{`get_MainResourceMap` slot6, AllResourceMaps 7, DefaultContext 8, LoadPriFiles 9}). Logo o
-explorer usa uma interface PRIVADA (windows.internal.*) — layout parecido mas confirmar por RE.
+## ⇒ A PRÓXIMA FRONTEIRA = UI da TASKBAR/DESKTOP (dui70/DirectUI + UxTheme)
+O explorer em modo 3 lê toda a config do shell e então tenta montar a taskbar/menu-iniciar,
+que dependem de:
+- **`dui70.dll` (DirectUI)** — framework da UI do shell (PRIVADO/undocumented, exports por
+  ordinal; GRANDE). É o bloqueador PROVÁVEL da saída (LoadLibrary("dui70") falha logo antes).
+- **`UxTheme.dll`** — ~25 imports NÃO resolvidos (OpenThemeData, DrawThemeBackground,
+  GetThemeColor/Font/Metric/Margins, IsThemeActive, DrawThemeTextEx, ...). DLL TRATÁVEL e
+  documentada — bom alvo p/ uma DLL nova real. (delay-load: ausência é tolerada, mas o tema
+  fica sem estilo.)
+- Depois: **RegisterClassExW/CreateWindowExW** (o user32 só tem variantes **A** hoje; as **W**
+  NÃO são exportadas — o explorer usa as W p/ Shell_TrayWnd/Progman), criação de janela real,
+  escalonamento de **threads ring-3** (CreateThread é stub que NÃO roda a thread), e **DWM**.
 
-### Como atacar MRT (a fase longa)
-- **SCAFFOLD de RE (já no código, gated)**: em `dll/win32/combase/combase.c` ponha
-  `#define COMBASE_DBG 1`. Isso (a) loga CLSID/IID/classe-WinRT/slot na serial via int 0x80,
-  e (b) faz `RoGetActivationFactory`/`RoActivateInstance` devolverem o objeto universal e os
-  getters (slots 6-19) devolverem objetos — empurrando o explorer ALÉM do MRT p/ mapear os
-  próximos muros. É DIAGNÓSTICO (objetos falsos → crasha ~4 slots adiante). Deixe em 0 no commit.
-- **Implementação REAL**: criar objetos MRT de verdade em combase (ou numa dll `mrtcore`):
-  `IResourceManager` real cujo `get_MainResourceMap` devolve um `IResourceMap` real; o map
-  responde lookups. Provável necessidade de DADOS reais (o explorer busca recursos ESPECÍFICOS
-  — um map vazio devolve "não encontrado" e ele pode sair/quebrar num recurso crítico). Talvez
-  servir recursos do `.rsrc`/`.mui` clássico do próprio explorer. Iterar slot por slot com o RE.
+### Como atacar (o loop de RE já montado)
+1. **Ligue os gates de diagnóstico** conforme o alvo:
+   - `REG_TRACE 1` em `src/ntos/ke/amd64/syscall.c` → loga cada `NtOpenKey`/`NtQueryValueKey`
+     (mapeia o que o shell lê no registro). **Kernel → re-verifique pintok.**
+   - `COMBASE_DBG 1` em `dll/win32/combase/combase.c` → loga CLSID/IID/classe-WinRT/slot.
+   - Para achar o ponto de saída: instrumente kernel32 `ExitProcess`/`CreateThread` com um
+     logger int 0x80 (ex.: `static void k32dbg(const char*s){unsigned long long r;__asm__ volatile("int $0x80":"=a"(r):"a"(1ULL),"D"(s):"memory","rcx","r11");}`).
+     ⚠️ NÃO use `__builtin_return_address`+loop de hex sem testar — deu **opcode inválido**
+     em C01517 na última sessão; prefira logar um marcador fixo e casar por disassembly.
+2. **Diagnosticar** (scripts na raiz + scratchpad):
+   - `python nextwall.py` — nomeia import NULO. `python disat.py 0x<rip>` — desmonta no crash.
+   - Scratchpad desta sessão (recrie se sumiram): `disrange.py <rva> <n>` (desmonta faixa por
+     RVA, nomeia CALL[IAT] e detecta call-virtual via CFG `call [rip+CFG]`), `callers.py
+     <rva>` (acha os CALL rel32 que chamam um RVA), `rdstr.py <rva>` (lê string). Base do
+     explorer no serial: `img=explorerreal.exe base=0x...`.
+3. **Implementar a DLL/função REAL.** DLL nova: `dll/win32/<nome>/<nome>.c` (+`.def` se
+   ordinais/mangled), bloco no `build.ps1` (ImageBase livre ≥0x5900000, o loader RELOCA) +
+   `-Modules` (≤~16). UxTheme é autocontida (int 0x80 direto p/ log, sem ntdll) como a combase.
 
-## 🔁 O LOOP
-1. Rodar o explorer (**12 módulos que FUNCIONAM** — NÃO passe de ~16, trava o boot):
-   ```
-   .\run.ps1 -Modules build\ntdll.dll,build\kernel32.dll,build\user32.dll,build\gdi32.dll,build\advapi32.dll,build\ucrtbase.dll,build\combase.dll,build\msvcp_win.dll,build\shell32.dll,build\shcore.dll,build\dxgi.dll,build\explorerreal.exe -Headless -TimeoutSec 45
-   ```
-   (Se `build\explorerreal.exe` sumiu: `cp C:\Windows\explorer.exe build\explorerreal.exe`.)
-2. Diagnosticar:
-   - `python nextwall.py` — nomeia o import NULO (rip=0). "Sem caller" = crash de lógica
-     (veja `[bringup] excecao em RING-3: rip=...`) ou saída limpa (MRT).
-   - `python disat.py 0x<rip>` — desmonta o explorer no crash. `python strxref.py "<str>"` — xref de string.
-   - Ative `COMBASE_DBG 1` p/ ver a dança de COM/WinRT (CLSID/IID/slot) na serial.
-3. Implementar a função/interface REAL. Rebuild. Repetir.
+## 🔁 O LOOP — comando de run (12 módulos; NÃO passe de ~16, trava o boot)
+```
+.\run.ps1 -Modules build\ntdll.dll,build\kernel32.dll,build\user32.dll,build\gdi32.dll,build\advapi32.dll,build\ucrtbase.dll,build\combase.dll,build\msvcp_win.dll,build\shell32.dll,build\shcore.dll,build\dxgi.dll,build\explorerreal.exe -Headless -TimeoutSec 45
+```
+(Se `build\explorerreal.exe` sumiu: `cp C:\Windows\explorer.exe build\explorerreal.exe`.)
+Ver `build\serial.log`. Marco esperado hoje: chega a `dui70` e sai `status=0x0` LIMPO.
+
+## 🧠 O MAPA DO wWinMain (RE feito — não precisa refazer)
+- Entry 0xA2940 → CRT `__scrt_common_main_seh` (0xA27C0) → `wWinMain` (RVA **0x23350**).
+- wWinMain: init (ETW/AppUserModelID/priority) → `GetCommandLineW`/`PathGetArgsW` → parse do
+  modo em **0xAA63C** → `esi` = modo. **esi==3 → 0x239CD (shell/desktop)**; ==5 → ShellExecute;
+  ==2 → janela de pasta (sai sem pasta).
+- Gate do modo 3 (0xAA63C): com args vazios, cai em 0xAA6F9 → **0xAA8DC** ("sou o shell?" —
+  lê `HKLM\...\Winlogon\AlternateShells\AvailableShells`; ausência → fallback lê valor `Shell`
+  =explorer.exe → TRUE) E **0xAA950** (`FindWindow "Progman"`/"Proxy Desktop" == NULL) → então
+  cria/adquire o mutex do shell → **edi=3**. JÁ DESBLOQUEADO (fix do AvailableShells).
 
 ## 🧭 REDIRECTS (`src/ntos/ldr/loader.c` `apiset_redirect`)
-`api-ms-win-crt-*`→ucrtbase · `core-com*`→combase · `core-winrt*`→combase · `core-registry`→advapi32
-· `security-*`/`eventing-*`→advapi32 · `core-*`→kernel32 · `*ntuser*`→user32 · `shell-*`→shell32
-· `shcore-*`→shcore · `storage-*`→shell32 · `ext-ms-win-*`→(user32/gdi32/shell32/advapi32/kernel32)
-· diretas: `userenv`→advapi32, `sspicli`→advapi32. **DLL direta nova**: criar
-`dll/win32/<nome>/<nome>.c` (+`.def` se ordinais/mangled), bloco no `build.ps1` (ImageBase livre
-≥0x5900000, o loader RELOCA — PMM-safe) + `-Modules` (≤~16); OU redirecionar p/ host existente.
+`api-ms-win-crt-*`→ucrtbase · `core-com*`/`core-winrt*`→combase · `core-registry`→advapi32 ·
+`security-*`/`eventing-*`→advapi32 · `core-*`→kernel32 · `*ntuser*`→user32 · `shell-*`→shell32 ·
+`shcore-*`→shcore · `storage-*`→shell32 · `ext-ms-win-*`→(user32/gdi32/shell32/advapi32/kernel32)
+· diretas: `userenv`→advapi32, `sspicli`→advapi32. **DLL nova**: adicione o redirect/host aqui.
+UxTheme: o explorer importa `UxTheme.dll` direto → basta criar a DLL e adicioná-la aos módulos
+(nome direto, sem redirect necessário se o import é "UxTheme.dll").
 
 ## 🛠️ FERRAMENTAS (raiz, versionadas)
-`nextwall.py` (import nulo) · `disat.py <hex>...` (desmonta) · `strxref.py <substr>` (xref
-string ASCII/UTF-16 → call-sites) · `redirgap.py [dll]`/`gap.py` (gap por DLL, espelha o loader)
-· `dumpimports.py`/`dumpexports.py` · `gen_msvcp.py` (gerador c/ .def).
+`nextwall.py` · `disat.py <hex>...` · `strxref.py <substr>` · `redirgap.py [dll]`/`gap.py` ·
+`dumpimports.py`/`dumpexports.py` · `gen_msvcp.py`. (E os do scratchpad — veja o LOOP acima.)
 
 ## 🔨 PRONTO (gap 0)
-Kernel loader (NOME/ORDINAL/DELAY-LOAD, PMM+reloc, redirects, diag ring-3). DLLs: ntdll,
-ucrtbase, kernel32(248), user32(140 GUI), gdi32(+GetDeviceCaps), advapi32(seg+SHReg+GetProfileType+
-DeriveAppContainerSid+**GetUserNameExW**), shell32(IL*+SHGetFolderPathEx/KnownFolderIDList+Get/Set
-ThreadFlags), shcore(DPI+IUnknown_*), msvcp_win(97), dxgi. **combase(35 COM + 22 WinRT)**: IMalloc,
-IStream real, GUID/string, objeto UNIVERSAL (CoCreateInstance degrada), marshaling identidade,
-HSTRING real, Ro*(ativação→REGDB_E_CLASSNOTREG honesto), winrt-error. SCAFFOLD de RE do MRT gated.
+Kernel loader (NOME/ORDINAL/DELAY-LOAD, PMM+reloc, redirects, diag ring-3). Registro:
+`sys_openkey`/`sys_queryvaluekey` (stub + AvailableShells honesto + gate REG_TRACE). DLLs:
+ntdll, ucrtbase, kernel32(248), user32(140 GUI, só variantes A), gdi32, advapi32(seg+SHReg+
+GetUserNameExW), shell32(IL*/KnownFolder), shcore(DPI), msvcp_win(97), dxgi.
+**combase(35 COM+22 WinRT)**: IMalloc, IStream real, GUID/string, HSTRING real, objeto
+UNIVERSAL com **`univ_fill` (preenche o out-param REAL em a2..a5)** → MRT passa; Ro* devolvem
+o universal (S_OK). SCAFFOLD `COMBASE_DBG` gated.
 
 ## ⛔ REGRA DE OURO — pintok.sys. NÃO QUEBRAR.
 Após CADA incremento no KERNEL (`src/ntos/...`): `.\run.ps1 -Scenario pintok -Headless -TimeoutSec 40`.
 Dourado: `[P1]/[P2]/[P3] ==== PROVA PASSOU ====`; `intercept totals: CPUID x3 RDTSC x33 RDMSR x0
 ANTIVM x0`; `DriverEntry ... C0000365`; SEM "Sistema parado". DLLs de userland NÃO afetam o pintok.
-Syscalls novos: **append no FIM** do enum + `s_ssdt[]` em `src/ntos/ke/amd64/syscall.c` (último
-`SYS_VIRTUALALLOC=50`; próximo 51).
+(Confirmado nesta sessão: o fix do registro em syscall.c passou pintok intacto.) Syscalls novos:
+**append no FIM** do enum + `s_ssdt[]` em `src/ntos/ke/amd64/syscall.c`.
 
-## 📜 COMMITS DESTA SESSÃO (todos pintok-verde)
-`2b84e88` lote 1 (combase COM real + gdi GetDeviceCaps + storage + userenv) · `e07b335` lote 2
-(WinRT na combase; explorer roda init COM+WinRT sem crashar) · `ea04818` lote 3 (ativação WinRT
-honesta REGDB + COMBASE_DBG gated) · lote 4 (SspiCli!GetUserNameExW + RE do MRT documentado).
-Mensagens terminam com `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`; branch
-`feat/kernel-foundation-irql-dpc`; `git push` a cada lote.
+## 📜 COMMITS DESTA SESSÃO (branch `feat/kernel-foundation-irql-dpc`; push a cada lote)
+`a9d6397` lote 1 (combase, userland) — MRT HONESTO: `univ_fill` preenche o out-param real →
+explorer roda a init de recursos completa e chega ao wWinMain. `b84a9a3` lote 2 (kernel,
+pintok-verde) — registro honesto p/ AvailableShells → explorer entra no modo 3 (shell/desktop)
+e roda a init da taskbar. Mensagens terminam com `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 
 ## 📌 NOTAS
-- Boot aguenta ~16 módulos. Mantenha o set de 12.
-- SDK do Windows na máquina: `C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\`
-  (headers ABI winrt em `.../winrt/`). MRT usa interfaces privadas (não no SDK público).
-- Heap combase: arena bump 2 MiB (sem free). combase autocontida (int 0x80 direto p/ log).
+- Boot aguenta ~16 módulos. Mantenha o set de 12 (adicione UxTheme quando existir).
+- SDK do Windows: `C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\` (UxTheme:
+  `um\uxtheme.h` — API documentada, ao contrário do dui70). MRT/dui70 = interfaces privadas.
+- Heap combase: arena bump 2 MiB (sem free). combase/uxtheme autocontidas (int 0x80 p/ log).
 
-**Agora: o próximo grande degrau é MRT REAL (ResourceManager/ResourceMap com dados). Use o
-SCAFFOLD (`COMBASE_DBG 1`) p/ mapear os slots e muros, implemente objetos MRT de verdade slot
-por slot, e veja o explorer avançar rumo à criação de janela. Vá, sem parar, até ~600k.**
+**Agora: o próximo grande degrau é a UI da TASKBAR. Comece por UxTheme (DLL real, documentada,
+resolve ~25 imports), depois ataque dui70/DirectUI e a criação de janela (RegisterClassExW/
+CreateWindowExW no user32). Use os gates (REG_TRACE/COMBASE_DBG) e o disassembly p/ ver onde o
+explorer para e por quê. Vá, sem parar, até ~600k.**

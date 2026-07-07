@@ -466,6 +466,202 @@ __declspec(dllexport) long*   __timezone(void) { return &g_timezone; }
 __declspec(dllexport) char**  __tzname(void)   { return g_tzname; }
 __declspec(dllexport) void    _tzset(void)     { }
 
+// ===========================================================================
+// Frente C (explorer.exe REAL): a superficie UCRT que o explorer importa. A maior
+// parte sao os wrappers _o_* (downlevel) que ENCAMINHAM p/ a base ja definida
+// acima; + string/math wide reais; + errno; + terminate HONESTO (C++ EH ainda nao
+// implementado -> um throw = terminate, comportamento correto sem handlers).
+// Descoberto pelo bring-up: o explorer parava em _o__set_app_type na init do CRT.
+// ===========================================================================
+static int uc_errno = 0;
+static wchar16 uc_wl(wchar16 c) { return (c >= 'A' && c <= 'Z') ? (wchar16)(c + 32) : c; }
+
+// ---- errno ----
+__declspec(dllexport) int* _errno(void)       { return &uc_errno; }
+__declspec(dllexport) int  _set_errno(int v)  { uc_errno = v; return 0; }
+__declspec(dllexport) int  _get_errno(int* p) { if (p) *p = uc_errno; return 0; }
+
+// ---- config / init / exit (base p/ os _o_) ----
+__declspec(dllexport) int   _configthreadlocale(int x) { (void)x; return 0; }
+__declspec(dllexport) int   _set_fmode(int m)          { (void)m; return 0; }
+__declspec(dllexport) int   _initialize_onexit_table(void* t)        { (void)t; return 0; }
+__declspec(dllexport) int   _register_onexit_function(void* t, void* f){ (void)t; (void)f; return 0; }
+__declspec(dllexport) void  _register_thread_local_exe_atexit_callback(void* f) { (void)f; }
+__declspec(dllexport) int   _set_error_mode(int m)     { (void)m; return 0; }
+__declspec(dllexport) void  _c_exit(void)              { }
+__declspec(dllexport) void* _recalloc(void* p, size_t_ n, size_t_ s) { (void)p; return calloc(n, s); }
+__declspec(dllexport) void  _purecall(void)            { ExitProcess((unsigned)-1); }
+__declspec(dllexport) void  _invalid_parameter_noinfo(void) { }
+__declspec(dllexport) void  _invalid_parameter_noinfo_noreturn(void) { ExitProcess((unsigned)-1); }
+__declspec(dllexport) int   _seh_filter_exe(unsigned code, void* p) { (void)code; (void)p; return 0; } // CONTINUE_SEARCH
+__declspec(dllexport) unsigned long long _beginthreadex(void* sec, unsigned st, void* start,
+        void* arg, unsigned fl, unsigned* id) { (void)sec;(void)st;(void)start;(void)arg;(void)fl;(void)id; return 0; }
+__declspec(dllexport) wchar16* _get_wide_winmain_command_line(void) { static wchar16 e[1]={0}; return e; }
+__declspec(dllexport) unsigned ___lc_codepage_func(void) { return 0; }
+__declspec(dllexport) int*      __p__commode2(void) { return __p__commode(); }
+
+// ---- terminate / C++ EH (ainda nao implementado -> throw = terminate) ----
+__declspec(dllexport) void terminate(void)      { ExitProcess(3); for(;;){} }
+__declspec(dllexport) void __std_terminate(void){ ExitProcess(3); for(;;){} }
+__declspec(dllexport) void _CxxThrowException(void* obj, void* info) { (void)obj; (void)info; ExitProcess(3); for(;;){} }
+__declspec(dllexport) int  __CxxFrameHandler3(void* r, void* f, void* c, void* d) { (void)r;(void)f;(void)c;(void)d; return 1; }
+__declspec(dllexport) int  __CxxFrameHandler4(void* r, void* f, void* c, void* d) { (void)r;(void)f;(void)c;(void)d; return 1; }
+__declspec(dllexport) void __std_exception_copy(void* from, void* to)   { (void)from; (void)to; }
+__declspec(dllexport) void __std_exception_destroy(void* obj)           { (void)obj; }
+
+// ---- tempo (minimo) ----
+__declspec(dllexport) long long _time64(long long* t) { if (t) *t = 0; return 0; }
+__declspec(dllexport) double    _difftime64(long long a, long long b) { return (double)(a - b); }
+__declspec(dllexport) void*     _localtime64(long long* t) { (void)t; static long long z[9]={0}; return z; }
+__declspec(dllexport) long long _mktime64(void* tm) { (void)tm; return 0; }
+
+// ---- string wide (reais) ----
+__declspec(dllexport) int wcscmp(const wchar16* a, const wchar16* b) {
+    while (*a && *a == *b) { a++; b++; } return (int)*a - (int)*b;
+}
+__declspec(dllexport) int wcsncmp(const wchar16* a, const wchar16* b, size_t_ n) {
+    for (; n; n--, a++, b++) { if (*a != *b) return (int)*a - (int)*b; if (!*a) break; } return 0;
+}
+__declspec(dllexport) wchar16* wcsncpy(wchar16* d, const wchar16* s, size_t_ n) {
+    size_t_ i = 0; for (; i < n && s[i]; i++) d[i] = s[i]; for (; i < n; i++) d[i] = 0; return d;
+}
+__declspec(dllexport) size_t_ wcscspn(const wchar16* s, const wchar16* set) {
+    size_t_ i = 0; for (; s[i]; i++) { for (const wchar16* p = set; *p; p++) if (s[i] == *p) return i; } return i;
+}
+__declspec(dllexport) wchar16* wcsstr(const wchar16* h, const wchar16* n) {
+    if (!*n) return (wchar16*)h;
+    for (; *h; h++) { const wchar16* a = h; const wchar16* b = n;
+        while (*a && *b && *a == *b) { a++; b++; } if (!*b) return (wchar16*)h; }
+    return 0;
+}
+__declspec(dllexport) wchar16* _wcsrev(wchar16* s) {
+    size_t_ n = 0; while (s[n]) n++; for (size_t_ i = 0; i < n/2; i++) { wchar16 t = s[i]; s[i] = s[n-1-i]; s[n-1-i] = t; } return s;
+}
+__declspec(dllexport) int _wcsicmp(const wchar16* a, const wchar16* b) {
+    while (*a && uc_wl(*a) == uc_wl(*b)) { a++; b++; } return (int)uc_wl(*a) - (int)uc_wl(*b);
+}
+__declspec(dllexport) int _wcsnicmp(const wchar16* a, const wchar16* b, size_t_ n) {
+    for (; n; n--, a++, b++) { wchar16 ca = uc_wl(*a), cb = uc_wl(*b); if (ca != cb) return (int)ca - (int)cb; if (!ca) break; } return 0;
+}
+__declspec(dllexport) int _wtoi(const wchar16* s) {
+    int sign = 1, v = 0; if (!s) return 0; while (*s == ' ') s++;
+    if (*s == '-') { sign = -1; s++; } else if (*s == '+') s++;
+    while (*s >= '0' && *s <= '9') { v = v*10 + (*s - '0'); s++; } return v*sign;
+}
+__declspec(dllexport) long wcstol(const wchar16* s, wchar16** end, int base) {
+    long v = 0; int sign = 1; if (!s) return 0; while (*s == ' ') s++;
+    if (*s == '-') { sign = -1; s++; } else if (*s == '+') s++;
+    if (base == 0) base = 10;
+    for (;;) { int dgt; wchar16 c = *s;
+        if (c >= '0' && c <= '9') dgt = c - '0';
+        else if (c >= 'a' && c <= 'z') dgt = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'Z') dgt = c - 'A' + 10;
+        else break;
+        if (dgt >= base) break; v = v*base + dgt; s++; }
+    if (end) *end = (wchar16*)s; return v*sign;
+}
+__declspec(dllexport) int toupper(int c) { return (c >= 'a' && c <= 'z') ? c - 32 : c; }
+__declspec(dllexport) int towlower(int c){ return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+__declspec(dllexport) int iswalnum(int c){ return (c>='0'&&c<='9')||(c>='A'&&c<='Z')||(c>='a'&&c<='z'); }
+__declspec(dllexport) int iswspace(int c){ return c==' '||c=='\t'||c=='\n'||c=='\r'||c=='\v'||c=='\f'; }
+__declspec(dllexport) int wcscpy_s(wchar16* d, size_t_ n, const wchar16* s) {
+    size_t_ i = 0; if (!d || !s || !n) return 22; for (; s[i] && i < n-1; i++) d[i] = s[i]; d[i] = 0; return 0;
+}
+__declspec(dllexport) int wcscat_s(wchar16* d, size_t_ n, const wchar16* s) {
+    size_t_ l = 0; while (l < n && d[l]) l++; size_t_ i = 0; for (; s[i] && l+i < n-1; i++) d[l+i] = s[i]; d[l+i] = 0; return 0;
+}
+__declspec(dllexport) int wcsncpy_s(wchar16* d, size_t_ n, const wchar16* s, size_t_ cnt) {
+    size_t_ i = 0; if (!d || !n) return 22; for (; s[i] && i < cnt && i < n-1; i++) d[i] = s[i]; d[i] = 0; return 0;
+}
+__declspec(dllexport) int memcpy_s(void* d, size_t_ dn, const void* s, size_t_ n) {
+    if (!d || (s == 0 && n)) return 22; if (n > dn) return 34;
+    unsigned char* dp=(unsigned char*)d; const unsigned char* sp=(const unsigned char*)s;
+    for (size_t_ i = 0; i < n; i++) dp[i] = sp[i]; return 0;
+}
+__declspec(dllexport) int mbstowcs_s(size_t_* ret, wchar16* wc, size_t_ szw, const char* mb, size_t_ cnt) {
+    size_t_ i = 0; if (wc && szw) { for (; mb[i] && i < cnt && i < szw-1; i++) wc[i] = (unsigned char)mb[i]; wc[i] = 0; }
+    if (ret) *ret = i + 1; return 0;
+}
+__declspec(dllexport) int _itow_s(int val, wchar16* buf, size_t_ sz, int radix) {
+    (void)radix; if (!buf || !sz) return 22; wchar16 tmp[16]; int n = 0; unsigned u = (val < 0) ? -val : val;
+    if (u == 0) tmp[n++] = '0'; while (u) { tmp[n++] = '0' + (u % 10); u /= 10; }
+    size_t_ o = 0; if (val < 0 && o < sz-1) buf[o++] = '-';
+    while (n > 0 && o < sz-1) buf[o++] = tmp[--n]; buf[o] = 0; return 0;
+}
+__declspec(dllexport) void* bsearch(const void* key, const void* base, size_t_ num, size_t_ sz,
+        int (*cmp)(const void*, const void*)) {
+    size_t_ lo = 0, hi = num;
+    while (lo < hi) { size_t_ mid = (lo + hi) / 2; const void* e = (const char*)base + mid*sz;
+        int c = cmp(key, e); if (c == 0) return (void*)e; if (c < 0) hi = mid; else lo = mid + 1; }
+    return 0;
+}
+
+// ---- math (basico; a maioria nao e' chamada na init) ----
+__declspec(dllexport) double ceil(double x)  { long long i = (long long)x; double d = (double)i; return (d < x) ? d + 1.0 : d; }
+__declspec(dllexport) double floor(double x) { long long i = (long long)x; double d = (double)i; return (d > x) ? d - 1.0 : d; }
+__declspec(dllexport) float  ceilf(float x)  { long long i = (long long)x; float d = (float)i; return (d < x) ? d + 1.0f : d; }
+__declspec(dllexport) float  floorf(float x) { long long i = (long long)x; float d = (float)i; return (d > x) ? d - 1.0f : d; }
+__declspec(dllexport) float  roundf(float x) { return (float)(long long)(x + (x >= 0 ? 0.5f : -0.5f)); }
+__declspec(dllexport) double sqrt(double x)  { double r; __asm__("sqrtsd %1,%0" : "=x"(r) : "x"(x)); return r; }
+__declspec(dllexport) double pow(double b, double e) { // e inteiro (caso comum); senao aprox
+    int n = (int)e; double r = 1.0; if (n >= 0) while (n--) r *= b; else while (n++) r /= b; return r;
+}
+
+// ===========================================================================
+//  Wrappers _o_* (downlevel): encaminham p/ as funcoes acima. O explorer os importa
+//  de api-ms-win-crt-private-l1-1-0.dll (redirecionado p/ ucrtbase).
+// ===========================================================================
+__declspec(dllexport) void  _o__set_app_type(int t)          { _set_app_type(t); }
+__declspec(dllexport) int   _o__set_new_mode(int m)          { return _set_new_mode(m); }
+__declspec(dllexport) int   _o__set_fmode(int m)             { return _set_fmode(m); }
+__declspec(dllexport) int   _o__configthreadlocale(int x)    { return _configthreadlocale(x); }
+__declspec(dllexport) int   _o__configure_wide_argv(int m)   { return _configure_wide_argv(m); }
+__declspec(dllexport) int   _o__initialize_wide_environment(void) { return _initialize_wide_environment(); }
+__declspec(dllexport) void  _o__cexit(void)                  { _cexit(); }
+__declspec(dllexport) void  _o__exit(int c)                  { _exit(c); }
+__declspec(dllexport) void  _o_exit(int c)                   { exit(c); }
+__declspec(dllexport) void  _o_terminate(void)              { terminate(); }
+__declspec(dllexport) void* _o_malloc(size_t_ n)             { return malloc(n); }
+__declspec(dllexport) void  _o_free(void* p)                 { free(p); }
+__declspec(dllexport) void* _o_realloc(void* p, size_t_ n)   { return realloc(p, n); }
+__declspec(dllexport) void* _o__recalloc(void* p, size_t_ n, size_t_ s) { return _recalloc(p, n, s); }
+__declspec(dllexport) int   _o__crt_atexit(void* f)          { return _crt_atexit(f); }
+__declspec(dllexport) int   _o__initialize_onexit_table(void* t)         { return _initialize_onexit_table(t); }
+__declspec(dllexport) int   _o__register_onexit_function(void* t, void* f){ return _register_onexit_function(t, f); }
+__declspec(dllexport) int   _o__seh_filter_exe(unsigned c, void* p)      { return _seh_filter_exe(c, p); }
+__declspec(dllexport) void  _o__purecall(void)              { _purecall(); }
+__declspec(dllexport) void  _o__invalid_parameter_noinfo(void)          { _invalid_parameter_noinfo(); }
+__declspec(dllexport) void  _o__invalid_parameter_noinfo_noreturn(void) { _invalid_parameter_noinfo_noreturn(); }
+__declspec(dllexport) int*  _o__errno(void)                 { return _errno(); }
+__declspec(dllexport) int   _o__get_errno(int* p)           { return _get_errno(p); }
+__declspec(dllexport) int   _o__set_errno(int v)           { return _set_errno(v); }
+__declspec(dllexport) unsigned long long _o__beginthreadex(void* a, unsigned b, void* c, void* d, unsigned e2, unsigned* f) { return _beginthreadex(a,b,c,d,e2,f); }
+__declspec(dllexport) wchar16* _o__get_wide_winmain_command_line(void) { return _get_wide_winmain_command_line(); }
+__declspec(dllexport) int*   _o___p__commode(void)         { return __p__commode(); }
+__declspec(dllexport) unsigned _o____lc_codepage_func(void){ return ___lc_codepage_func(); }
+__declspec(dllexport) void  _o___std_exception_copy(void* a, void* b)   { __std_exception_copy(a, b); }
+__declspec(dllexport) void  _o___std_exception_destroy(void* a)         { __std_exception_destroy(a); }
+__declspec(dllexport) int   _o__wcsicmp(const wchar16* a, const wchar16* b)          { return _wcsicmp(a, b); }
+__declspec(dllexport) int   _o__wcsnicmp(const wchar16* a, const wchar16* b, size_t_ n){ return _wcsnicmp(a, b, n); }
+__declspec(dllexport) int   _o__wtoi(const wchar16* s)     { return _wtoi(s); }
+__declspec(dllexport) long  _o_wcstol(const wchar16* s, wchar16** e, int b) { return wcstol(s, e, b); }
+__declspec(dllexport) int   _o_toupper(int c)             { return toupper(c); }
+__declspec(dllexport) int   _o_towlower(int c)            { return towlower(c); }
+__declspec(dllexport) int   _o_iswalnum(int c)           { return iswalnum(c); }
+__declspec(dllexport) int   _o_iswspace(int c)           { return iswspace(c); }
+__declspec(dllexport) int   _o_wcscpy_s(wchar16* d, size_t_ n, const wchar16* s)  { return wcscpy_s(d, n, s); }
+__declspec(dllexport) int   _o_wcscat_s(wchar16* d, size_t_ n, const wchar16* s)  { return wcscat_s(d, n, s); }
+__declspec(dllexport) int   _o_wcsncpy_s(wchar16* d, size_t_ n, const wchar16* s, size_t_ c) { return wcsncpy_s(d, n, s, c); }
+__declspec(dllexport) int   _o_memcpy_s(void* d, size_t_ dn, const void* s, size_t_ n) { return memcpy_s(d, dn, s, n); }
+__declspec(dllexport) int   _o_mbstowcs_s(size_t_* r, wchar16* w, size_t_ sw, const char* m, size_t_ c) { return mbstowcs_s(r, w, sw, m, c); }
+__declspec(dllexport) int   _o__itow_s(int v, wchar16* b, size_t_ s, int radix) { return _itow_s(v, b, s, radix); }
+__declspec(dllexport) void* _o_bsearch(const void* k, const void* b, size_t_ n, size_t_ s, int(*c)(const void*,const void*)) { return bsearch(k, b, n, s, c); }
+__declspec(dllexport) double _o_ceil(double x)  { return ceil(x); }
+__declspec(dllexport) double _o_floor(double x) { return floor(x); }
+__declspec(dllexport) float  _o_roundf(float x) { return roundf(x); }
+__declspec(dllexport) double _o_sqrt(double x)  { return sqrt(x); }
+__declspec(dllexport) double _o_pow(double b, double e) { return pow(b, e); }
+
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }

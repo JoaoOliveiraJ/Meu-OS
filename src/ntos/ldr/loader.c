@@ -135,6 +135,7 @@ static const char* apiset_redirect(const char* dll) {
     // DLLs DIRETAS mapeadas p/ um host que ja temos (estilo Wine): evita um modulo
     // Multiboot extra (limite ~16). userenv (perfil/appcontainer) -> advapi32 (seguranca).
     if (has_prefix_ci(dll, "userenv"))                   return "advapi32.dll";
+    if (has_prefix_ci(dll, "sspicli"))                   return "advapi32.dll";  // SSPI: GetUserNameExW etc.
     return dll;
 }
 

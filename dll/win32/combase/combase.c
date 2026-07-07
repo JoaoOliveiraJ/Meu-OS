@@ -38,7 +38,10 @@ static void bcopy_(void* dst, const void* src, size_t_ n) { unsigned char* d = (
 // ---- DIAGNOSTICO de bring-up (TEMPORARIO): escreve na serial via SYS_WRITE (rax=1,
 // rdi=string) por int 0x80. Sem import -> a combase segue autocontida. Loga qual objeto
 // COM/WinRT o explorer pede, p/ descobrir a decisao de saida. Remover depois.
-#define COMBASE_DBG 0   // 1 = loga CLSID/IID/classe-WinRT na serial (diagnostico do bring-up)
+#define COMBASE_DBG 0   // 1 = loga CLSID/IID/classe-WinRT + faz getters do obj universal
+                        // devolverem objetos (SCAFFOLD de RE do MRT: empurra o explorer
+                        // ALEM da init de recursos p/ mapear os proximos muros). Ver
+                        // PROMPT-PROXIMA-SESSAO.md (sequencia slot 7->6->8/9 + GetUserNameExW).
 #if COMBASE_DBG
 static void dbg_puts(const char* s) { unsigned long long ret; __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(1ULL), "D"(s) : "memory", "rcx", "r11"); }
 static const char g_hx[] = "0123456789ABCDEF";
@@ -61,6 +64,16 @@ static void dbg_wstr(const char* label, const unsigned short* w, unsigned wlen) 
     else { b[i++]='N'; b[i++]='U'; b[i++]='L'; b[i++]='L'; }
     b[i++]='\n'; b[i++]=0; dbg_puts(b);
 }
+// RE do vtable: stub por-slot que loga QUAL metodo o explorer chama no objeto universal.
+static void* universal_object(void);   // fwd (definido na secao do objeto universal)
+static void dbg_slot(int n) { char b[24]; int i=0; const char* p="[cb] univ slot "; while(*p)b[i++]=*p++; if(n>=10)b[i++]=(char)('0'+n/10); b[i++]=(char)('0'+n%10); b[i++]='\n'; b[i++]=0; dbg_puts(b); }
+// IInspectable (3-5: GetIids/GetRuntimeClassName/GetTrustLevel): loga e devolve E_NOTIMPL.
+#define USLI(n) static long usl##n(void* t){(void)t; dbg_slot(n); return (long)0x80004001L;}
+USLI(3)USLI(4)USLI(5)
+// Metodos de interface (6+): a maioria e getter propget (this, T** out). Loga, devolve um
+// objeto universal via o 2o arg (RDX) e S_OK -> o explorer segue e revela o proximo slot.
+#define USLG(n) static long usl##n(void* t, void** out){(void)t; dbg_slot(n); if(out)*out=universal_object(); return 0;}
+USLG(6)USLG(7)USLG(8)USLG(9)USLG(10)USLG(11)USLG(12)USLG(13)USLG(14)USLG(15)USLG(16)USLG(17)USLG(18)USLG(19)
 #else
 #define dbg_guid(a,b) ((void)0)
 #define dbg_wstr(a,b,c) ((void)0)
@@ -103,6 +116,12 @@ static void univ_init(void) {
     g_univ_vtbl[1] = (void*)univ_AddRef;
     g_univ_vtbl[2] = (void*)univ_Release;
     for (int i = 3; i < 64; i++) g_univ_vtbl[i] = (void*)ret_notimpl;
+#if COMBASE_DBG
+    g_univ_vtbl[3]=(void*)usl3; g_univ_vtbl[4]=(void*)usl4; g_univ_vtbl[5]=(void*)usl5; g_univ_vtbl[6]=(void*)usl6;
+    g_univ_vtbl[7]=(void*)usl7; g_univ_vtbl[8]=(void*)usl8; g_univ_vtbl[9]=(void*)usl9; g_univ_vtbl[10]=(void*)usl10;
+    g_univ_vtbl[11]=(void*)usl11; g_univ_vtbl[12]=(void*)usl12; g_univ_vtbl[13]=(void*)usl13; g_univ_vtbl[14]=(void*)usl14;
+    g_univ_vtbl[15]=(void*)usl15; g_univ_vtbl[16]=(void*)usl16; g_univ_vtbl[17]=(void*)usl17; g_univ_vtbl[18]=(void*)usl18; g_univ_vtbl[19]=(void*)usl19;
+#endif
     g_univ_obj.lpVtbl = g_univ_vtbl;
     g_univ_ready = 1;
 }
@@ -471,11 +490,21 @@ __declspec(dllexport) void     RoUninitialize(void) { }
 #define REGDB_E_CLASSNOTREG ((HRESULT_)0x80040154L)
 __declspec(dllexport) HRESULT_ RoActivateInstance(void* activatableClassId, void** instance) {
     unsigned int L=0; const WCHAR_* nm=WindowsGetStringRawBuffer(activatableClassId,&L); dbg_wstr("[cb] RoActivateInstance class=", nm, L); (void)nm; (void)L;
-    if (!instance) return E_POINTER_; *instance = 0; return REGDB_E_CLASSNOTREG;   // sem classes WinRT registradas
+    if (!instance) return E_POINTER_;
+#if COMBASE_DBG
+    *instance = universal_object(); return S_OK_;   // RE: deixa o explorer chamar metodos (loga slot)
+#else
+    *instance = 0; return REGDB_E_CLASSNOTREG;
+#endif
 }
 __declspec(dllexport) HRESULT_ RoGetActivationFactory(void* activatableClassId, const GUID_* iid, void** factory) {
     unsigned int L=0; const WCHAR_* nm=WindowsGetStringRawBuffer(activatableClassId,&L); dbg_wstr("[cb] RoGetActivationFactory class=", nm, L); dbg_guid("[cb]            factory-iid=", iid); (void)nm; (void)L; (void)iid;
-    if (!factory) return E_POINTER_; *factory = 0; return REGDB_E_CLASSNOTREG;
+    if (!factory) return E_POINTER_;
+#if COMBASE_DBG
+    *factory = universal_object(); return S_OK_;    // RE: deixa o explorer chamar metodos da factory (loga slot)
+#else
+    *factory = 0; return REGDB_E_CLASSNOTREG;
+#endif
 }
 
 // ---- WinRT error info (mecanismo de erro rico) — no-op honesto aqui ----

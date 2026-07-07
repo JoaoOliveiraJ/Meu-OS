@@ -89,6 +89,95 @@ __declspec(dllexport) int GetDeviceCaps(void* hdc, int index) {
     }
 }
 
+// ============================================================================
+//  Frente C (explorer real) — GDI expandido. O explorer importa 28 funcoes de gdi32;
+//  antes tinhamos 6, as outras 22 resolviam p/ NULL (crash latente ao desenhar). Aqui
+//  implementamos as 22 + BitBlt (pedida por GetProcAddress). Modelo: handles OPACOS (nao-
+//  nulos, distintos) + metricas PLAUSIVEIS p/ a fonte fixa 8x16 do MeuOS. As consultas de
+//  layout (extent/metrics/regiao/clip) dao respostas coerentes; o desenho real de bitmap
+//  (Blt) e' no-op por ora (framebuffer unico) — degrada sem crashar. Documentado, nao stub
+//  catch-all: cada funcao e' nomeada e faz o correto p/ o device fixo 1024x768.
+// ============================================================================
+typedef struct { int left, top, right, bottom; } GRECT_;
+typedef struct { int cx, cy; } GSIZE_;
+typedef struct {
+    int tmHeight, tmAscent, tmDescent, tmInternalLeading, tmExternalLeading, tmAveCharWidth,
+        tmMaxCharWidth, tmWeight, tmOverhang, tmDigitizedAspectX, tmDigitizedAspectY;
+    unsigned short tmFirstChar, tmLastChar, tmDefaultChar, tmBreakChar;
+    unsigned char tmItalic, tmUnderlined, tmStruckOut, tmPitchAndFamily, tmCharSet;
+} GTEXTMETRICW_;
+
+#define GDI_NULLREGION   1
+#define GDI_SIMPLEREGION 2
+#define GDI_ERROR_       0xFFFFFFFFu
+
+// Alocador de handles GDI opacos: valores distintos, nao-nulos, fora da faixa de ponteiros
+// reais das nossas DLLs (que vivem < 0x60000000). Sem rastreio de objeto (layout-only).
+static void* gdi_handle(void) { static unsigned long long n = 0xD1000000ull; n += 0x40; return (void*)n; }
+
+static void gzero(void* p, unsigned n) { unsigned char* d = (unsigned char*)p; for (unsigned i = 0; i < n; i++) d[i] = 0; }
+
+// ---- DC de memoria + objetos ----
+__declspec(dllexport) void* CreateCompatibleDC(void* hdc) { (void)hdc; return gdi_handle(); }
+__declspec(dllexport) int   DeleteDC(void* hdc) { (void)hdc; return 1; }
+__declspec(dllexport) void* SelectObject(void* hdc, void* obj) { (void)hdc; (void)obj; return gdi_handle(); }  // "objeto anterior" nao-nulo
+__declspec(dllexport) void* GetCurrentObject(void* hdc, unsigned type) { (void)hdc; (void)type; return gdi_handle(); }
+__declspec(dllexport) int   GetObjectW(void* obj, int cb, void* buf) { (void)obj; if (buf && cb > 0) gzero(buf, (unsigned)cb); return cb; }
+
+// ---- regioes (forma da taskbar / clipping) ----
+__declspec(dllexport) void* CreateRectRgn(int l, int t, int r, int b) { (void)l;(void)t;(void)r;(void)b; return gdi_handle(); }
+__declspec(dllexport) void* CreateRectRgnIndirect(const GRECT_* prc) { (void)prc; return gdi_handle(); }
+__declspec(dllexport) int   SetRectRgn(void* rgn, int l, int t, int r, int b) { (void)rgn;(void)l;(void)t;(void)r;(void)b; return 1; }
+__declspec(dllexport) int   CombineRgn(void* dst, void* s1, void* s2, int mode) { (void)dst;(void)s1;(void)s2;(void)mode; return GDI_SIMPLEREGION; }
+__declspec(dllexport) int   OffsetRgn(void* rgn, int dx, int dy) { (void)rgn;(void)dx;(void)dy; return GDI_SIMPLEREGION; }
+__declspec(dllexport) int   SelectClipRgn(void* hdc, void* rgn) { (void)hdc;(void)rgn; return GDI_SIMPLEREGION; }
+__declspec(dllexport) int   ExcludeClipRect(void* hdc, int l, int t, int r, int b) { (void)hdc;(void)l;(void)t;(void)r;(void)b; return GDI_SIMPLEREGION; }
+__declspec(dllexport) int   GetClipBox(void* hdc, GRECT_* prc) { (void)hdc; if (prc) { prc->left=0; prc->top=0; prc->right=1024; prc->bottom=768; } return GDI_SIMPLEREGION; }
+__declspec(dllexport) int   GetClipRgn(void* hdc, void* rgn) { (void)hdc;(void)rgn; return 0; }   // 0 = HDC sem regiao de clip
+
+// ---- fonte + medicao de texto (fonte fixa 8x16) ----
+__declspec(dllexport) void* CreateFontIndirectW(const void* plf) { (void)plf; return gdi_handle(); }
+__declspec(dllexport) int   GetTextExtentPoint32W(void* hdc, const unsigned short* s, int c, GSIZE_* sz) {
+    (void)hdc; (void)s; if (sz) { int n = c < 0 ? 0 : c; sz->cx = n * 8; sz->cy = 16; } return 1;
+}
+__declspec(dllexport) int GetTextMetricsW(void* hdc, GTEXTMETRICW_* tm) {
+    (void)hdc; if (!tm) return 0;
+    gzero(tm, sizeof(*tm));
+    tm->tmHeight = 16; tm->tmAscent = 13; tm->tmDescent = 3; tm->tmInternalLeading = 2;
+    tm->tmAveCharWidth = 8; tm->tmMaxCharWidth = 8; tm->tmWeight = 400;
+    tm->tmDigitizedAspectX = 96; tm->tmDigitizedAspectY = 96;
+    tm->tmFirstChar = 32; tm->tmLastChar = 255; tm->tmDefaultChar = '?'; tm->tmBreakChar = ' ';
+    tm->tmPitchAndFamily = 0;   // FIXED_PITCH implicito (bit0=0)
+    return 1;
+}
+__declspec(dllexport) unsigned GetOutlineTextMetricsW(void* hdc, unsigned cb, void* potm) {
+    (void)hdc; (void)cb; (void)potm; return 0;   // fonte raster: sem metricas de contorno -> caller usa GetTextMetrics
+}
+__declspec(dllexport) unsigned GetGlyphOutlineW(void* hdc, unsigned ch, unsigned fmt, void* gm, unsigned cb, void* buf, const void* mat) {
+    (void)hdc;(void)ch;(void)fmt;(void)gm;(void)cb;(void)buf;(void)mat; return GDI_ERROR_;   // sem contorno de glifo
+}
+// ExtTextOutW: desenha texto wide. Converte UTF-16->ascii e usa o mesmo caminho do TextOutA.
+__declspec(dllexport) int ExtTextOutW(void* hdc, int x, int y, unsigned opts, const GRECT_* prc,
+        const unsigned short* s, unsigned c, const int* dx) {
+    (void)opts; (void)prc; (void)dx;
+    char b[256]; unsigned n = 0; if (s) for (; n < c && n < 255; n++) b[n] = (char)s[n]; b[n] = 0;
+    int color = textcolor_of(hdc);
+    if (color >= 0) NtGdiTextOutEx(hdc, x, y, b, (int)n, (unsigned)color);
+    else            NtGdiTextOut(hdc, x, y, b, (int)n);
+    return 1;
+}
+__declspec(dllexport) unsigned SetTextAlign(void* hdc, unsigned align) { (void)hdc; (void)align; return 0; }   // devolve alinhamento anterior
+
+// ---- desenho de forma / blt (framebuffer unico: no-op que reporta sucesso) ----
+__declspec(dllexport) int Rectangle(void* hdc, int l, int t, int r, int b) { (void)hdc;(void)l;(void)t;(void)r;(void)b; return 1; }
+__declspec(dllexport) int SetStretchBltMode(void* hdc, int mode) { (void)hdc; (void)mode; return 1; }   // modo anterior
+__declspec(dllexport) int StretchBlt(void* dst, int xd, int yd, int wd, int hd, void* src, int xs, int ys, int ws, int hs, unsigned rop) {
+    (void)dst;(void)xd;(void)yd;(void)wd;(void)hd;(void)src;(void)xs;(void)ys;(void)ws;(void)hs;(void)rop; return 1;
+}
+__declspec(dllexport) int BitBlt(void* dst, int xd, int yd, int wd, int hd, void* src, int xs, int ys, unsigned rop) {
+    (void)dst;(void)xd;(void)yd;(void)wd;(void)hd;(void)src;(void)xs;(void)ys;(void)rop; return 1;
+}
+
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }

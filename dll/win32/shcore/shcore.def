@@ -1,0 +1,21 @@
+LIBRARY shcore.dll
+EXPORTS
+    _ord1 = shcore_ord_stub @1 NONAME
+    _ord109 = shcore_ord_stub @109 NONAME
+    _ord121 = shcore_ord_stub @121 NONAME
+    _ord123 = shcore_ord_stub @123 NONAME
+    _ord126 = shcore_ord_stub @126 NONAME
+    _ord142 = shcore_ord_stub @142 NONAME
+    _ord162 = shcore_ord_stub @162 NONAME
+    _ord170 = shcore_ord_stub @170 NONAME
+    _ord174 = shcore_ord_stub @174 NONAME
+    _ord183 = shcore_ord_stub @183 NONAME
+    _ord184 = shcore_ord_stub @184 NONAME
+    _ord186 = shcore_ord_stub @186 NONAME
+    _ord187 = shcore_ord_stub @187 NONAME
+    _ord190 = shcore_ord_stub @190 NONAME
+    _ord192 = shcore_ord_stub @192 NONAME
+    _ord200 = shcore_ord_stub @200 NONAME
+    _ord210 = shcore_ord_stub @210 NONAME
+    _ord213 = shcore_ord_stub @213 NONAME
+    _ord244 = shcore_ord_stub @244 NONAME

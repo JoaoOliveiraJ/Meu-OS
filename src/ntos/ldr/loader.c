@@ -120,12 +120,19 @@ static const char* apiset_redirect(const char* dll) {
     if (has_prefix_ci(dll, "api-ms-win-ntuser-"))        return "user32.dll";
     if (has_prefix_ci(dll, "api-ms-win-security-"))      return "advapi32.dll";
     if (has_prefix_ci(dll, "api-ms-win-eventing-"))      return "advapi32.dll"; // ETW: no-op (sem tracing)
+    if (has_prefix_ci(dll, "api-ms-win-shell-"))         return "shell32.dll"; // namespace/changenotify/dataobject/shdirectory
+    if (has_prefix_ci(dll, "api-ms-win-shcore-"))        return "shcore.dll";  // DPI/stream/registro/thread/appid
     return dll;
 }
 
 static void* ldr_resolve(const char* dll, const char* fn) {
     void* base = ldr_load(apiset_redirect(dll));
     if (!base) return 0;
+    if (fn && fn[0] == '#') {                       // import por ORDINAL (#N)
+        uint32_t ord = 0;
+        for (const char* p = fn + 1; *p >= '0' && *p <= '9'; p++) ord = ord * 10 + (uint32_t)(*p - '0');
+        return pe_get_export_by_ordinal(base, ord);
+    }
     return pe_get_export(base, fn);
 }
 

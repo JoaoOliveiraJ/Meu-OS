@@ -318,6 +318,12 @@ $combaseSrc  = Join-Path $dll 'win32\combase\combase.c'
 #   nomes MANGLED (mutex/thread/call_once/collate/iostream/locale) via msvcp_win.def.
 $msvcpwinSrc = Join-Path $dll 'win32\msvcp_win\msvcp_win.c'
 $msvcpwinDef = Join-Path $dll 'win32\msvcp_win\msvcp_win.def'
+# Frente C (explorer real) — shell32.dll: SHELL base (IL*/namespace/ShellExecute/...).
+$shell32Src  = Join-Path $dll 'win32\shell32\shell32.c'
+$shell32Def  = Join-Path $dll 'win32\shell32\shell32.def'
+# Frente C (explorer real) — shcore.dll: SHELL CORE (DPI/stream/registro/thread/appid).
+$shcoreSrc   = Join-Path $dll 'win32\shcore\shcore.c'
+$shcoreDef   = Join-Path $dll 'win32\shcore\shcore.def'
 # FASE 3f — testlib: DLL de teste carregada em RUNTIME (LoadLibrary + GetProcAddress).
 $testlibSrc  = Join-Path $dll 'win32\testlib\testlib.c'
 if (Test-Path $ntdllSrc) {
@@ -357,6 +363,20 @@ if (Test-Path $ntdllSrc) {
         & $zig cc @dc '-Wl,--image-base=0x5600000' '-Wl,--dynamicbase' `
             -o (Join-Path $out 'msvcp_win.dll') $msvcpwinSrc $msvcpwinDef
         if ($LASTEXITCODE) { throw "msvcp_win.dll falhou." }
+    }
+    # Frente C (explorer real) — shell32.dll: SHELL base. IL* (ITEMIDLIST) reais + stubs
+    #   nomeados (ShellExecute/NotifyIcon/namespace) + ordinais via shell32.def. ImageBase
+    #   0x5700000 (livre, apos msvcp 0x5600000). Autocontido -> caminho PMM+reloc limpo.
+    if (Test-Path $shell32Src) {
+        & $zig cc @dc '-Wl,--image-base=0x5700000' '-Wl,--dynamicbase' `
+            -o (Join-Path $out 'shell32.dll') $shell32Src $shell32Def
+        if ($LASTEXITCODE) { throw "shell32.dll falhou." }
+    }
+    # Frente C (explorer real) — shcore.dll. ImageBase 0x5800000 (apos shell32). Autocontido.
+    if (Test-Path $shcoreSrc) {
+        & $zig cc @dc '-Wl,--image-base=0x5800000' '-Wl,--dynamicbase' `
+            -o (Join-Path $out 'shcore.dll') $shcoreSrc $shcoreDef
+        if ($LASTEXITCODE) { throw "shcore.dll falhou." }
     }
     # FASE 3b (Frente 3) — ucrtbase.dll: CRT minimo (startup do mingw/UCRT). O loader
     #   redireciona os apisets api-ms-win-crt-* p/ ca. Importa ExitProcess do kernel32.

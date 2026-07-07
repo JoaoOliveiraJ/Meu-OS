@@ -44,3 +44,5 @@ void  pe_bind_imports(void* base, pe_resolver_t resolve);
 
 // Procura um export por nome na tabela de exports de uma imagem ja mapeada.
 void* pe_get_export(void* base, const char* name);
+// Procura um export por ORDINAL (imports #N — ex.: shell32 via api-ms-win-shell-*).
+void* pe_get_export_by_ordinal(void* base, uint32_t ordinal);

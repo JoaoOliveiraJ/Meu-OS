@@ -5,6 +5,8 @@
 
 void  ldr_register(const char* path, const void* image);   // registra bytes de um modulo
 void* ldr_load(const char* name);                          // carrega DLL (recursivo) -> base
+void* ldr_load_runtime(const char* name);                  // LoadLibrary em runtime: apiset_redirect + anexa ".dll"
+void* ldr_find_runtime(const char* name);                  // GetModuleHandle: base ja carregada (nao carrega) + redirect
 void  ldr_run(const char* path, const void* image);        // carrega e roda um .exe em ring 3
 int   ldr_match_ext(const char* path, const char* ext);    // path termina com 'ext'? (sem case)
 

@@ -136,6 +136,10 @@ static const char* apiset_redirect(const char* dll) {
     // Multiboot extra (limite ~16). userenv (perfil/appcontainer) -> advapi32 (seguranca).
     if (has_prefix_ci(dll, "userenv"))                   return "advapi32.dll";
     if (has_prefix_ci(dll, "sspicli"))                   return "advapi32.dll";  // SSPI: GetUserNameExW etc.
+    // KernelBase.dll hospeda no Windows as APIs core que os contratos api-ms-win-core-*
+    // encaminham. Nos hospedamos essas mesmas funcoes no nosso kernel32 -> kernelbase =
+    // kernel32 (estilo Wine). Explorer faz LoadLibrary("kernelbase.dll") em runtime.
+    if (has_prefix_ci(dll, "kernelbase"))                return "kernel32.dll";
     return dll;
 }
 
@@ -206,6 +210,52 @@ void* ldr_load(const char* name) {
     kputs(" @ "); kput_hex((uint64_t)(uintptr_t)base); kputc('\n');
     pe_bind_imports(base, ldr_resolve);                 // resolve os imports da DLL (recursivo)
     return base;
+}
+
+// LoadLibrary em RUNTIME (kernel32!LoadLibraryW -> sys_loadlibrary). Diferente do bind
+// ESTATICO (ldr_resolve, que ja aplica apiset_redirect), o caminho de runtime chamava
+// ldr_load DIRETO — por isso falhava em (1) apisets versionados ("api-ms-win-core-synch-
+// l1-2-0.dll") e (2) nomes SEM extensao (LoadLibraryW(L"dui70")). Aqui aplicamos as duas
+// regras do Windows: encaminhamento de contrato (apiset_redirect) e o default de anexar
+// ".dll" quando o nome nao tem extensao. Assim o runtime resolve as MESMAS DLLs que o
+// bind estatico. So imprime "nao registrada" se, apos ambas as regras, o modulo faltar
+// mesmo (honesto: vira o proximo alvo a implementar).
+// anexa ".dll" ao basename SE nao houver extensao; devolve 1 se anexou (out em 'buf').
+static int append_dll_if_bare(const char* red, char* buf, int cap) {
+    const char* bn = basename(red);
+    for (const char* c = bn; *c; c++) if (*c == '.') return 0;   // ja tem extensao
+    int k = 0; while (red[k] && k < cap - 5) { buf[k] = red[k]; k++; }
+    buf[k++] = '.'; buf[k++] = 'd'; buf[k++] = 'l'; buf[k++] = 'l'; buf[k] = 0;
+    return 1;
+}
+
+void* ldr_load_runtime(const char* name) {
+    if (!name) return 0;
+    const char* red = apiset_redirect(name);            // contrato virtual -> DLL real
+    if (find_mod(red) >= 0) {
+        void* b = ldr_load(red);
+        if (b && red != name) { kputs("[ldr] runtime '"); kputs(name); kputs("' -> "); kputs(red); kputc('\n'); }
+        return b;                                        // achou direto (talvez redirecionado)
+    }
+    char buf[64];
+    if (append_dll_if_bare(red, buf, sizeof(buf)) && find_mod(buf) >= 0) {
+        void* b = ldr_load(buf);
+        if (b) { kputs("[ldr] runtime '"); kputs(name); kputs("' -> "); kputs(buf); kputc('\n'); }
+        return b;
+    }
+    return ldr_load(red);                                // honesto: imprime a falta real
+}
+
+// GetModuleHandle: base de um modulo JA carregado (NAO carrega), aplicando as mesmas regras
+// do LoadLibrary (apiset_redirect + ".dll"). Antes o sys_getmodulehandle chamava ldr_load
+// direto (sem redirect) e imprimia "nao registrada" p/ apisets/kernelbase que na verdade
+// ja estao carregados como kernel32. Devolve 0 se registrado-mas-nao-carregado ou ausente.
+void* ldr_find_runtime(const char* name) {
+    if (!name) return 0;
+    const char* red = apiset_redirect(name);
+    int i = find_mod(red);
+    if (i < 0) { char buf[64]; if (append_dll_if_bare(red, buf, sizeof(buf))) i = find_mod(buf); }
+    return (i >= 0) ? s_mods[i].base : 0;                // base cacheada (0 = ainda nao mapeado)
 }
 
 // FASE 3g — carrega uma imagem PE a partir de BYTES em memoria (ex.: uma DLL lida do

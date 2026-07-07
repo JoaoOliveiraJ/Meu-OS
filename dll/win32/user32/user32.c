@@ -10,6 +10,23 @@ unsigned int _tls_index = 0;
 
 typedef unsigned long long ULL;
 
+// ---- TRACE de diagnostico (ring 3 -> serial via sys_write, syscall #1) ----
+// Ativado so p/ investigar o fluxo do explorer real; deixe 0 nos commits.
+#define U32_TRACE 0
+#if U32_TRACE
+static void u32_trace_s(const char* s){ long long r; __asm__ volatile("int $0x80":"=a"(r):"a"(1LL),"D"(s):"memory"); }
+static void u32_trace_h(const char* label, unsigned long long v){
+    char b[48]; int i=0; const char* hx="0123456789abcdef";
+    while(label[i] && i<28){ b[i]=label[i]; i++; }
+    b[i++]=' '; b[i++]='0'; b[i++]='x';
+    for(int s=60;s>=0;s-=4) b[i++]=hx[(v>>s)&0xf];
+    b[i++]='\n'; b[i]=0; u32_trace_s(b);
+}
+#else
+static void u32_trace_s(const char* s){ (void)s; }
+static void u32_trace_h(const char* label, unsigned long long v){ (void)label; (void)v; }
+#endif
+
 // ---- imports do ntdll (a unica camada que faz syscall) ----
 __declspec(dllimport) long  NtUserMessageBox(const char* text, const char* caption);
 __declspec(dllimport) long  NtUserRegisterClass(const char* className, void* wndProc);
@@ -32,12 +49,14 @@ __declspec(dllimport) long  NtUserGetCursorPos(void* out_point);
 __declspec(dllimport) long  NtUserSetCursorPos(int x, int y);
 
 // ---- mensagens (subset) ----
-#define WM_CREATE  0x0001
-#define WM_DESTROY 0x0002
-#define WM_PAINT   0x000F
-#define WM_QUIT    0x0012
-#define WM_KEYDOWN 0x0100
-#define WM_CHAR    0x0102
+#define WM_CREATE   0x0001
+#define WM_DESTROY  0x0002
+#define WM_PAINT    0x000F
+#define WM_QUIT     0x0012
+#define WM_NCCREATE 0x0081
+#define WM_NCDESTROY 0x0082
+#define WM_KEYDOWN  0x0100
+#define WM_CHAR     0x0102
 
 // ---- tipos (layout identico ao win32k.h do kernel) ----
 typedef struct { int x, y; } POINT;
@@ -140,6 +159,23 @@ static const char* class_ref_to_name_a(const char* c) {
     return c;                                                // string ascii direta
 }
 
+// ---- armazenamento REAL de Window Long Ptr (GWLP_USERDATA etc.) por (hwnd, indice) ----
+// O wndproc real da Worker Window do explorer (RVA 0x72e00) guarda o ponteiro do seu objeto
+// C++ em GWLP_USERDATA (-21) no WM_NCCREATE (via SetWindowLongPtrW) e o recupera em CADA
+// mensagem (GetWindowLongPtrW) p/ despachar ao metodo do objeto. Sem isto (era no-op -> 0) o
+// wndproc caia SEMPRE em DefWindowProc. Tabela simples por (hwnd, indice).
+#define U32_MAX_WLP 128
+static struct { void* hwnd; int idx; long long val; } g_wlp[U32_MAX_WLP];
+static long long wlp_get(void* hwnd, int idx) {
+    for (int i = 0; i < U32_MAX_WLP; i++) if (g_wlp[i].hwnd == hwnd && g_wlp[i].idx == idx) return g_wlp[i].val;
+    return 0;
+}
+static long long wlp_set(void* hwnd, int idx, long long v) {
+    for (int i = 0; i < U32_MAX_WLP; i++) if (g_wlp[i].hwnd == hwnd && g_wlp[i].idx == idx) { long long o = g_wlp[i].val; g_wlp[i].val = v; return o; }
+    for (int i = 0; i < U32_MAX_WLP; i++) if (!g_wlp[i].hwnd) { g_wlp[i].hwnd = hwnd; g_wlp[i].idx = idx; g_wlp[i].val = v; return 0; }
+    return 0;
+}
+
 // ============================================================================
 //  API
 // ============================================================================
@@ -164,11 +200,17 @@ __declspec(dllexport) unsigned short RegisterClassA(const WNDCLASSA* wc) {
     return (unsigned short)(U32_ATOM_BASE + slot);   // ATOM unico por classe (resolvivel em CreateWindow*)
 }
 
-// Implementacao comum: cria a janela com bgColor + flags (FASE 6). O kernel
-// preenche os campos novos; lembra o (hwnd -> wndproc) para o despacho local.
+// CREATESTRUCTW (layout Win32 x64) — o wndproc real le lpCreateParams no offset 0 (o
+// ponteiro do objeto C++ passado como lParam do CreateWindow). Preenchemos o suficiente.
+typedef struct { void* lpCreateParams; void* hInstance; void* hMenu; void* hwndParent;
+                 int cy, cx, y, x; unsigned style; const void* lpszName, *lpszClass; unsigned dwExStyle; } CREATESTRUCTW;
+
+// Implementacao comum: cria a janela com bgColor + flags (FASE 6). O kernel preenche os
+// campos novos; lembra o (hwnd -> wndproc) para o despacho local. `lpParam` = o lParam do
+// CreateWindow* (o explorer passa o ponteiro do objeto da Worker Window aqui).
 static void* create_window_impl(const char* className, const char* windowName,
         unsigned style, int x, int y, int w, int h, void* parent,
-        unsigned bgColor, unsigned flags) {
+        unsigned bgColor, unsigned flags, void* lpParam) {
     WNDPROC proc = find_wndproc(className);
     W32_CREATE c;
     c.className = className; c.windowName = windowName; c.style = style;
@@ -180,6 +222,20 @@ static void* create_window_impl(const char* className, const char* windowName,
     if (hwnd && g_nwin < MAX_WINDOWS) {
         g_windows[g_nwin].hwnd = hwnd; g_windows[g_nwin].proc = proc; g_nwin++;
     }
+    u32_trace_h("u32:create hwnd", (unsigned long long)hwnd);
+    u32_trace_h("u32:create proc", (unsigned long long)(void*)proc);
+    // Como no Windows real: envia WM_NCCREATE ao wndproc INLINE, ANTES de CreateWindow
+    // retornar. O wndproc do explorer associa aqui seu objeto C++ via SetWindowLongPtrW
+    // (GWLP_USERDATA) — o que passa a fazer o despacho (GetWindowLongPtrW) achar o objeto
+    // e chamar o handler real (antes caia em DefWindowProc). O retorno e' ignorado (nao
+    // falhamos a criacao) p/ nao regredir apps simples. WM_CREATE segue pela fila do kernel.
+    if (hwnd && proc) {
+        CREATESTRUCTW cs; unsigned char* z = (unsigned char*)&cs;
+        for (unsigned i = 0; i < sizeof(cs); i++) z[i] = 0;
+        cs.lpCreateParams = lpParam; cs.style = style; cs.x = x; cs.y = y; cs.cx = w; cs.cy = h;
+        cs.hwndParent = parent; cs.lpszName = windowName; cs.lpszClass = className;
+        proc(hwnd, WM_NCCREATE, 0, (ULL)(unsigned long long)(unsigned char*)&cs);
+    }
     return hwnd;
 }
 
@@ -187,9 +243,9 @@ static void* create_window_impl(const char* className, const char* windowName,
 __declspec(dllexport) void* CreateWindowExA(unsigned exStyle, const char* className,
         const char* windowName, unsigned style, int x, int y, int w, int h,
         void* parent, void* menu, void* inst, void* param) {
-    (void)exStyle; (void)menu; (void)inst; (void)param;
+    (void)exStyle; (void)menu; (void)inst;
     return create_window_impl(class_ref_to_name_a(className), windowName, style, x, y, w, h, parent,
-                              WND_BG_DEFAULT, 0);
+                              WND_BG_DEFAULT, 0, param);
 }
 
 // FASE 6 — CreateDesktopWindowA: janela de FUNDO (papel de parede). Cobre a tela,
@@ -198,7 +254,7 @@ __declspec(dllexport) void* CreateDesktopWindowA(const char* className,
         const char* title, unsigned bgColor, WNDPROC unusedProc) {
     (void)unusedProc;
     return create_window_impl(className, title, 0, 0, 0, 0, 0, 0,
-                              bgColor, WNDF_DESKTOP);
+                              bgColor, WNDF_DESKTOP, 0);
 }
 
 // FASE 6 — CreateConsoleWindowA: janela de CONSOLE (cmd). Area cliente escura
@@ -206,7 +262,7 @@ __declspec(dllexport) void* CreateDesktopWindowA(const char* className,
 __declspec(dllexport) void* CreateConsoleWindowA(const char* className,
         const char* title, int x, int y, int w, int h, unsigned bgColor) {
     return create_window_impl(className, title, 0, x, y, w, h, 0,
-                              bgColor, WNDF_CONSOLE);
+                              bgColor, WNDF_CONSOLE, 0);
 }
 
 __declspec(dllexport) int ShowWindow(void* hwnd, int cmdShow) {
@@ -221,6 +277,7 @@ __declspec(dllexport) int UpdateWindow(void* hwnd) {
 }
 
 __declspec(dllexport) int DestroyWindow(void* hwnd) {
+    u32_trace_h("u32:DestroyWindow ra", (unsigned long long)__builtin_return_address(0));
     return (int)NtUserDestroyWindow(hwnd);
 }
 
@@ -250,6 +307,7 @@ __declspec(dllexport) long long DispatchMessageA(const MSG* msg) {
 // DefWindowProcA: tratamento padrao. WM_DESTROY -> PostQuitMessage.
 __declspec(dllexport) long long DefWindowProcA(void* hwnd, unsigned msg, ULL wParam, ULL lParam) {
     (void)hwnd; (void)wParam; (void)lParam;
+    if (msg == WM_NCCREATE) return 1;   // real DefWindowProc: TRUE p/ prosseguir a criacao
     if (msg == WM_DESTROY) { NtUserPostQuitMessage(0); return 0; }
     return 0;
 }
@@ -457,9 +515,9 @@ __declspec(dllexport) int GetWindowBand(void* hwnd, unsigned* band){ (void)hwnd;
 // CreateWindowInBand), passando o ATOM devolvido por RegisterClassExW como className. Antes
 // era um stub -> 0, e o explorer, vendo hwnd==NULL, DESISTIA (wWinMain retornava 0). Agora
 // cria de verdade (mesmo caminho do CreateWindowExW), resolvendo o ATOM -> nome de classe.
-__declspec(dllexport) void* CreateWindowInBand(unsigned ex, const void* cls, const void* name, unsigned style, int x, int y, int w, int h, void* par, void* menu, void* inst, void* pm, unsigned band){ (void)ex;(void)menu;(void)inst;(void)pm;(void)band; return create_window_impl(class_ref_to_name_w(cls), u32_wpool(name), style, x, y, w, h, par, WND_BG_DEFAULT, 0); }
+__declspec(dllexport) void* CreateWindowInBand(unsigned ex, const void* cls, const void* name, unsigned style, int x, int y, int w, int h, void* par, void* menu, void* inst, void* pm, unsigned band){ (void)ex;(void)menu;(void)inst;(void)band; return create_window_impl(class_ref_to_name_w(cls), u32_wpool(name), style, x, y, w, h, par, WND_BG_DEFAULT, 0, pm); }
 // CreateWindowInBandEx: variante com typeFlags extra (mesma criacao; band+flags ignorados).
-__declspec(dllexport) void* CreateWindowInBandEx(unsigned ex, const void* cls, const void* name, unsigned style, int x, int y, int w, int h, void* par, void* menu, void* inst, void* pm, unsigned band, unsigned typeFlags){ (void)ex;(void)menu;(void)inst;(void)pm;(void)band;(void)typeFlags; return create_window_impl(class_ref_to_name_w(cls), u32_wpool(name), style, x, y, w, h, par, WND_BG_DEFAULT, 0); }
+__declspec(dllexport) void* CreateWindowInBandEx(unsigned ex, const void* cls, const void* name, unsigned style, int x, int y, int w, int h, void* par, void* menu, void* inst, void* pm, unsigned band, unsigned typeFlags){ (void)ex;(void)menu;(void)inst;(void)band;(void)typeFlags; return create_window_impl(class_ref_to_name_w(cls), u32_wpool(name), style, x, y, w, h, par, WND_BG_DEFAULT, 0, pm); }
 
 // ---- ordinais PRIVADOS/noname do user32 que o explorer real importa POR ORDINAL ----
 // Exportados nos ordinais da MS via user32.def (aditivo). Sem NOME publico na user32 real;
@@ -562,10 +620,11 @@ __declspec(dllexport) unsigned short RegisterClassExW(const WNDCLASSEXW* wc) { r
 
 __declspec(dllexport) void* CreateWindowExW(unsigned exStyle, const u16_* className, const u16_* windowName,
         unsigned style, int x, int y, int w, int h, void* parent, void* menu, void* inst, void* param) {
-    (void)exStyle; (void)menu; (void)inst; (void)param;
-    return create_window_impl(class_ref_to_name_w(className), u32_wpool(windowName), style, x, y, w, h, parent, WND_BG_DEFAULT, 0);
+    (void)exStyle; (void)menu; (void)inst;
+    return create_window_impl(class_ref_to_name_w(className), u32_wpool(windowName), style, x, y, w, h, parent, WND_BG_DEFAULT, 0, param);
 }
 __declspec(dllexport) long long DefWindowProcW(void* hwnd, unsigned msg, ULL wParam, ULL lParam) {
+    if (msg == WM_NCCREATE) return 1;   // real DefWindowProc: TRUE p/ prosseguir a criacao
     if (msg == WM_DESTROY) { NtUserPostQuitMessage(0); return 0; }
     (void)hwnd; (void)wParam; (void)lParam; return 0;
 }
@@ -584,6 +643,8 @@ __declspec(dllexport) long long DispatchMessageW(const MSG* msg) {
 }
 __declspec(dllexport) int PostMessageW(void* hwnd, unsigned msg, ULL w, ULL l) { return (int)NtUserPostMessage(hwnd, msg, w, l); }
 __declspec(dllexport) long long SendMessageW(void* hwnd, unsigned msg, ULL w, ULL l) {
+    u32_trace_h("u32:SendMsgW msg", (unsigned long long)msg);
+    u32_trace_h("u32:SendMsgW ra", (unsigned long long)__builtin_return_address(0));
     WNDPROC proc = wndproc_of(hwnd);   // SendMessage e' sincrono: chama o wndproc direto (ring 3)
     if (proc) return proc(hwnd, msg, w, l);
     return DefWindowProcW(hwnd, msg, w, l);
@@ -602,10 +663,15 @@ __declspec(dllexport) int MapWindowPoints(void* from, void* to, POINT* pts, unsi
 __declspec(dllexport) int GetWindowInfo(void* hwnd, void* pwi) { (void)hwnd; if(pwi){ unsigned char* b=(unsigned char*)pwi; for(int i=0;i<60;i++) b[i]=0; } return 1; }
 
 // ---- atributos de janela (GWL_*) ----
-__declspec(dllexport) long long GetWindowLongPtrW(void* hwnd, int idx) { (void)hwnd;(void)idx; return 0; }
-__declspec(dllexport) long long SetWindowLongPtrW(void* hwnd, int idx, long long v) { (void)hwnd;(void)idx;(void)v; return 0; }
-__declspec(dllexport) long GetWindowLongW(void* hwnd, int idx) { (void)hwnd;(void)idx; return 0; }
-__declspec(dllexport) long SetWindowLongW(void* hwnd, int idx, long v) { (void)hwnd;(void)idx;(void)v; return 0; }
+// Window Long Ptr REAIS (armazenamento por hwnd/indice em g_wlp) — GWLP_USERDATA e cia.
+__declspec(dllexport) long long GetWindowLongPtrW(void* hwnd, int idx) { return wlp_get(hwnd, idx); }
+__declspec(dllexport) long long SetWindowLongPtrW(void* hwnd, int idx, long long v) { return wlp_set(hwnd, idx, v); }
+__declspec(dllexport) long long GetWindowLongPtrA(void* hwnd, int idx) { return wlp_get(hwnd, idx); }
+__declspec(dllexport) long long SetWindowLongPtrA(void* hwnd, int idx, long long v) { return wlp_set(hwnd, idx, v); }
+__declspec(dllexport) long GetWindowLongW(void* hwnd, int idx) { return (long)wlp_get(hwnd, idx); }
+__declspec(dllexport) long SetWindowLongW(void* hwnd, int idx, long v) { return (long)wlp_set(hwnd, idx, (long long)v); }
+__declspec(dllexport) long GetWindowLongA(void* hwnd, int idx) { return (long)wlp_get(hwnd, idx); }
+__declspec(dllexport) long SetWindowLongA(void* hwnd, int idx, long v) { return (long)wlp_set(hwnd, idx, (long long)v); }
 
 // ---- props (janela -> dado). O explorer guarda ponteiros nas janelas. Tabela por (hwnd,nome). ----
 #define U32_MAX_PROPS 128

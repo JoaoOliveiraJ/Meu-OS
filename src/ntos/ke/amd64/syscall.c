@@ -710,10 +710,29 @@ static void sys_getmodulehandle(struct regs* r) {
 
 // NtGetProcAddress(void* module_base, const char* fn) -> endereco do export.
 // Apoia GetProcAddress: caminha a export table da imagem (loader/pe.c). Em RAX.
+// fn pode ser NOME (ponteiro >= 0x10000) OU ORDINAL (MAKEINTRESOURCEA: valor < 0x10000 no
+// low word). Antes tratava tudo como string -> um ordinal viraria deref de endereco ~N e
+// faltava (ou faltava por PF). Agora detecta o caso ordinal (ImageList_*/DPA_* do comctl32).
+#define GPA_TRACE 0   // 1 = loga cada GetProcAddress que FALHA (mapeia os pontos de entrada
+                      // que o explorer pede de dui70/comctl32 etc. -> lista nomeada do proximo
+                      // muro). Diagnostico; commitado em 0.
 static void sys_getprocaddress(struct regs* r) {
     void*       base = (void*)(uintptr_t)r->rdi;
     const char* fn   = (const char*)(uintptr_t)r->rsi;
-    void* addr = (base && fn) ? pe_get_export(base, fn) : 0;
+    void* addr = 0;
+    int is_ord = ((uintptr_t)fn < 0x10000);
+    if (base && fn) {
+        addr = is_ord ? pe_get_export_by_ordinal(base, (uint32_t)(uintptr_t)fn)
+                      : pe_get_export(base, fn);
+    }
+#if GPA_TRACE
+    if (base && fn && !addr) {
+        kputs("[gpa] MISS ");
+        if (is_ord) { kputs("#"); kput_dec((uint64_t)(uintptr_t)fn); }
+        else kputs(fn);
+        kputc('\n');
+    }
+#endif
     r->rax = (uint64_t)(uintptr_t)addr;
 }
 

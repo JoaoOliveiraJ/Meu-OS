@@ -328,6 +328,10 @@ $shcoreDef   = Join-Path $dll 'win32\shcore\shcore.def'
 #   por nome + 3 ordinais privados (#86/#126/#138 immersive/dark-mode) via uxtheme.def.
 $uxthemeSrc  = Join-Path $dll 'win32\uxtheme\uxtheme.c'
 $uxthemeDef  = Join-Path $dll 'win32\uxtheme\uxtheme.def'
+# Frente C (explorer real) — comctl32.dll: Common Controls v6 (init/versao/subclassing).
+$comctl32Src = Join-Path $dll 'win32\comctl32\comctl32.c'
+# Frente C (explorer real) — dui70.dll: DirectUI (ponto de apoio p/ LoadLibrary("dui70")).
+$dui70Src    = Join-Path $dll 'win32\dui70\dui70.c'
 # FASE 3f — testlib: DLL de teste carregada em RUNTIME (LoadLibrary + GetProcAddress).
 $testlibSrc  = Join-Path $dll 'win32\testlib\testlib.c'
 if (Test-Path $ntdllSrc) {
@@ -389,6 +393,20 @@ if (Test-Path $ntdllSrc) {
         & $zig cc @dc '-Wl,--image-base=0x5900000' '-Wl,--dynamicbase' `
             -o (Join-Path $out 'uxtheme.dll') $uxthemeSrc $uxthemeDef
         if ($LASTEXITCODE) { throw "uxtheme.dll falhou." }
+    }
+    # Frente C (explorer real) — comctl32.dll: Common Controls v6. ImageBase 0x5A00000
+    #   (livre, apos uxtheme 0x5900000). Autocontido -> caminho PMM+reloc limpo.
+    if (Test-Path $comctl32Src) {
+        & $zig cc @dc '-Wl,--image-base=0x5A00000' '-Wl,--dynamicbase' `
+            -o (Join-Path $out 'comctl32.dll') $comctl32Src
+        if ($LASTEXITCODE) { throw "comctl32.dll falhou." }
+    }
+    # Frente C (explorer real) — dui70.dll: DirectUI (ponto de apoio p/ LoadLibrary("dui70")
+    #   ter sucesso e revelar os pedidos de GetProcAddress). ImageBase 0x5B00000. Autocontido.
+    if (Test-Path $dui70Src) {
+        & $zig cc @dc '-Wl,--image-base=0x5B00000' '-Wl,--dynamicbase' `
+            -o (Join-Path $out 'dui70.dll') $dui70Src
+        if ($LASTEXITCODE) { throw "dui70.dll falhou." }
     }
     # FASE 3b (Frente 3) — ucrtbase.dll: CRT minimo (startup do mingw/UCRT). O loader
     #   redireciona os apisets api-ms-win-crt-* p/ ca. Importa ExitProcess do kernel32.

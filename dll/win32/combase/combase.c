@@ -64,19 +64,36 @@ static void dbg_wstr(const char* label, const unsigned short* w, unsigned wlen) 
     else { b[i++]='N'; b[i++]='U'; b[i++]='L'; b[i++]='L'; }
     b[i++]='\n'; b[i++]=0; dbg_puts(b);
 }
-// RE do vtable: stub por-slot que loga QUAL metodo o explorer chama no objeto universal.
-static void* universal_object(void);   // fwd (definido na secao do objeto universal)
-static void dbg_slot(int n) { char b[24]; int i=0; const char* p="[cb] univ slot "; while(*p)b[i++]=*p++; if(n>=10)b[i++]=(char)('0'+n/10); b[i++]=(char)('0'+n%10); b[i++]='\n'; b[i++]=0; dbg_puts(b); }
-// IInspectable (3-5: GetIids/GetRuntimeClassName/GetTrustLevel): loga e devolve E_NOTIMPL.
-#define USLI(n) static long usl##n(void* t){(void)t; dbg_slot(n); return (long)0x80004001L;}
-USLI(3)USLI(4)USLI(5)
-// Metodos de interface (6+): a maioria e getter propget (this, T** out). Loga, devolve um
-// objeto universal via o 2o arg (RDX) e S_OK -> o explorer segue e revela o proximo slot.
-#define USLG(n) static long usl##n(void* t, void** out){(void)t; dbg_slot(n); if(out)*out=universal_object(); return 0;}
-USLG(6)USLG(7)USLG(8)USLG(9)USLG(10)USLG(11)USLG(12)USLG(13)USLG(14)USLG(15)USLG(16)USLG(17)USLG(18)USLG(19)
+static void dbg_slot2(int n, int pos) { char b[32]; int i=0; const char* p="[cb] univ slot "; while(*p)b[i++]=*p++; if(n>=10)b[i++]=(char)('0'+n/10); b[i++]=(char)('0'+n%10); const char* q=" out@a"; while(*q)b[i++]=*q++; b[i++]=(char)('0'+pos); b[i++]='\n'; b[i++]=0; dbg_puts(b); }
 #else
 #define dbg_guid(a,b) ((void)0)
 #define dbg_wstr(a,b,c) ((void)0)
+#endif
+
+// ---- Preenchimento de out-param dos getters do objeto universal (comportamento REAL,
+// NAO diagnostico). Um getter COM/WinRT devolve a interface por um out-param T** que fica
+// em arg2 (RDX, getter comum) OU num arg POSTERIOR — ex.: um metodo de mapa MRT tem forma
+// M(this, iface, 0, 0, &out), com out em arg5 (stack). Se so preenchessemos RDX, o out
+// real ficaria NULO e o explorer derefaria NULL adiante (era o muro do MRT). Aqui achamos
+// o out-param REAL: o 1o dos args a2..a5 que aponta p/ um qword ZERADO, alinhado, em faixa
+// de usuario (a convencao COM zera o out ANTES da chamada; um input nunca e' um ponteiro
+// -p/-zero-alinhado valido). Escrevemos ali o proprio objeto universal, cujos metodos por
+// sua vez degradam igual. E' um preenchedor ESPECIFICO do objeto universal (nao um
+// catch-all de DLL): da' ao explorer uma interface WinRT valida em vez de NULL.
+static void* universal_object(void);   // fwd (definido na secao do objeto universal)
+static int cb_out_ok(void* p) { unsigned long long v=(unsigned long long)p; return v>=0x10000ULL && v<0x10000000ULL && ((v&7ULL)==0ULL); }
+static long univ_fill(void* self, void** a2, void** a3, void** a4, void** a5) {
+    (void)self;
+    void** cands[4] = { a2, a3, a4, a5 };
+    for (int i = 0; i < 4; i++) { void** p = cands[i]; if (cb_out_ok(p) && *p == 0) { *p = universal_object(); return 0; } }
+    return 0;
+}
+#if COMBASE_DBG
+// Versoes que LOGAM o slot chamado e delegam ao MESMO univ_fill do caminho real.
+#define USLI(n) static long usl##n(void* t){(void)t; dbg_slot2(n,0); return (long)0x80004001L;}
+USLI(3)USLI(4)USLI(5)
+#define USL(n) static long usl##n(void* s,void**a2,void**a3,void**a4,void**a5){ long r=univ_fill(s,a2,a3,a4,a5); dbg_slot2(n,0); return r; }
+USL(6)USL(7)USL(8)USL(9)USL(10)USL(11)USL(12)USL(13)USL(14)USL(15)USL(16)USL(17)USL(18)USL(19)USL(20)USL(21)USL(22)USL(23)USL(24)
 #endif
 
 // ---- arena bump (task memory + objetos + buffers de stream + HSTRING). Sem free real. ----
@@ -106,7 +123,7 @@ static HRESULT_ unk_qi(void* p, const GUID_* iid, void** ppv) {
 static HRESULT_ univ_QI(void* this_, const GUID_* riid, void** ppv) { (void)riid; if (!ppv) return E_POINTER_; *ppv = this_; return S_OK_; }
 static ULONG_   univ_AddRef(void* this_)  { (void)this_; return 2; }
 static ULONG_   univ_Release(void* this_) { (void)this_; return 1; }
-static HRESULT_ ret_notimpl(void* this_)  { (void)this_; return E_NOTIMPL_; }   // slots 3..63
+static HRESULT_ ret_notimpl(void* this_)  { (void)this_; return E_NOTIMPL_; }   // IInspectable 3..5
 static void*    g_univ_vtbl[64];
 static struct { void** lpVtbl; } g_univ_obj = { 0 };
 static int      g_univ_ready = 0;
@@ -115,12 +132,18 @@ static void univ_init(void) {
     g_univ_vtbl[0] = (void*)univ_QI;
     g_univ_vtbl[1] = (void*)univ_AddRef;
     g_univ_vtbl[2] = (void*)univ_Release;
-    for (int i = 3; i < 64; i++) g_univ_vtbl[i] = (void*)ret_notimpl;
+    // IInspectable (3-5: GetIids/GetRuntimeClassName/GetTrustLevel): E_NOTIMPL (seguro —
+    // NAO preenchemos: os outs sao um count/HSTRING/TrustLevel, nao uma interface).
+    for (int i = 3; i < 6; i++)  g_univ_vtbl[i] = (void*)ret_notimpl;
+    // Metodos de interface (6+): getters — preenchem o out-param REAL e devolvem S_OK, de
+    // modo que o explorer recebe uma interface WinRT valida (e nao NULL) em cada slot.
+    for (int i = 6; i < 64; i++) g_univ_vtbl[i] = (void*)univ_fill;
 #if COMBASE_DBG
     g_univ_vtbl[3]=(void*)usl3; g_univ_vtbl[4]=(void*)usl4; g_univ_vtbl[5]=(void*)usl5; g_univ_vtbl[6]=(void*)usl6;
     g_univ_vtbl[7]=(void*)usl7; g_univ_vtbl[8]=(void*)usl8; g_univ_vtbl[9]=(void*)usl9; g_univ_vtbl[10]=(void*)usl10;
     g_univ_vtbl[11]=(void*)usl11; g_univ_vtbl[12]=(void*)usl12; g_univ_vtbl[13]=(void*)usl13; g_univ_vtbl[14]=(void*)usl14;
     g_univ_vtbl[15]=(void*)usl15; g_univ_vtbl[16]=(void*)usl16; g_univ_vtbl[17]=(void*)usl17; g_univ_vtbl[18]=(void*)usl18; g_univ_vtbl[19]=(void*)usl19;
+    g_univ_vtbl[20]=(void*)usl20; g_univ_vtbl[21]=(void*)usl21; g_univ_vtbl[22]=(void*)usl22; g_univ_vtbl[23]=(void*)usl23; g_univ_vtbl[24]=(void*)usl24;
 #endif
     g_univ_obj.lpVtbl = g_univ_vtbl;
     g_univ_ready = 1;
@@ -481,30 +504,23 @@ __declspec(dllexport) HRESULT_ WindowsPromoteStringBuffer(void* bufferHandle, vo
 }
 __declspec(dllexport) HRESULT_ WindowsDeleteStringBuffer(void* bufferHandle) { (void)bufferHandle; return S_OK_; }   // bump: descarta
 
-// ---- WinRT runtime (Ro*). Ativacao: objeto universal (IInspectable degrada em E_NOTIMPL). ----
+// ---- WinRT runtime (Ro*). Ativacao: devolve o objeto universal (mesma politica do
+// CoCreateInstance). Agora que os getters (univ_fill) preenchem o out-param REAL, a
+// factory/instancia respondem a fabrica MRT (get_MainResourceMap, etc.) com interfaces
+// validas em vez de NULL — o explorer roda a init COMPLETA de recursos e SEGUE ate o
+// wWinMain. (Antes devolviamos REGDB_E_CLASSNOTREG porque o objeto universal com metodos
+// E_NOTIMPL travava o MRT; isso mudou com o univ_fill.) ----
 __declspec(dllexport) HRESULT_ RoInitialize(unsigned initType) { (void)initType; return S_OK_; }
 __declspec(dllexport) void     RoUninitialize(void) { }
-// WinRT activation: nao temos classes WinRT registradas -> falha LIMPA (REGDB_E_CLASSNOTREG).
-// Devolver um objeto universal aqui "sucedia" a ativacao mas os metodos davam E_NOTIMPL,
-// o que trava o fallback (o explorer tenta MRT e, se falhar limpo, cai p/ recursos classicos).
-#define REGDB_E_CLASSNOTREG ((HRESULT_)0x80040154L)
 __declspec(dllexport) HRESULT_ RoActivateInstance(void* activatableClassId, void** instance) {
     unsigned int L=0; const WCHAR_* nm=WindowsGetStringRawBuffer(activatableClassId,&L); dbg_wstr("[cb] RoActivateInstance class=", nm, L); (void)nm; (void)L;
     if (!instance) return E_POINTER_;
-#if COMBASE_DBG
-    *instance = universal_object(); return S_OK_;   // RE: deixa o explorer chamar metodos (loga slot)
-#else
-    *instance = 0; return REGDB_E_CLASSNOTREG;
-#endif
+    *instance = universal_object(); return S_OK_;
 }
 __declspec(dllexport) HRESULT_ RoGetActivationFactory(void* activatableClassId, const GUID_* iid, void** factory) {
     unsigned int L=0; const WCHAR_* nm=WindowsGetStringRawBuffer(activatableClassId,&L); dbg_wstr("[cb] RoGetActivationFactory class=", nm, L); dbg_guid("[cb]            factory-iid=", iid); (void)nm; (void)L; (void)iid;
     if (!factory) return E_POINTER_;
-#if COMBASE_DBG
-    *factory = universal_object(); return S_OK_;    // RE: deixa o explorer chamar metodos da factory (loga slot)
-#else
-    *factory = 0; return REGDB_E_CLASSNOTREG;
-#endif
+    *factory = universal_object(); return S_OK_;
 }
 
 // ---- WinRT error info (mecanismo de erro rico) — no-op honesto aqui ----

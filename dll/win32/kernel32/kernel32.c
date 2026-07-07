@@ -490,6 +490,48 @@ __declspec(dllexport) int TerminateProcess(void* hproc, unsigned code) {
     (void)hproc; NtTerminateProcess(code); return 1;   // (so o processo corrente por ora)
 }
 
+// --- SList (api-ms-win-core-interlocked): o CRT do explorer inicializa um SList head
+//     na startup. Impl correta p/ o modelo single-threaded (head@[0], depth@[8]). ---
+__declspec(dllexport) void InitializeSListHead(void* h) {
+    if (h) { ((void**)h)[0] = 0; ((unsigned long long*)h)[1] = 0; }
+}
+__declspec(dllexport) void* InterlockedPushEntrySList(void* h, void* entry) {
+    if (!h || !entry) return 0;
+    void* old = ((void**)h)[0]; ((void**)entry)[0] = old; ((void**)h)[0] = entry;
+    ((unsigned long long*)h)[1]++; return old;
+}
+__declspec(dllexport) void* InterlockedPopEntrySList(void* h) {
+    if (!h) return 0; void* top = ((void**)h)[0];
+    if (top) { ((void**)h)[0] = ((void**)top)[0]; ((unsigned long long*)h)[1]--; } return top;
+}
+__declspec(dllexport) void* InterlockedFlushSList(void* h) {
+    if (!h) return 0; void* top = ((void**)h)[0];
+    ((void**)h)[0] = 0; ((unsigned long long*)h)[1] = 0; return top;
+}
+__declspec(dllexport) unsigned short QueryDepthSList(void* h) {
+    return h ? (unsigned short)((unsigned long long*)h)[1] : 0;
+}
+
+// --- Startup / modulo / cmdline (o CRT do explorer usa na init, logo apos o SList) ---
+__declspec(dllexport) void* GetModuleHandleW(const K32_WCHAR* name) {
+    if (!name) {   // NULL = o proprio .exe: PEB->ImageBaseAddress (gs:[0x60] -> PEB -> +0x10)
+        void* peb; __asm__ volatile ("movq %%gs:0x60, %0" : "=r"(peb));
+        return *(void**)((char*)peb + 0x10);
+    }
+    char n[260]; int i = 0; while (name[i] && i < 259) { n[i] = (char)name[i]; i++; } n[i] = 0;
+    return GetModuleHandleA(n);
+}
+__declspec(dllexport) int GetModuleHandleExW(unsigned flags, const K32_WCHAR* name, void** out) {
+    (void)flags; if (out) *out = GetModuleHandleW(name); return out ? 1 : 0;
+}
+static K32_WCHAR g_cmdlineW[] = { 'e','x','p','l','o','r','e','r','.','e','x','e', 0 };
+__declspec(dllexport) K32_WCHAR* GetCommandLineW(void) { return g_cmdlineW; }
+__declspec(dllexport) char*      GetCommandLineA(void) { static char c[] = "explorer.exe"; return c; }
+__declspec(dllexport) void GetStartupInfoW(void* si) {
+    if (!si) return; char* p = (char*)si; for (int i = 0; i < 104; i++) p[i] = 0;
+    *(unsigned*)p = 104;   // cb = sizeof(STARTUPINFOW)
+}
+
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }

@@ -178,6 +178,62 @@ __declspec(dllexport) int BitBlt(void* dst, int xd, int yd, int wd, int hd, void
     (void)dst;(void)xd;(void)yd;(void)wd;(void)hd;(void)src;(void)xs;(void)ys;(void)rop; return 1;
 }
 
+// ---- bitmaps + DIB (double-buffer off-screen do desenho da taskbar/desktop) ----
+// Bits do CreateDIBSection via NtVirtualAlloc (NAO um array estatico: um BSS grande estoura
+// o mapeamento de usuario de 2 MiB que o loader da' a uma DLL de base baixa -> travava o
+// boot). VirtualAlloc devolve memoria de usuario do PMM, dimensionada por DIB.
+__declspec(dllimport) void* NtVirtualAlloc(unsigned long long size);
+
+__declspec(dllexport) void* CreateCompatibleBitmap(void* hdc, int w, int h) { (void)hdc;(void)w;(void)h; return gdi_handle(); }
+__declspec(dllexport) void* CreateBitmap(int w, int h, unsigned planes, unsigned bpp, const void* bits) { (void)w;(void)h;(void)planes;(void)bpp;(void)bits; return gdi_handle(); }
+__declspec(dllexport) void* CreateDIBitmap(void* hdc, const void* hdr, unsigned flags, const void* bits, const void* bmi, unsigned usage) { (void)hdc;(void)hdr;(void)flags;(void)bits;(void)bmi;(void)usage; return gdi_handle(); }
+// CreateDIBSection: devolve um HBITMAP E um ponteiro p/ os bits (ppvBits). Extrai w/h/bpp do
+// BITMAPINFOHEADER (biWidth@4, biHeight@8, biBitCount@14) p/ dimensionar o buffer real.
+__declspec(dllexport) void* CreateDIBSection(void* hdc, const void* pbmi, unsigned usage, void** ppvBits, void* hSection, unsigned offset) {
+    (void)hdc; (void)usage; (void)hSection; (void)offset;
+    int w = 0, h = 0; unsigned bpp = 32;
+    if (pbmi) { const unsigned char* p = (const unsigned char*)pbmi;
+        w = *(const int*)(p + 4); h = *(const int*)(p + 8); bpp = *(const unsigned short*)(p + 14); if (!bpp) bpp = 32; }
+    if (w < 0) w = -w; if (h < 0) h = -h;
+    unsigned long long stride = ((unsigned long long)w * bpp + 31) / 32 * 4;
+    unsigned long long cb = stride * (h ? (unsigned)h : 1);
+    if (cb < 0x1000) cb = 0x1000;
+    void* bits = NtVirtualAlloc(cb);                    // buffer REAL (PMM), dimensionado
+    if (ppvBits) *ppvBits = bits;                       // o explorer desenha aqui
+    return gdi_handle();
+}
+__declspec(dllexport) int GetDIBits(void* hdc, void* hbm, unsigned start, unsigned lines, void* bits, void* bmi, unsigned usage) { (void)hdc;(void)hbm;(void)start;(void)bits;(void)bmi;(void)usage; return (int)lines; }
+__declspec(dllexport) int SetDIBits(void* hdc, void* hbm, unsigned start, unsigned lines, const void* bits, const void* bmi, unsigned usage) { (void)hdc;(void)hbm;(void)start;(void)bits;(void)bmi;(void)usage; return (int)lines; }
+__declspec(dllexport) int GetObjectA(void* obj, int cb, void* buf) { (void)obj; if (buf && cb > 0) gzero(buf, (unsigned)cb); return cb; }
+
+// ---- blend/gradient/transparente + raster (helpers de desenho da taskbar/menu) ----
+// Framebuffer unico: reportam sucesso sem compor pixels (degrada sem crashar). Gdi*
+// (internos do gdi32) e os nomes de msimg32 (AlphaBlend/GradientFill/TransparentBlt).
+__declspec(dllexport) int GdiAlphaBlend(void* dst, int xd,int yd,int wd,int hd, void* src, int xs,int ys,int ws,int hs, unsigned bf) { (void)dst;(void)xd;(void)yd;(void)wd;(void)hd;(void)src;(void)xs;(void)ys;(void)ws;(void)hs;(void)bf; return 1; }
+__declspec(dllexport) int AlphaBlend(void* dst, int xd,int yd,int wd,int hd, void* src, int xs,int ys,int ws,int hs, unsigned bf) { (void)dst;(void)xd;(void)yd;(void)wd;(void)hd;(void)src;(void)xs;(void)ys;(void)ws;(void)hs;(void)bf; return 1; }
+__declspec(dllexport) int GdiGradientFill(void* hdc, void* pv, unsigned nv, void* pm, unsigned nm, unsigned mode) { (void)hdc;(void)pv;(void)nv;(void)pm;(void)nm;(void)mode; return 1; }
+__declspec(dllexport) int GradientFill(void* hdc, void* pv, unsigned nv, void* pm, unsigned nm, unsigned mode) { (void)hdc;(void)pv;(void)nv;(void)pm;(void)nm;(void)mode; return 1; }
+__declspec(dllexport) int GdiTransparentBlt(void* dst, int xd,int yd,int wd,int hd, void* src, int xs,int ys,int ws,int hs, unsigned key) { (void)dst;(void)xd;(void)yd;(void)wd;(void)hd;(void)src;(void)xs;(void)ys;(void)ws;(void)hs;(void)key; return 1; }
+__declspec(dllexport) int TransparentBlt(void* dst, int xd,int yd,int wd,int hd, void* src, int xs,int ys,int ws,int hs, unsigned key) { (void)dst;(void)xd;(void)yd;(void)wd;(void)hd;(void)src;(void)xs;(void)ys;(void)ws;(void)hs;(void)key; return 1; }
+__declspec(dllexport) int PatBlt(void* hdc, int x,int y,int w,int h, unsigned rop) { (void)hdc;(void)x;(void)y;(void)w;(void)h;(void)rop; return 1; }
+__declspec(dllexport) int StretchDIBits(void* hdc, int xd,int yd,int wd,int hd, int xs,int ys,int ws,int hs, const void* bits, const void* bmi, unsigned usage, unsigned rop) { (void)hdc;(void)xd;(void)yd;(void)wd;(void)hd;(void)xs;(void)ys;(void)ws;(void)hs;(void)bits;(void)bmi;(void)usage;(void)rop; return hd; }
+__declspec(dllexport) int SetDIBitsToDevice(void* hdc, int xd,int yd, unsigned w,unsigned h, int xs,int ys, unsigned start, unsigned lines, const void* bits, const void* bmi, unsigned usage) { (void)hdc;(void)xd;(void)yd;(void)w;(void)h;(void)xs;(void)ys;(void)start;(void)bits;(void)bmi;(void)usage; return (int)lines; }
+
+// ---- estado do DC + primitivas (usadas no desenho classico do chrome) ----
+__declspec(dllexport) int SaveDC(void* hdc) { (void)hdc; return 1; }
+__declspec(dllexport) int RestoreDC(void* hdc, int n) { (void)hdc; (void)n; return 1; }
+__declspec(dllexport) int SetBkMode(void* hdc, int mode) { (void)hdc; (void)mode; return 1; }      // devolve modo anterior (OPAQUE)
+__declspec(dllexport) unsigned SetBkColor(void* hdc, unsigned c) { (void)hdc; (void)c; return 0; }
+__declspec(dllexport) unsigned GetBkColor(void* hdc) { (void)hdc; return 0x00FFFFFF; }
+__declspec(dllexport) unsigned GetTextColor(void* hdc) { int c = textcolor_of(hdc); return c < 0 ? 0 : (unsigned)c; }
+__declspec(dllexport) int GetStretchBltMode(void* hdc) { (void)hdc; return 1; }
+__declspec(dllexport) int IntersectClipRect(void* hdc, int l,int t,int r,int b) { (void)hdc;(void)l;(void)t;(void)r;(void)b; return GDI_SIMPLEREGION; }
+__declspec(dllexport) int ExtSelectClipRgn(void* hdc, void* rgn, int mode) { (void)hdc;(void)rgn;(void)mode; return GDI_SIMPLEREGION; }
+__declspec(dllexport) void* CreatePen(int style, int width, unsigned color) { (void)style;(void)width;(void)color; return gdi_handle(); }
+__declspec(dllexport) int MoveToEx(void* hdc, int x, int y, void* ppt) { (void)hdc; if (ppt) { ((int*)ppt)[0]=x; ((int*)ppt)[1]=y; } return 1; }
+__declspec(dllexport) int LineTo(void* hdc, int x, int y) { (void)hdc; (void)x; (void)y; return 1; }
+__declspec(dllexport) unsigned SetPixel(void* hdc, int x, int y, unsigned c) { (void)hdc;(void)x;(void)y; return c; }
+
 int DllMain(void* h, unsigned reason, void* reserved) {
     (void)h; (void)reason; (void)reserved; return 1;
 }

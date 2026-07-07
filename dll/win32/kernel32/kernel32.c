@@ -818,6 +818,23 @@ __declspec(dllexport) unsigned short GetUserDefaultLangID(void) { return 0x0409;
 __declspec(dllexport) unsigned short GetUserDefaultUILanguage(void) { return 0x0409; }
 __declspec(dllexport) int GetUserDefaultLocaleName(wchar16* buf, int len) { k32_asctow(buf, "en-US", len); return (int)k32_wlen(buf)+1; }
 __declspec(dllexport) int GetUserDefaultGeoName(wchar16* buf, int len) { k32_asctow(buf, "US", len); return (int)k32_wlen(buf)+1; }
+
+// MUI: lista de idiomas de UI preferidos (multi-string dupla-nula). O explorer consulta na
+// init da shell. Honesto: um idioma, "en-US". Semantica de consulta-de-tamanho (pBuf NULL ->
+// devolve o tamanho necessario) + preenchimento "en-US\0\0".
+static int k32_pref_ui_langs(unsigned long* pNum, wchar16* pBuf, unsigned long* pcch) {
+    const unsigned long need = 7;                 // L"en-US"(5) + '\0' + '\0' duplo
+    if (pNum) *pNum = 1;
+    if (!pBuf) { if (pcch) *pcch = need; return 1; }             // consulta de tamanho
+    if (!pcch || *pcch < need) { if (pcch) *pcch = need; return 0; }  // buffer pequeno -> FALSE
+    static const char s[] = "en-US";
+    int i = 0; for (; s[i]; i++) pBuf[i] = (wchar16)s[i]; pBuf[i++] = 0; pBuf[i] = 0;
+    *pcch = need; return 1;
+}
+__declspec(dllexport) int GetUserPreferredUILanguages(unsigned fl, unsigned long* n, wchar16* b, unsigned long* c) { (void)fl; return k32_pref_ui_langs(n, b, c); }
+__declspec(dllexport) int GetSystemPreferredUILanguages(unsigned fl, unsigned long* n, wchar16* b, unsigned long* c) { (void)fl; return k32_pref_ui_langs(n, b, c); }
+__declspec(dllexport) int GetProcessPreferredUILanguages(unsigned fl, unsigned long* n, wchar16* b, unsigned long* c) { (void)fl; return k32_pref_ui_langs(n, b, c); }
+__declspec(dllexport) int GetThreadPreferredUILanguages(unsigned fl, unsigned long* n, wchar16* b, unsigned long* c) { (void)fl; return k32_pref_ui_langs(n, b, c); }
 __declspec(dllexport) int GetDateFormatW(unsigned loc, unsigned flags, const void* st, const wchar16* fmt, wchar16* buf, int len) { (void)loc;(void)flags;(void)st;(void)fmt; k32_asctow(buf, "07/07/2026", len); return (int)k32_wlen(buf)+1; }
 __declspec(dllexport) int GetDateFormatEx(const wchar16* loc, unsigned flags, const void* st, const wchar16* fmt, wchar16* buf, int len, const wchar16* cal) { (void)loc;(void)flags;(void)st;(void)fmt;(void)cal; k32_asctow(buf, "07/07/2026", len); return (int)k32_wlen(buf)+1; }
 __declspec(dllexport) int GetTimeFormatEx(const wchar16* loc, unsigned flags, const void* st, const wchar16* fmt, wchar16* buf, int len) { (void)loc;(void)flags;(void)st;(void)fmt; k32_asctow(buf, "12:00:00", len); return (int)k32_wlen(buf)+1; }

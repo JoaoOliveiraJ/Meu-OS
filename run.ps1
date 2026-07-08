@@ -72,10 +72,23 @@ $scenarios = @{
                        'ucrtbase.dll', 'combase.dll', 'msvcp_win.dll', 'shell32.dll', 'shcore.dll',
                        'dxgi.dll', 'uxtheme.dll', 'comctl32.dll', 'dui70.dll', 'dwmapi.dll',
                        'explorerreal.exe')
+    # DESFILE COMPLETO de testes/demos (o antigo padrao). DLLs + drivers + apps de teste
+    # (test/ioctl/sysinfo/pipe*/cmd/guiapp/dx*/...) + shell CASEIRO (csrss/winlogon/explorer
+    # caseiro/desktop/win10ui). Util p/ exercitar os subsistemas do kernel, mas POLUI o log e
+    # a tela — por isso NAO e' mais o padrao. Use explicitamente:  .\run.ps1 -Scenario full
+    'full' = @('ntdll.dll', 'kernel32.dll', 'user32.dll', 'gdi32.dll', 'advapi32.dll',
+               'dxgi.dll', 'd3d11.dll', 'd3d12.dll', 'd2d1.dll', 'dwrite.dll', 'dxcore.dll',
+               'ddraw.dll', 'd3d9.dll', 'mmdevapi.dll', 'Audioses.dll', 'dsound.dll', 'winmm.dll',
+               'ws2_32.dll', 'secur32.dll', 'credui.dll',
+               'ioctldriver.sys', 'mydriver.sys', 'calller.sys',
+               'test.exe', 'ioctlapp.exe', 'conhello.exe', 'test32.exe', 'sysinfo.exe',
+               'pipeserver.exe', 'pipeclient.exe', 'cmd.exe', 'guiapp.exe', 'dxdemo.exe',
+               'd3d11demo.exe', 'csrss.exe', 'winlogon.exe', 'win10ui.exe', 'desktop.exe',
+               'explorer.exe')
 }
-if ($Scenario -and $Scenario -ne 'full') {
+if ($Scenario) {
     if (-not $scenarios.ContainsKey($Scenario)) {
-        throw "Cenario '$Scenario' desconhecido. Opcoes: $(($scenarios.Keys | Sort-Object) -join ', '), full"
+        throw "Cenario '$Scenario' desconhecido. Opcoes: $(($scenarios.Keys | Sort-Object) -join ', ')"
     }
     if (-not $Modules -or $Modules.Count -eq 0) {
         $Modules = @()
@@ -89,32 +102,13 @@ if ($Scenario -and $Scenario -ne 'full') {
     }
 }
 
-# Modulos a carregar. Default = os exemplos compilados em build\.
+# Modulos a carregar. PADRAO (sem -Scenario e sem -Modules) = o explorer.exe REAL (a missao),
+# LIMPO — SEM o desfile de apps de teste/demo (cmd/guiapp/dx*/sysinfo/pipe*/...) e SEM o shell
+# CASEIRO (csrss/winlogon/explorer caseiro/desktop) que poluiam o log e a tela. Para o desfile
+# completo de testes use `.\run.ps1 -Scenario full`; para o shell caseiro `-Scenario desktop`.
 if (-not $Modules -or $Modules.Count -eq 0) {
     $Modules = @()
-    # Ordem: DLLs (sob demanda), depois DRIVERS (criam dispositivos), depois APPS.
-    # FASE 9.4: ddraw.dll + d3d9.dll entram com as demais DLLs (carregadas sob
-    # demanda quando dxdemo.exe importa). dxdemo.exe vem ENTRE guiapp e desktop
-    # para nao quebrar a sequencia esperada (desktop fica por ultimo e o
-    # framebuffer final exibe o desktop completo, igual antes).
-    # FASE 9.10 — DLLs do stack DX moderno (dxgi + d3d11 + d3d12) precisam ser
-    # registradas para o loader resolver as imports da ddraw.dll (que agora
-    # delega para d3d11 no compat mode Windows 10+) e do app d3d11demo.exe.
-    foreach ($d in 'ntdll.dll', 'kernel32.dll', 'user32.dll', 'gdi32.dll', 'advapi32.dll',
-                    'dxgi.dll', 'd3d11.dll', 'd3d12.dll',
-                    'd2d1.dll', 'dwrite.dll', 'dxcore.dll',
-                    'ddraw.dll', 'd3d9.dll',
-                    'mmdevapi.dll', 'Audioses.dll', 'dsound.dll', 'winmm.dll',
-                    'ws2_32.dll',
-                    'secur32.dll', 'credui.dll',
-                    'ioctldriver.sys', 'mydriver.sys', 'calller.sys',
-                    'test.exe', 'ioctlapp.exe',
-                    'conhello.exe', 'test32.exe', 'sysinfo.exe', 'pipeserver.exe', 'pipeclient.exe',
-                    'cmd.exe', 'guiapp.exe', 'dxdemo.exe', 'd3d11demo.exe',
-                    'csrss.exe', 'winlogon.exe', 'win10ui.exe',
-                    'desktop.exe',
-                    'explorer.exe') {   # POR ULTIMO: shell ring-3 persistente
-                                        # (nao sai; segura o boot no seu loop)
+    foreach ($d in $scenarios['explorerreal']) {
         $p = Join-Path $build $d
         if (Test-Path $p) { $Modules += $p }
     }

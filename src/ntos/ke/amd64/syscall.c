@@ -17,6 +17,7 @@
 #include "ke/amd64/gdt.h"      // tss_get_rsp0 / tss_set_rsp0 (segunda pilha de kernel)
 #include "mm/paging.h"         // mm_get_cr3 / mm_switch_cr3
 #include "ke/amd64/usermode.h" // usermode_set_cmdline (argv do filho, Fase 4c)
+#include "ke/sched.h"          // ki_launch_ring3_thread / ki_thread_is_terminated / ki_yield_processor
 
 // Device de volume NTFS (ntfs_fs.c) — para rotear NtCreateFile/Read/QueryDir.
 PDEVICE_OBJECT ntfs_fs_volume_device(void);
@@ -359,20 +360,21 @@ static void sys_createprocess(struct regs* r) {
 }
 
 // NtCreateThread(out HANDLE*, HANDLE process, void* start) — cria um ETHREAD
-// no processo dado (ou no processo corrente se process==0). Nao agenda ainda.
-// FRENTE THREADS — tabela de workers ring-3 PENDENTES. CreateThread(start,param) registra
-// aqui; o 1o WaitForSingleObject sobre o handle do worker RODA o threadproc (usermode_run_
-// worker), que vira a thread ring-3 corrente (modelo cooperativo — ver usermode.c). Assim o
-// explorer real, cujo wWinMain bloqueia no ~WorkerWindow em WaitForSingleObject(worker_thread),
-// PERSISTE em vez de sair. Pequena (o explorer cria 1 worker no caminho atual).
-static struct { HANDLE h; uint64_t start; uint64_t param; int ran; } g_ring3_threads[8];
+// no processo dado (ou no processo corrente se process==0).
+// FRENTE THREADS RING-3 PREEMPTIVAS — tabela handle->KTHREAD. CreateThread(start,param)
+// LANCA agora uma thread ring-3 PREEMPTIVA de verdade (ki_launch_ring3_thread cria um KTHREAD
+// que roda start(param) em ring 3, escalonado pelo timer LADO A LADO com a thread principal).
+// Guardamos o par (handle, KTHREAD) p/ o WaitForSingleObject(handle) saber em qual thread
+// esperar. O explorer real cria a thread da Worker Window DURANTE o wWinMain e SEGUE rodando;
+// as duas correm concorrentes (nao mais o modelo cooperativo que congelava a principal).
+static struct { HANDLE h; ki_thread_t* kt; } g_ring3_threads[16];
 static int g_ring3_count = 0;
 
 static void sys_createthread(struct regs* r) {
     HANDLE*  out   = (HANDLE*)(uintptr_t)r->rdi;
     HANDLE   hproc = (HANDLE)(uintptr_t)r->rsi;
     uint64_t start = (uint64_t)r->rdx;
-    uint64_t param = (uint64_t)r->r10;   // NOVO: 4o arg (lpParameter do CreateThread)
+    uint64_t param = (uint64_t)r->r10;   // 4o arg (lpParameter do CreateThread)
 
     PEPROCESS p = hproc ? (PEPROCESS)ob_handle_to_object(hproc, OB_TYPE_PROCESS)
                         : PsGetCurrentProcess();
@@ -382,14 +384,17 @@ static void sys_createthread(struct regs* r) {
     if (!t) { if (out) *out = 0; r->rax = (uint64_t)(uint32_t)STATUS_UNSUCCESSFUL; return; }
     HANDLE h = ob_create_handle(t);
     if (out) *out = h;
-    // Registra o worker ring-3 (rodado sob demanda no 1o WaitForSingleObject sobre 'h').
-    if (start && g_ring3_count < 8) {
-        g_ring3_threads[g_ring3_count].h     = h;
-        g_ring3_threads[g_ring3_count].start = start;
-        g_ring3_threads[g_ring3_count].param = param;
-        g_ring3_threads[g_ring3_count].ran   = 0;
-        g_ring3_count++;
-        kputs("[thread] CreateThread REGISTRADO: start="); kput_hex(start);
+
+    // LANCA a thread ring-3 preemptiva JA (nao mais adiado ao WaitForSingleObject). Ela
+    // roda concorrente com a principal. Guarda handle->KTHREAD p/ o wait encontra-la.
+    if (start) {
+        ki_thread_t* kt = ki_launch_ring3_thread(start, param);
+        if (kt && g_ring3_count < 16) {
+            g_ring3_threads[g_ring3_count].h  = h;
+            g_ring3_threads[g_ring3_count].kt = kt;
+            g_ring3_count++;
+        }
+        kputs("[thread] CreateThread -> thread ring-3 preemptiva LANCADA: start="); kput_hex(start);
         kputs(" param="); kput_hex(param); kputs(" handle="); kput_hex((uint64_t)(uintptr_t)h); kputc('\n');
     }
     r->rax = (uint64_t)(uint32_t)STATUS_SUCCESS;
@@ -412,53 +417,52 @@ static void sys_terminateprocess(struct regs* r) {
     r->rax = (uint64_t)(uint32_t)STATUS_SUCCESS;
 }
 
-// NtWaitForSingleObject(HANDLE, uint32_t timeout_ms). Sem escalonador ainda:
-// retorna imediatamente STATUS_SUCCESS (objeto considerado "sinalizado").
-extern void usermode_run_worker(uint64_t start, uint64_t param);   // usermode.c
-
+// NtWaitForSingleObject(HANDLE, uint32_t timeout_ms).
+// FRENTE THREADS RING-3 PREEMPTIVAS: se o handle e' de uma thread ring-3 que LANCAMOS,
+// esperamos ela TERMINAR de verdade. A thread principal roda sobre a idle/boot, que NAO
+// pode bloquear no dispatcher (ki_can_block=false — ela e' o fallback do scheduler). Entao
+// esperamos COOPERATIVAMENTE: cede a CPU (ki_yield_processor) em loop enquanto a worker nao
+// terminou. Cada yield roda a worker (e os demais kthreads) via o scheduler; quando a worker
+// retorna (-> sys_thread_exit -> TERMINATED), o loop ve e devolve STATUS_SUCCESS.
+//
+// Consequencia p/ o explorer: se a thread da Worker Window RODA UM LOOP INFINITO (pump de
+// mensagens), ela NUNCA termina -> a principal fica cedendo aqui p/ SEMPRE -> o processo
+// PERSISTE (e a worker segue pumpando/desenhando). Se ela so faz init e retorna (o caso
+// atual, rax=0), o wait devolve e a principal segue o fluxo dela. e' a semantica correta
+// do WaitForSingleObject(INFINITE): retorna quando o objeto (thread) sinaliza (termina).
 static void sys_waitforsingleobject(struct regs* r) {
     HANDLE h = (HANDLE)(uintptr_t)r->rdi;
-    (void)r->rsi;   // timeout ignorado por ora
-    // FRENTE THREADS: se e' o handle de um worker ring-3 ainda NAO rodado, RODA o threadproc
-    // agora — ele vira a thread ring-3 corrente e NAO retorna (a thread principal fica "presa"
-    // aqui, exatamente como o WaitForSingleObject(worker_thread, INFINITE) do ~WorkerWindow do
-    // explorer). Efeito: o processo PERSISTE (nao chega ao DestroyWindow/ExitProcess).
+    (void)r->rsi;   // timeout: tratamos como INFINITE (o explorer usa INFINITE aqui)
     for (int i = 0; i < g_ring3_count; i++) {
-        if (g_ring3_threads[i].h == h && !g_ring3_threads[i].ran && g_ring3_threads[i].start) {
-            g_ring3_threads[i].ran = 1;
-            kputs("[thread] WaitForSingleObject sobre worker -> rodando threadproc ring-3 (processo persiste)\n");
-            usermode_run_worker(g_ring3_threads[i].start, g_ring3_threads[i].param);  // NAO retorna
-            return;   // (defensivo) se voltar, cai no sucesso abaixo
+        if (g_ring3_threads[i].h == h && g_ring3_threads[i].kt) {
+            kputs("[thread] WaitForSingleObject: esperando thread ring-3 terminar (yield cooperativo)\n");
+            while (!ki_thread_is_terminated(g_ring3_threads[i].kt)) {
+                ki_yield_processor();   // cede a CPU -> roda a worker + kthreads
+            }
+            kputs("[thread] WaitForSingleObject: thread ring-3 terminou -> WAIT_OBJECT_0\n");
+            r->rax = (uint64_t)(uint32_t)STATUS_SUCCESS;
+            return;
         }
     }
     r->rax = (uint64_t)(uint32_t)STATUS_SUCCESS;
 }
 
-// FRENTE THREADS (diagnostico + persistencia) — sys_worker_returned(retval).
-// Chamado pelo STUB de retorno que usermode_run_worker coloca no topo da pilha do worker
-// ring-3 (ver usermode.c). Quando a threadproc do worker faz `ret`, ela cai neste stub
-// (em vez de pular p/ endereco 0 e crashar). O stub carrega o valor de retorno da
-// threadproc (rax) em rdi e chama este syscall.
+// FRENTE THREADS RING-3 PREEMPTIVAS — sys_thread_exit(retval). (SSDT #51)
+// Chamado pelo STUB de retorno (usermode.c) que fica no topo da pilha de cada thread ring-3.
+// Quando a threadproc de ring 3 faz `ret`, cai neste stub (em vez de pular p/ 0 e crashar),
+// que carrega o valor de retorno (rax) em rdi e chama este syscall.
 //
-// POR QUE ISSO EXISTE: a threadproc do worker (RVA 0x72270 no explorer real) e' uma rotina
-// que RODA E RETORNA (nao e' um loop de mensagem infinito — descobrimos via dump dos regs
-// no #PF: rbp/r12..r15 no fault == valores de ENTRADA restaurados por um epilogo `pop`,
-// prova de que a funcao chegou ao `ret`). Sem endereco de retorno valido na pilha do
-// worker, o `ret` pulava p/ 0 (rip=0, cr2=0) e o sistema HALTAVA. Agora:
-//   1) logamos o valor de retorno (rax) — diagnostico: status de erro (0xC00000xx) revela
-//      que a threadproc bateu num caminho de erro; 0 revela que ela concluiu "com sucesso".
-//   2) PARKAMOS (sti;hlt loop) em vez de retornar — o processo do explorer PERSISTE (a
-//      thread principal segue "presa" no WaitForSingleObject que chamou usermode_run_worker;
-//      nunca chega ao DestroyWindow/ExitProcess). O timer segue preemptando p/ rodar os
-//      kthreads do kernel (o sistema fica VIVO, nao halta). e' o mesmo efeito do modelo
-//      cooperativo, mas SEM o crash em rip=0.
-static void sys_worker_returned(struct regs* r) {
+// POR QUE: a threadproc da Worker Window do explorer (RVA 0x72270) e' uma rotina de init/
+// marshaling que RODA e RETORNA com STATUS_SUCCESS (provado: no #PF rip=0 os regs rbp/r12..r15
+// eram os valores de ENTRADA restaurados por um epilogo `pop`+`ret`). Como thread ring-3
+// PREEMPTIVA de verdade, ela agora TERMINA LIMPO: ki_ring3_thread_exit marca o KTHREAD
+// TERMINATED, acorda quem espera nela (o WaitForSingleObject da principal) e cede a CPU p/
+// sempre. A thread nunca mais roda; o escalonador segue com as outras (principal + kthreads).
+static void sys_thread_exit(struct regs* r) {
     uint64_t retval = r->rdi;
-    kputs("[thread] worker THREADPROC RETORNOU (rax="); kput_hex(retval);
-    kputs(") -> parkando p/ o processo PERSISTIR (kthreads seguem via timer)\n");
-    // Park: vira efetivamente a idle loop deste contexto. sti;hlt deixa o timer (0xD1)
-    // preemptar e rodar os kthreads via ki_quantum_end; ao voltar, re-hlt. NAO retorna.
-    for (;;) __asm__ volatile ("sti; hlt");
+    kputs("[thread] thread ring-3 RETORNOU (rax="); kput_hex(retval);
+    kputs(") -> ki_ring3_thread_exit (TERMINATED + acorda waiters)\n");
+    ki_ring3_thread_exit();   // marca TERMINATED, acorda waiters, cede p/ sempre — NAO retorna
 }
 
 // FASE 3f — NtLoadLibrary(name): carrega uma DLL JA REGISTRADA (modulo de boot) sob
@@ -1254,7 +1258,7 @@ static syscall_fn s_ssdt[] = {
     sys_loadlibrary,            // 48 (FASE 3f: LoadLibrary runtime)
     sys_querysystemtime,        // 49 (Frente C: tempo p/ o explorer real)
     sys_virtualalloc,           // 50 (Frente C: VirtualAlloc p/ o heap do explorer)
-    sys_worker_returned,        // 51 (Frente THREADS: stub de retorno da threadproc -> park)
+    sys_thread_exit,            // 51 (Frente THREADS RING-3: stub de retorno -> ki_ring3_thread_exit)
 };
 #define SSDT_COUNT (sizeof(s_ssdt) / sizeof(s_ssdt[0]))
 

@@ -49,6 +49,7 @@
 //  Como tudo termina no mesmo translation unit, basta declarar aqui.
 // ============================================================================
 void win32k_shell_compose(void);
+void win32k_refresh_taskbar(void);          // refresh LEVE da taskbar (relogio ao vivo) — win32kshell.c
 int  win32k_shell_on_mouse(int x, int y, uint32_t buttons, uint32_t prev_buttons);
 
 // ============================================================================
@@ -903,11 +904,26 @@ int NtUserGetMessage_k(W32_MSG* out) {
             out->hwnd = 0; out->message = WM_QUIT; out->wParam = 0; out->lParam = 0;
             return 0;
         }
-        // Fila vazia = a app terminou de processar (inclusive o WM_PAINT). No
-        // backend virtio-gpu as escritas do WNDPROC (TextOut/FillRect) so vao
-        // pra tela apos um present; fazemos UM present por volta ociosa do loop
-        // (barato — nao por chamada GDI) para o conteudo da janela aparecer.
-        if (w32k_use_gpu()) gpu_present();
+        // Fila vazia = a app terminou de processar (inclusive o WM_PAINT).
+        //
+        // PERSISTENCIA PINTADA (sessao 9): quando o explorer.exe REAL entra no seu loop de
+        // mensagens (AppResolver::slot10) a thread PRINCIPAL passa a viver AQUI, ociosa. Este
+        // e' o lugar natural p/ manter o DESKTOP PINTADO (o real explorer nao repinta o nosso
+        // desktop sintetico — ele so cria janelas message-only). Politica:
+        //   * 1a volta ociosa com janela viva  -> win32k_compose() COMPLETO: papel de parede
+        //     Win10 (gradiente) + taskbar acrilica. Marca s_was_active (a GUI tomou a tela).
+        //   * depois, ~2x/s (throttle por g_ticks @100Hz) -> win32k_refresh_taskbar(): refresh
+        //     LEVE so da faixa da taskbar (relogio ao vivo) sem repintar/apagar janelas.
+        //   * nas demais voltas -> apenas gpu_present() (barato; publica o frame atual).
+        // Tudo serializado pelo guard s_composing; sem GPU cai no gpu_present simples de antes.
+        if (w32k_use_gpu()) {
+            extern volatile uint64_t g_ticks;
+            static int      s_idle_painted = 0;      // 1o compose completo do desktop ja saiu
+            static uint64_t s_idle_tick = 0;         // ultimo refresh de taskbar (em ticks)
+            if (!s_idle_painted)                 { s_idle_painted = 1; win32k_compose(); s_idle_tick = g_ticks; }
+            else if ((uint64_t)(g_ticks - s_idle_tick) >= 50) { s_idle_tick = g_ticks; win32k_refresh_taskbar(); }
+            else                                   gpu_present();
+        }
         // Espera por uma interrupcao (teclado/timer) que possa postar algo.
         __asm__ volatile ("sti; hlt");
         // Apos acordar (timer @100Hz), drena a tablet absoluta (virtio-input):

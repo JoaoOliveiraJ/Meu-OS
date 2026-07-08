@@ -399,18 +399,28 @@ static void* pinnedlist_object(void) {
 //      via syscall do win32k) ate WM_QUIT. Enquanto roda, o wWinMain NAO retorna: o explorer
 //      REAL PERSISTE (mesmo mecanismo de fila do win32k que o desktop caseiro ja usa p/ viver).
 // ====================================================================
-static long deh_slot5(void* self)  { (void)self; return S_OK_; }   // init do host: no-op OK
-static long deh_slot10(void* self) {                                // "Run": loop de mensagens
-    (void)self;
-    cb_log("[cb] DesktopExplorerHost::slot10 -> LOOP DE MENSAGENS (o explorer REAL PERSISTE)\n");
+// ---- LOOP DE MENSAGENS compartilhado — o coracao da PERSISTENCIA do explorer real. ----
+// GetMessage (syscall #21 do win32k) BLOQUEIA (o kernel faz sti;hlt e ainda faz gpu_present
+// por volta ociosa) enquanto houver >=1 janela viva (a Shell_TrayWnd criada pela init do
+// taskbar mantem o loop vivo). DispatchMessage (#22) roteia p/ o wndproc real (ring 3). So
+// retorna em WM_QUIT (0) ou quando NAO ha mais janelas (<0). ENQUANTO roda, a thread que o
+// chamou NAO RETORNA — o wWinMain do explorer nao chega no teardown/ExitProcess: o desktop
+// PERSISTE (mesmo mecanismo de fila do win32k que o shell caseiro ja usa p/ viver).
+static long run_message_loop(const char* who) {
+    cb_log(who);
     unsigned char msg[64];                                          // W32_MSG (hwnd/msg/w/lParam/time/pt) < 64
     for (;;) {
         long r = cb_getmessage(msg);
         if (r <= 0) break;                                          // 0 = WM_QUIT, <0 = sem janelas
         cb_dispatchmessage(msg);                                    // o wndproc real roda no user32 (ring 3)
     }
-    cb_log("[cb] DesktopExplorerHost::slot10 -> loop terminou (WM_QUIT); wWinMain vai encerrar\n");
+    cb_log("[cb]   loop de mensagens terminou (WM_QUIT/sem janelas)\n");
     return S_OK_;
+}
+static long deh_slot5(void* self)  { (void)self; return S_OK_; }   // init do host: no-op OK
+static long deh_slot10(void* self) {                                // "Run": loop de mensagens
+    (void)self;
+    return run_message_loop("[cb] DesktopExplorerHost::slot10 -> LOOP DE MENSAGENS (o explorer REAL PERSISTE)\n");
 }
 static void* g_deh_vtbl[64];
 static struct { void** lpVtbl; } g_deh_obj = { 0 };
@@ -462,12 +472,50 @@ static void* explorerhostcreator_object(void) {
 }
 static const GUID_ CLSID_ExplorerHostCreator = { 0xAB0B37EC, 0x56F6, 0x4A0E, { 0xA8,0xFD,0x7A,0x8B,0xF7,0xC2,0xDA,0x96 } };
 
+// ====================================================================
+//  AppResolver {660B90C8-73A9-4B58-8CAE-355B7F55341B} (CLSID_StartMenuCacheAndAppResolver),
+//  QI p/ {BA5A92AE-BFD7-4916-854F-6B3A402B84A8}. ESTE e' o objeto da PERSISTENCIA.
+//
+//  RE (sessao 9): o wWinMain cria este objeto CEDO — em 0x23d6d
+//  `CoCreateInstance(AppResolver, ..., CLSCTX=3, IID=BA5A92AE, out=&[rsp+0x58])` — e o RETEM
+//  em [rsp+0x58] ate o teardown (varredura de TODOS os acessos a [rsp+0x58] no wWinMain: entre
+//  a criacao 0x23d6d e a leitura-porteira 0x23fdb NAO ha nenhuma escrita — o "released->0" da
+//  s8 estava errado). O explorer usa:
+//    - slot4 (vtbl+0x20) em 0x23d89 — init CEDO (retorno ignorado);
+//    - slot5 (vtbl+0x28) em 0x23fec — "pre-run" (perto do fim da escada rdi!=0);
+//    - slot10 (vtbl+0x50) em 0x23ffe — o "RUN": e' aqui que a thread PRINCIPAL entra no LOOP DE
+//      MENSAGENS e NAO retorna. Tudo APOS 0x23ffe (0x24004+) e' teardown (Release do
+//      ExplorerHostCreator, CoUninitialize, ExitProcess) — so alcancado quando o loop retorna
+//      (WM_QUIT). Portanto slot10 == a persistencia do desktop.
+//  Antes, [rsp+0x58] recebia o objeto UNIVERSAL (slot10 = univ_fill, retorno imediato) -> o
+//  wWinMain caia no teardown -> ExitProcess (o explorer ENCERRAVA). Agora slot10 e' o loop real.
+// ====================================================================
+static const GUID_ CLSID_AppResolver = { 0x660B90C8, 0x73A9, 0x4B58, { 0x8C,0xAE,0x35,0x5B,0x7F,0x55,0x34,0x1B } };
+static long ar_slot4(void* self)  { (void)self; cb_log("[cb] AppResolver::slot4 (init @0x23d89)\n"); return S_OK_; }
+static long ar_slot5(void* self)  { (void)self; cb_log("[cb] AppResolver::slot5 (pre-run @0x23fec)\n"); return S_OK_; }
+static long ar_slot10(void* self) { (void)self; return run_message_loop("[cb] AppResolver::slot10 (@0x23ffe) -> LOOP DE MENSAGENS (o explorer REAL PERSISTE)\n"); }
+static void* g_ar_vtbl[64];
+static struct { void** lpVtbl; } g_ar_obj = { 0 };
+static int g_ar_ready = 0;
+static void* appresolver_object(void) {
+    if (!g_ar_ready) {
+        g_ar_vtbl[0] = (void*)pl_QI; g_ar_vtbl[1] = (void*)pl_AddRef; g_ar_vtbl[2] = (void*)pl_Release;
+        for (int i = 3; i < 64; i++) g_ar_vtbl[i] = (void*)univ_fill;   // demais slots: out valido + S_OK
+        g_ar_vtbl[4]  = (void*)ar_slot4;    // vtbl+0x20 (init cedo)
+        g_ar_vtbl[5]  = (void*)ar_slot5;    // vtbl+0x28 (pre-run)
+        g_ar_vtbl[10] = (void*)ar_slot10;   // vtbl+0x50 (RUN: loop de msg -> persistencia)
+        g_ar_obj.lpVtbl = g_ar_vtbl; g_ar_ready = 1;
+    }
+    return &g_ar_obj;
+}
+
 // Fabrica por-CLSID: devolve um objeto ESPECIFICO se o CLSID for conhecido, senao 0
 // (o chamador cai no objeto universal). Aditivo: novos CLSIDs entram aqui.
 static void* specific_object_for(const GUID_* clsid) {
     if (!clsid) return 0;
     if (guid_eq(clsid, &CLSID_TaskbandPin))         return pinnedlist_object();
     if (guid_eq(clsid, &CLSID_ExplorerHostCreator)) return explorerhostcreator_object();
+    if (guid_eq(clsid, &CLSID_AppResolver)) { cb_log("[cb] AppResolver {660B90C8} solicitado -> host de PERSISTENCIA (slot10=loop)\n"); return appresolver_object(); }
     return 0;
 }
 

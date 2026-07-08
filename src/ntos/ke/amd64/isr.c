@@ -415,9 +415,36 @@ void isr_handler(struct regs* r) {
         // EXATAMENTE qual import faltou (desmontar o .exe nesse endereco = a proxima
         // funcao a implementar de verdade). So no caminho de halt; nao toca o pintok.
         if (r->rip == 0 && (r->err_code & 4)) {   // U=1: a falha veio de ring-3
-            kputs("  [bringup] ring-3 chamou import NAO resolvido (IAT=0). caller[rsp]=");
-            kput_hex(*(volatile uint64_t*)(uintptr_t)r->rsp);
-            kputs(" (desmonte o .exe nesse endereco p/ achar a funcao)\n");
+            // rip=0 vindo de ring-3 tem DUAS causas possiveis, que precisamos
+            // distinguir para saber o que implementar:
+            //  (a) CALL [IAT]=0  -> um import NAO resolvido: a CPU empilhou o
+            //      endereco de RETORNO (a instrucao APOS o call) e pulou p/ 0.
+            //      Logo [rsp] = endereco de retorno REAL (dentro do .exe/DLL) e
+            //      basta desmontar 1 instrucao ANTES dele p/ ver qual call era.
+            //  (b) RET p/ 0     -> a threadproc chegou ao fim e executou 'ret',
+            //      mas nao pusemos um endereco de retorno valido na pilha inicial
+            //      (entramos via IRETQ direto no start). Ai [rsp] pos-ret = lixo/0.
+            // Para nao adivinhar, despejamos uma JANELA da pilha do usuario e os
+            // registradores NAO-volateis (rbx/rsi/rdi/r12..r15/rbp) — algum deles,
+            // ou algum slot da pilha, guarda um endereco no range de runtime do
+            // explorer (base 0x04319000). Subtraia a base p/ achar o RVA e jogue
+            // no disrange.py. So roda no caminho de HALT (ring-3, U=1); o pintok e'
+            // ring-0 e NUNCA entra aqui — diagnostico nao toca a maquina anti-VM.
+            kputs("  [bringup] ring-3 rip=0. stack[rsp+0..15]=\n   ");
+            for (int q = 0; q < 16; q++) {
+                kput_hex(*(volatile uint64_t*)(uintptr_t)(r->rsp + 8 * (uint64_t)q));
+                kputc(' ');
+                if (q == 7) kputs("\n   ");
+            }
+            kputs("\n  [bringup] rbp="); kput_hex(r->rbp);
+            kputs(" rbx="); kput_hex(r->rbx);
+            kputs(" rsi="); kput_hex(r->rsi);
+            kputs(" rdi="); kput_hex(r->rdi);
+            kputs("\n  [bringup] r12="); kput_hex(r->r12);
+            kputs(" r13="); kput_hex(r->r13);
+            kputs(" r14="); kput_hex(r->r14);
+            kputs(" r15="); kput_hex(r->r15);
+            kputs("\n  (RVA = valor - 0x04319000; desmonte no disrange.py p/ achar o call/ret)\n");
         }
         // Frente C (bring-up): qualquer OUTRA excecao de RING-3 (CPL=3) — ex.: #UD
         // (opcode invalido, pulou p/ dado/lixo), #GP. rip = instrucao que faltou; o

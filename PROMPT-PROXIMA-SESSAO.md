@@ -176,9 +176,11 @@ Mensagens terminam com `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@an
   containment do sys_exit distingue worker de principal.
 - ⚠️ O `[EXCECAO] vetor=0x0e … expected-trap` no início do serial é PROVA de paginação, NÃO crash.
 - `mm_map_user` mapeia em 2 MiB granular e SEM NX → região do worker é user+EXEC.
-- Muitos imports ainda NÃO resolvidos (só crasham SE chamados): `RPCRT4` (8 fns), `WININET`,
-  `WTSAPI32`, `SHLWAPI.dll` direto (#163 IUnknown_QueryStatus, #164 IUnknown_Exec, #467
-  SHRunIndirectRegClientCommand, AssocCreate/AssocQueryKeyW/ChrCmpIW/PathIsDirectoryW/PathIsRelativeW),
+- `SHLWAPI.dll` direto: **IMPLEMENTADO nesta sessão** (8/10 na shcore + redirect `shlwapi`→shcore).
+  RESTAM só os ordinais **SHLWAPI #413 e #548** (exports ordinal-only não identificados — se algum
+  caminho chamá-los, identifique via desmontagem de `C:\Windows\System32\shlwapi.dll` no RVA do
+  ordinal e implemente).
+- Imports ainda NÃO resolvidos (só crasham SE chamados): `RPCRT4` (8 fns), `WININET`, `WTSAPI32`,
   `OLEAUT32`, `PROPSYS`, `ole32`, `CoreMessaging`, `api-ms-win-appmodel-*`. O caminho mais fundo
   (destravar o worker/host) vai exigir vários deles — implemente DE VERDADE, DLL por DLL.
 - `run.ps1` roda com `-smp 2 -accel tcg,thread=multi`; SDK em

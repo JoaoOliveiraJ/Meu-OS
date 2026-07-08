@@ -260,6 +260,42 @@ __declspec(dllexport) void* SHCreateWorkerWindowW(void* wndProc, void* hwndParen
     return sc_createwin(&c);
 }
 
+// ============================================================================
+//  SHLWAPI.dll (import DIRETO do explorer, NAO um api-ms-win-* apiset) — o explorer
+//  importa 10 funcoes deste modulo (5 por nome, 5 por ordinal). Sem redirect ficavam
+//  slot=0 (crash SE chamadas). Hospedadas na shcore; o loader redireciona "shlwapi" ->
+//  shcore.dll. Impl REAIS onde barato (path/char); especificas onde a semantica nao existe
+//  aqui (sem FS p/ paths arbitrarios, sem OLECMD target real, sem assoc DB). As familias
+//  api-ms-win-core-shlwapi-legacy/obsolete (Path*/Str*) sao OUTRO contrato -> kernel32.
+// ============================================================================
+// ChrCmpIW(w1,w2) — compara 2 chars wide, case-insensitive. Devolve 0 se IGUAIS, !=0 se
+// diferentes (convencao do shlwapi). Impl REAL.
+static WCHAR_ sc_lower(WCHAR_ c) { return (c >= 'A' && c <= 'Z') ? (WCHAR_)(c + 32) : c; }
+__declspec(dllexport) int ChrCmpIW(WCHAR_ w1, WCHAR_ w2) { return sc_lower(w1) != sc_lower(w2); }
+// PathIsRelativeW(path) — TRUE se o path e' RELATIVO (nao comeca com '\'/'/' nem "X:"). Impl REAL.
+__declspec(dllexport) int PathIsRelativeW(const WCHAR_* p) {
+    if (!p || !p[0]) return 1;                        // vazio = relativo
+    if (p[0] == '\\' || p[0] == '/') return 0;        // "\..." ou UNC = absoluto
+    if (p[1] == ':') return 0;                        // "X:..." = absoluto
+    return 1;
+}
+// PathIsDirectoryW(path) — no Windows consulta o FS (FILE_ATTRIBUTE_DIRECTORY). Aqui nao ha FS
+// p/ paths arbitrarios do shell -> devolve 0 (nao e' diretorio / nao verificavel). Especifico.
+__declspec(dllexport) int PathIsDirectoryW(const WCHAR_* p) { (void)p; return 0; }
+// AssocCreate(clsid, riid, ppv) — cria um IQueryAssociations. Sem banco de associacoes real ->
+// E_NOTIMPL com *ppv=0. Especifico e honesto.
+__declspec(dllexport) HRESULT_ AssocCreate(const void* clsid, const void* riid, void** ppv) { (void)clsid;(void)riid; if (ppv)*ppv=0; return E_NOTIMPL_; }
+// AssocQueryKeyW(...) — consulta de chave de associacao. "sem associacao" (0x80070483 =
+// ERROR_NO_ASSOCIATION como HRESULT). Especifico.
+__declspec(dllexport) HRESULT_ AssocQueryKeyW(unsigned flags, int key, const WCHAR_* assoc, const WCHAR_* extra, void* phkey) { (void)flags;(void)key;(void)assoc;(void)extra; if (phkey)*(void**)phkey=0; return (HRESULT_)0x80070483L; }
+// IUnknown_QueryStatus / IUnknown_Exec (#163/#164) — helpers de IOleCommandTarget (QI + chama).
+// Sem command target real -> E_NOTIMPL (OLECMDERR-ish). Especificos, nao catch-all.
+__declspec(dllexport) HRESULT_ IUnknown_QueryStatus(void* punk, const void* pguid, unsigned cCmds, void* prgCmds, void* pText) { (void)punk;(void)pguid;(void)cCmds;(void)prgCmds;(void)pText; return E_NOTIMPL_; }
+__declspec(dllexport) HRESULT_ IUnknown_Exec(void* punk, const void* pguid, unsigned cmdID, unsigned opt, void* in, void* out) { (void)punk;(void)pguid;(void)cmdID;(void)opt;(void)in;(void)out; return E_NOTIMPL_; }
+// SHRunIndirectRegClientCommand (#467) — roda um comando indicado por chave de registro. Sem
+// esse fluxo aqui -> no-op S_OK (nada a executar). Especifico.
+__declspec(dllexport) HRESULT_ SHRunIndirectRegClientCommand(void* hwnd, const WCHAR_* key) { (void)hwnd;(void)key; return S_OK_; }
+
 // ---- stub generico ESPECIFICO p/ ordinais internos ainda nao mapeados: devolve 0 ----
 __declspec(dllexport) long long shcore_ord_stub(void) { return 0; }
 

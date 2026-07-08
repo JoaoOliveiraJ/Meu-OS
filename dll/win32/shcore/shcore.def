@@ -19,3 +19,8 @@ EXPORTS
     _ord210 = shcore_ord_stub @210 NONAME
     _ord213 = shcore_ord_stub @213 NONAME
     _ord244 = shcore_ord_stub @244 NONAME
+    ; SHLWAPI.dll ordinais que o explorer importa por numero (o loader redireciona
+    ; shlwapi -> shcore). Alias p/ as funcoes REAIS (tambem exportadas por nome).
+    _shlwapi163 = IUnknown_QueryStatus @163 NONAME
+    _shlwapi164 = IUnknown_Exec @164 NONAME
+    _shlwapi467 = SHRunIndirectRegClientCommand @467 NONAME

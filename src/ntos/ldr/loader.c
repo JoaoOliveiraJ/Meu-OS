@@ -128,6 +128,10 @@ static const char* apiset_redirect(const char* dll) {
     // abaixo -> kernel32, onde ja vivem os Path*/Str*.) Sem este redirect, os imports ficavam
     // slot=0 e o 1o CALL (SHPinDllOfCLSID, na init pesada do shell) dava #PF rip=0.
     if (has_prefix_ci(dll, "api-ms-win-shlwapi-"))       return "shcore.dll";
+    // SHLWAPI.dll DIRETO (o explorer importa 10 fns dele por nome+ordinal). Hospedadas na shcore
+    // (ChrCmpIW/PathIsRelativeW/PathIsDirectoryW/Assoc*/IUnknown_QueryStatus+Exec/SHRunIndirect...).
+    // Nao colide com os Path*/Str* que ja vivem no kernel32 via api-ms-win-core-shlwapi-*.
+    if (has_prefix_ci(dll, "shlwapi"))                   return "shcore.dll";
     if (has_prefix_ci(dll, "api-ms-win-storage-"))       return "shell32.dll"; // storage-exports-internal: SHGetFolderPathEx/KnownFolderIDList + Get/SetThreadFlags
     // Extension API Sets (ext-ms-win-*): contratos OPCIONAIS (delay-load) -> DLL host real.
     if (has_prefix_ci(dll, "ext-ms-win-rtcore-ntuser-")) return "user32.dll";

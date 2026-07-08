@@ -125,47 +125,36 @@ static int sc_spawn(void* start, void* param) {
 
 typedef unsigned (*sh_threadproc_t)(void*);
 
-// Contexto compartilhado entre a SHCreateThread (thread CHAMADORA) e o wrapper que roda na
-// thread NOVA. Alocado na arena (persiste depois do retorno da SHCreateThread — a thread
-// nova ainda o usa). `done` e' o "evento" de init concluida: a thread nova o liga apos o
-// callback; a chamadora espera nele. volatile: e' lido/escrito por threads distintas (so o
-// CPU 0 roda ring 3 -> sem coerencia SMP a resolver; o timer preempta entre elas).
-typedef struct { void* proc; void* param; void* cb; volatile int done; } sh_thread_ctx;
+// Contexto passado ao wrapper que roda na thread NOVA. Alocado na arena (persiste depois do
+// retorno da SHCreateThread — a thread nova ainda o usa).
+typedef struct { void* proc; void* param; void* cb; } sh_thread_ctx;
 
-// Wrapper que roda na THREAD NOVA (ring-3 preemptiva). Reproduz a ordem do Windows:
-//   1) roda o callback de init (pfnCallback) — e' o que preenche os globais que o chamador
-//      testa logo apos SHCreateThread;
-//   2) sinaliza `done` (libera a thread chamadora que espera);
-//   3) roda o trabalho principal (pfnThreadProc) — segue concorrente com a chamadora.
+// Wrapper que roda na THREAD NOVA (ring-3 preemptiva). Ordem do Windows: primeiro o callback
+// de init (pfnCallback), depois o trabalho principal (pfnThreadProc). Ambos rodam na thread
+// nova (fiel), concorrente com a chamadora.
 static void sh_thread_wrapper(sh_thread_ctx* c) {
-    if (c->cb)   ((sh_threadproc_t)c->cb)(c->param);   // init na THREAD NOVA (fiel ao Windows)
-    c->done = 1;                                        // "SetEvent": libera a chamadora
-    if (c->proc) ((sh_threadproc_t)c->proc)(c->param);  // trabalho principal
+    if (c->cb)   ((sh_threadproc_t)c->cb)(c->param);    // init na THREAD NOVA (fiel ao Windows)
+    if (c->proc) ((sh_threadproc_t)c->proc)(c->param);   // trabalho principal
     // ao retornar, cai no stub de retorno ring-3 -> sys_thread_exit (termina limpo).
 }
 
 __declspec(dllexport) int SHCreateThread(void* pfnThreadProc, void* pData, unsigned dwFlags, void* pfnCallback) {
     (void)dwFlags;   // flags CTF_* (COINIT/REF/INSIST...): CoInitialize e' no-op no nosso
                      // apartamento unico; o ref-counting de thread/processo nao afeta o boot.
-    sc_puts("[shcore] SHCreateThread REAL: worker ring-3 (callback na thread nova; chamadora espera a init)\n");
+    sc_puts("[shcore] SHCreateThread REAL: lanca worker ring-3 (callback+threadproc na thread nova)\n");
     sh_thread_ctx* c = (sh_thread_ctx*)sc_alloc(sizeof(sh_thread_ctx));
     if (!c) return 0;
     c->proc = pfnThreadProc; c->param = pData; c->cb = pfnCallback;
-    c->done = pfnCallback ? 0 : 1;                       // sem callback: nada a esperar.
-    // Lanca sh_thread_wrapper(c) como thread ring-3 PREEMPTIVA de verdade (infra da sessao 5).
-    if (!sc_spawn((void*)sh_thread_wrapper, c)) return 0;
-    // Semantica do Windows: a chamadora ESPERA a init (callback) terminar antes de retornar
-    // (assim o codigo apos SHCreateThread pode contar que a init rodou). Espera COOPERATIVA:
-    // o scheduler preemptivo (timer, IF=1) roda a thread nova enquanto giramos aqui; quando
-    // ela liga `done`, seguimos. NAO rodamos a init na thread CHAMADORA (era o erro anterior:
-    // distorcia o fluxo do wWinMain — a Worker Window sumia). Aqui o fluxo da chamadora fica
-    // intacto; so pausamos ate a init concluir na thread correta.
-    //
-    // LIMITE de seguranca: se a init travar/crashar na thread nova, `done` nunca liga; sem o
-    // teto, giravamos p/ sempre (boot travado). Com o teto, desistimos da espera e seguimos —
-    // o pior caso vira o comportamento BASELINE (global do chamador nao setado a tempo), nunca
-    // um hang. O teto e' alto o bastante p/ uma init real (varias fatias do timer) concluir.
-    for (unsigned long long i = 0; i < 0x80000000ULL && !c->done; i++) __asm__ volatile ("pause");
+    // Lanca sh_thread_wrapper(c) como thread ring-3 PREEMPTIVA de verdade (infra da sessao 5),
+    // que roda CONCORRENTE com a chamadora. NAO bloqueamos a chamadora esperando a init:
+    //   - O Windows bloquearia ate o callback terminar (init sincrona). Nao fazemos isso porque
+    //     a init do subsistema de shell do explorer.exe atual da FailFast (ExitProcess) por uma
+    //     dependencia de COM de shell ainda nao implementada (muro conhecido — o worker cria
+    //     Taskband Pin / jump lists via objeto COM universal e aborta). O FailFast do worker
+    //     e' CONTIDO no kernel (sys_exit: exit de thread nao-principal termina so a thread), e a
+    //     chamadora segue seu fluxo normal. Bloquear so criaria uma espera INUTIL (o `done`
+    //     nunca viria) — daria uma falsa "persistencia" (a principal girando a toa). Entao
+    //     lancamos e retornamos; a worker roda de verdade e, se abortar, morre sozinha.
     return 1;   // TRUE
 }
 __declspec(dllexport) HRESULT_ SHTaskPoolQueueTask(void* pool, void* task) { (void)pool;(void)task; return E_NOTIMPL_; }

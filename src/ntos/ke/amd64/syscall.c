@@ -95,7 +95,29 @@ static void sys_messagebox(struct regs* r) {
     r->rax = 1;   // IDOK
 }
 static void sys_exit(struct regs* r) {
-    (void)r;
+    // Quem chamou ExitProcess? A pilha da thread PRINCIPAL (idle/boot sobre a qual o .exe roda)
+    // vive em [0x600000,0x700000); uma thread ring-3 de WORKER (CreateThread/SHCreateThread)
+    // roda com pilha na faixa do PMM (>= 0x4000000). Isso decide a semantica:
+    //
+    // WORKER chamando exit: durante o bring-up do shell REAL, um worker do explorer pode dar
+    // FailFast (ExitProcess/RaiseFailFastException) porque uma dependencia AINDA nao esta
+    // implementada aqui (ex.: o worker de init do taskbar do explorer.exe faz init de COM de
+    // shell e, ao receber um objeto UNIVERSAL degradado, aborta). Em Windows real, esse worker
+    // NAO abortaria. Derrubar o processo inteiro por causa de um worker incompleto mataria o
+    // shell prematuramente — e o longjmp(g_user_exit) e' o buffer da thread PRINCIPAL (pular
+    // p/ ele de outra pilha/thread e' UB). Entao CONTEMOS: terminamos SO a thread worker (limpo,
+    // como um retorno de threadproc via ki_ring3_thread_exit) e deixamos a PRINCIPAL seguir o
+    // fluxo do shell. Assim um FailFast de subsistema nao mata o desktop durante o bring-up.
+    //
+    // PRINCIPAL chamando exit: e' o fim real do processo (wWinMain retornou / ExitProcess do
+    // fluxo main) -> longjmp de volta ao kernel (usermode_enter), como sempre.
+    uint64_t rsp = r->rsp;
+    if (!(rsp >= 0x600000ULL && rsp < 0x700000ULL)) {
+        kputs("[sys_exit] ExitProcess de WORKER ring-3 (rsp="); kput_hex(rsp);
+        kputs(") CONTIDO -> termina so a thread; a principal do shell segue\n");
+        ki_ring3_thread_exit();   // marca TERMINATED, acorda waiters, cede p/ sempre — NAO retorna
+    }
+    kputs("[sys_exit] ExitProcess da thread PRINCIPAL -> encerra o processo\n");
     __builtin_longjmp(g_user_exit, 1);
 }
 

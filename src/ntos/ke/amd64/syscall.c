@@ -115,6 +115,16 @@ static void sys_exit(struct regs* r) {
     if (!(rsp >= 0x600000ULL && rsp < 0x700000ULL)) {
         kputs("[sys_exit] ExitProcess de WORKER ring-3 (rsp="); kput_hex(rsp);
         kputs(") CONTIDO -> termina so a thread; a principal do shell segue\n");
+        // Dump da pilha do worker no ponto do FailFast: a cadeia de enderecos de retorno
+        // revela QUAL funcao do explorer deu FailFast (RVA = valor - ImageBase de carga do
+        // explorer, logado no [ps] EPROCESS). Alvo p/ implementar o objeto COM de shell que
+        // falta (o worker do taskbar aborta ao usar o objeto COM universal). So p/ ring-3.
+        PEPROCESS cur = PsGetCurrentProcess();
+        kputs("  [sys_exit] worker stack (retornos p/ achar o FailFast; ImageBase=");
+        kput_hex(cur ? cur->ImageBase : 0); kputs("):\n   ");
+        const uint64_t* sp = (const uint64_t*)(uintptr_t)rsp;
+        for (int i = 0; i < 24; i++) { kput_hex(sp[i]); kputs(i == 11 ? "\n   " : " "); }
+        kputs("\n");
         ki_ring3_thread_exit();   // marca TERMINATED, acorda waiters, cede p/ sempre — NAO retorna
     }
     kputs("[sys_exit] ExitProcess da thread PRINCIPAL -> encerra o processo\n");

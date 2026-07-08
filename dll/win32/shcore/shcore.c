@@ -125,7 +125,7 @@ static int sc_spawn(void* start, void* param) {
 
 typedef unsigned (*sh_threadproc_t)(void*);
 
-// Contexto passado ao wrapper que roda na thread NOVA. Alocado na arena (persiste depois do
+// Contexto passado ao wrapper que roda na thread NOVA. Alocado na arena (persiste apos o
 // retorno da SHCreateThread — a thread nova ainda o usa).
 typedef struct { void* proc; void* param; void* cb; } sh_thread_ctx;
 
@@ -146,15 +146,14 @@ __declspec(dllexport) int SHCreateThread(void* pfnThreadProc, void* pData, unsig
     if (!c) return 0;
     c->proc = pfnThreadProc; c->param = pData; c->cb = pfnCallback;
     // Lanca sh_thread_wrapper(c) como thread ring-3 PREEMPTIVA de verdade (infra da sessao 5),
-    // que roda CONCORRENTE com a chamadora. NAO bloqueamos a chamadora esperando a init:
-    //   - O Windows bloquearia ate o callback terminar (init sincrona). Nao fazemos isso porque
-    //     a init do subsistema de shell do explorer.exe atual da FailFast (ExitProcess) por uma
-    //     dependencia de COM de shell ainda nao implementada (muro conhecido — o worker cria
-    //     Taskband Pin / jump lists via objeto COM universal e aborta). O FailFast do worker
-    //     e' CONTIDO no kernel (sys_exit: exit de thread nao-principal termina so a thread), e a
-    //     chamadora segue seu fluxo normal. Bloquear so criaria uma espera INUTIL (o `done`
-    //     nunca viria) — daria uma falsa "persistencia" (a principal girando a toa). Entao
-    //     lancamos e retornamos; a worker roda de verdade e, se abortar, morre sozinha.
+    // que roda CONCORRENTE com a chamadora, e RETORNA (nao bloqueia). O Windows bloquearia ate o
+    // callback de init terminar; NAO fazemos isso de proposito: a init do worker do taskbar do
+    // explorer.exe atual da FailFast (ExitProcess, CONTIDO no kernel — sys_exit termina so a
+    // thread) por um objeto COM de shell ainda universal (muro conhecido). Bloquear so faria a
+    // chamadora girar a toa (o "done" nunca viria) — falsa persistencia. Lancar-e-retornar
+    // mantem o fluxo da PRINCIPAL intacto (Worker Window -> WaitForSingleObject -> DestroyWindow
+    // -> ExitProcess da principal) e a worker roda de verdade (contida se abortar).
+    if (!sc_spawn((void*)sh_thread_wrapper, c)) return 0;
     return 1;   // TRUE
 }
 __declspec(dllexport) HRESULT_ SHTaskPoolQueueTask(void* pool, void* task) { (void)pool;(void)task; return E_NOTIMPL_; }

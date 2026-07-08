@@ -122,6 +122,12 @@ static const char* apiset_redirect(const char* dll) {
     if (has_prefix_ci(dll, "api-ms-win-eventing-"))      return "advapi32.dll"; // ETW: no-op (sem tracing)
     if (has_prefix_ci(dll, "api-ms-win-shell-"))         return "shell32.dll"; // namespace/changenotify/dataobject/shdirectory
     if (has_prefix_ci(dll, "api-ms-win-shcore-"))        return "shcore.dll";  // DPI/stream/registro/thread/appid
+    // api-ms-win-shlwapi-winrt-storage: SHPinDllOfCLSID / StrRetTo* / SHCreateWorkerWindowW /
+    // AssocQueryStringW / IUnknown_GetWindow ... — hospedadas na shcore. (As familias
+    // api-ms-win-CORE-shlwapi-legacy/obsolete sao OUTRO contrato: caem no "api-ms-win-core-"
+    // abaixo -> kernel32, onde ja vivem os Path*/Str*.) Sem este redirect, os imports ficavam
+    // slot=0 e o 1o CALL (SHPinDllOfCLSID, na init pesada do shell) dava #PF rip=0.
+    if (has_prefix_ci(dll, "api-ms-win-shlwapi-"))       return "shcore.dll";
     if (has_prefix_ci(dll, "api-ms-win-storage-"))       return "shell32.dll"; // storage-exports-internal: SHGetFolderPathEx/KnownFolderIDList + Get/SetThreadFlags
     // Extension API Sets (ext-ms-win-*): contratos OPCIONAIS (delay-load) -> DLL host real.
     if (has_prefix_ci(dll, "ext-ms-win-rtcore-ntuser-")) return "user32.dll";

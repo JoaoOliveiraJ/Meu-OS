@@ -65,6 +65,10 @@ static void dbg_wstr(const char* label, const unsigned short* w, unsigned wlen) 
     b[i++]='\n'; b[i++]=0; dbg_puts(b);
 }
 static void dbg_slot2(int n, int pos) { char b[32]; int i=0; const char* p="[cb] univ slot "; while(*p)b[i++]=*p++; if(n>=10)b[i++]=(char)('0'+n/10); b[i++]=(char)('0'+n%10); const char* q=" out@a"; while(*q)b[i++]=*q++; b[i++]=(char)('0'+pos); b[i++]='\n'; b[i++]=0; dbg_puts(b); }
+// Qual thread (do explorer) esta chamando: a pilha da PRINCIPAL vive em [0x600000,0x700000);
+// as threads ring-3 do CreateThread/SHCreateThread ganham pilha na faixa do PMM (>= 0x4000000).
+// Isto revela se a init pesada do shell roda na thread PRINCIPAL ou numa WORKER.
+static void dbg_thread(void) { unsigned long long rsp; __asm__ volatile("mov %%rsp,%0":"=r"(rsp)); dbg_puts((rsp>=0x600000ULL && rsp<0x700000ULL) ? "[cb] <thread=MAIN>\n" : "[cb] <thread=WORKER>\n"); }
 #else
 #define dbg_guid(a,b) ((void)0)
 #define dbg_wstr(a,b,c) ((void)0)
@@ -304,6 +308,9 @@ __declspec(dllexport) HRESULT_ CoGetMalloc(unsigned ctx, void** ppMalloc) { (voi
 __declspec(dllexport) HRESULT_ CoCreateInstance(const GUID_* clsid, void* outer, unsigned ctx, const GUID_* iid, void** ppv) {
     (void)outer; (void)ctx;
     if (!ppv) return E_POINTER_;
+#if COMBASE_DBG
+    dbg_thread();
+#endif
     dbg_guid("[cb] CoCreateInstance clsid=", clsid); dbg_guid("[cb]            iid=", iid);   // no-op se COMBASE_DBG=0
     (void)clsid; (void)iid;
     *ppv = universal_object();     // ponteiro NAO-NULO c/ vtable; metodos -> E_NOTIMPL (degrada)

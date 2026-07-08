@@ -145,6 +145,34 @@ void usermode_run_worker(uint64_t start, uint64_t param) {
     *(volatile uint64_t*)(uintptr_t)(teb + 0x10) = teb + 0x2000;   // NtTib.StackLimit
     *(volatile uint64_t*)(uintptr_t)(teb + 0x30) = teb;           // NtTib.Self  -> gs:[0x30]
     *(volatile uint64_t*)(uintptr_t)(teb + 0x60) = PEB_ADDR;      // PEB -> gs:[0x60]
+
+    // STUB DE RETORNO da threadproc. A threadproc do worker (0x72270 no explorer) e' uma
+    // funcao que RODA E RETORNA (nao um loop infinito — ver sys_worker_returned). Ao entrar
+    // via IRETQ em `start` com RSP=stack_top-8, a CPU NAO empilha endereco de retorno (nao
+    // houve `call`); logo [stack_top-8] (o slot que a threadproc ve como "seu endereco de
+    // retorno") estava ZERADO e o `ret` final pulava p/ 0 -> #PF rip=0 -> HALT. Agora
+    // escrevemos um stub REAL de ring-3 numa pagina user+exec da regiao do worker (teb+0x1000,
+    // longe da pilha que desce do topo e do TEB no fundo) e apontamos [stack_top-8] p/ ele.
+    // Quando a threadproc retorna, cai no stub, que passa o valor de retorno (rax) e chama o
+    // syscall 51 (sys_worker_returned) -> loga + parka -> o explorer PERSISTE sem crashar.
+    // Bytes do stub (x64):
+    //   48 89 c7            mov rdi, rax        ; arg1 = valor de retorno da threadproc
+    //   b8 33 00 00 00      mov eax, 51         ; SYS_WORKER_RETURNED (0x33)
+    //   cd 80               int 0x80            ; -> sys_worker_returned (nao retorna)
+    //   eb fe               jmp $               ; seguranca: spin se o syscall voltar
+    {
+        static const uint8_t retstub[] = {
+            0x48, 0x89, 0xc7,               // mov rdi, rax
+            0xb8, 0x33, 0x00, 0x00, 0x00,   // mov eax, 51
+            0xcd, 0x80,                     // int 0x80
+            0xeb, 0xfe                      // jmp $
+        };
+        uint64_t stub_va = teb + 0x1000;
+        volatile uint8_t* s = (volatile uint8_t*)(uintptr_t)stub_va;
+        for (unsigned i = 0; i < sizeof(retstub); i++) s[i] = retstub[i];
+        *(volatile uint64_t*)(uintptr_t)(stack_top - 8) = stub_va;   // endereco de retorno da threadproc
+    }
+
     kputs("[thread] worker ring-3: start="); kput_hex(start);
     kputs(" param="); kput_hex(param);
     kputs(" stack_top="); kput_hex(stack_top); kputs(" teb="); kput_hex(teb); kputs("\n");

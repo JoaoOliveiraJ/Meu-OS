@@ -434,6 +434,33 @@ static void sys_waitforsingleobject(struct regs* r) {
     r->rax = (uint64_t)(uint32_t)STATUS_SUCCESS;
 }
 
+// FRENTE THREADS (diagnostico + persistencia) — sys_worker_returned(retval).
+// Chamado pelo STUB de retorno que usermode_run_worker coloca no topo da pilha do worker
+// ring-3 (ver usermode.c). Quando a threadproc do worker faz `ret`, ela cai neste stub
+// (em vez de pular p/ endereco 0 e crashar). O stub carrega o valor de retorno da
+// threadproc (rax) em rdi e chama este syscall.
+//
+// POR QUE ISSO EXISTE: a threadproc do worker (RVA 0x72270 no explorer real) e' uma rotina
+// que RODA E RETORNA (nao e' um loop de mensagem infinito — descobrimos via dump dos regs
+// no #PF: rbp/r12..r15 no fault == valores de ENTRADA restaurados por um epilogo `pop`,
+// prova de que a funcao chegou ao `ret`). Sem endereco de retorno valido na pilha do
+// worker, o `ret` pulava p/ 0 (rip=0, cr2=0) e o sistema HALTAVA. Agora:
+//   1) logamos o valor de retorno (rax) — diagnostico: status de erro (0xC00000xx) revela
+//      que a threadproc bateu num caminho de erro; 0 revela que ela concluiu "com sucesso".
+//   2) PARKAMOS (sti;hlt loop) em vez de retornar — o processo do explorer PERSISTE (a
+//      thread principal segue "presa" no WaitForSingleObject que chamou usermode_run_worker;
+//      nunca chega ao DestroyWindow/ExitProcess). O timer segue preemptando p/ rodar os
+//      kthreads do kernel (o sistema fica VIVO, nao halta). e' o mesmo efeito do modelo
+//      cooperativo, mas SEM o crash em rip=0.
+static void sys_worker_returned(struct regs* r) {
+    uint64_t retval = r->rdi;
+    kputs("[thread] worker THREADPROC RETORNOU (rax="); kput_hex(retval);
+    kputs(") -> parkando p/ o processo PERSISTIR (kthreads seguem via timer)\n");
+    // Park: vira efetivamente a idle loop deste contexto. sti;hlt deixa o timer (0xD1)
+    // preemptar e rodar os kthreads via ki_quantum_end; ao voltar, re-hlt. NAO retorna.
+    for (;;) __asm__ volatile ("sti; hlt");
+}
+
 // FASE 3f — NtLoadLibrary(name): carrega uma DLL JA REGISTRADA (modulo de boot) sob
 // demanda e devolve a base (HMODULE). Reaproveita o ldr_load do loader (mapeia + binda
 // os imports no espaco do usuario corrente; devolve a base cacheada se ja carregada).
@@ -1227,6 +1254,7 @@ static syscall_fn s_ssdt[] = {
     sys_loadlibrary,            // 48 (FASE 3f: LoadLibrary runtime)
     sys_querysystemtime,        // 49 (Frente C: tempo p/ o explorer real)
     sys_virtualalloc,           // 50 (Frente C: VirtualAlloc p/ o heap do explorer)
+    sys_worker_returned,        // 51 (Frente THREADS: stub de retorno da threadproc -> park)
 };
 #define SSDT_COUNT (sizeof(s_ssdt) / sizeof(s_ssdt[0]))
 

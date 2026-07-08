@@ -62,6 +62,16 @@ $scenarios = @{
                   'csrss.exe', 'winlogon.exe', 'explorer.exe')
     # Baseline do pintok.sys (Riot Vanguard): so o driver ring-0.
     'pintok'  = @('pintok.sys')
+    # BRING-UP DO EXPLORER REAL (C:\Windows\explorer.exe -> build\explorerreal.exe).
+    # Os 16 modulos que o binario real exige hoje (ver PROMPT-PROXIMA-SESSAO.md). Um
+    # unico TOKEN -Scenario evita o problema de passar a lista separada por virgula a
+    # partir do bash (o comma-split so acontece quando o PowerShell parseia a linha; via
+    # bash->'-File' a lista chega como 1 string so). Use:
+    #   .\run.ps1 -Scenario explorerreal -Headless -TimeoutSec 50
+    'explorerreal' = @('ntdll.dll', 'kernel32.dll', 'user32.dll', 'gdi32.dll', 'advapi32.dll',
+                       'ucrtbase.dll', 'combase.dll', 'msvcp_win.dll', 'shell32.dll', 'shcore.dll',
+                       'dxgi.dll', 'uxtheme.dll', 'comctl32.dll', 'dui70.dll', 'dwmapi.dll',
+                       'explorerreal.exe')
 }
 if ($Scenario -and $Scenario -ne 'full') {
     if (-not $scenarios.ContainsKey($Scenario)) {

@@ -35,6 +35,16 @@ typedef struct { unsigned int Data1; unsigned short Data2; unsigned short Data3;
 static void bzero_(void* p, size_t_ n) { unsigned char* d = (unsigned char*)p; for (size_t_ i = 0; i < n; i++) d[i] = 0; }
 static void bcopy_(void* dst, const void* src, size_t_ n) { unsigned char* d = (unsigned char*)dst; const unsigned char* s = (const unsigned char*)src; for (size_t_ i = 0; i < n; i++) d[i] = s[i]; }
 
+// ---- Log de bring-up SEMPRE ATIVO (baixo ruido — dispara pontualmente na escada do host
+// de persistencia). SYS_WRITE (rax=1, rdi=string) via int 0x80. Combase segue autocontida. ----
+static void cb_log(const char* s) { unsigned long long r; __asm__ volatile ("int $0x80" : "=a"(r) : "a"(1ULL), "D"(s) : "memory","rcx","r11"); }
+static void cb_loghex(unsigned long long v) { char b[19]; b[0]='0'; b[1]='x'; const char* h="0123456789ABCDEF"; for (int i=0;i<16;i++) b[2+i]=h[(v>>((15-i)*4))&0xF]; b[18]=0; cb_log(b); }
+// Syscalls do win32k p/ o LOOP DE MENSAGENS do DesktopExplorerHost (persistencia do explorer).
+#define CB_SYS_GETMESSAGE_      21
+#define CB_SYS_DISPATCHMESSAGE_ 22
+static long cb_getmessage(void* msg) { long long r; __asm__ volatile ("int $0x80":"=a"(r):"a"((long long)CB_SYS_GETMESSAGE_),"D"((long long)(__INTPTR_TYPE__)msg):"memory","rcx","r11"); return (long)r; }
+static void cb_dispatchmessage(void* msg) { long long r; __asm__ volatile ("int $0x80":"=a"(r):"a"((long long)CB_SYS_DISPATCHMESSAGE_),"D"((long long)(__INTPTR_TYPE__)msg):"memory","rcx","r11"); }
+
 // ---- DIAGNOSTICO de bring-up (TEMPORARIO): escreve na serial via SYS_WRITE (rax=1,
 // rdi=string) por int 0x80. Sem import -> a combase segue autocontida. Loga qual objeto
 // COM/WinRT o explorer pede, p/ descobrir a decisao de saida. Remover depois.
@@ -65,6 +75,15 @@ static void dbg_wstr(const char* label, const unsigned short* w, unsigned wlen) 
     b[i++]='\n'; b[i++]=0; dbg_puts(b);
 }
 static void dbg_slot2(int n, int pos) { char b[32]; int i=0; const char* p="[cb] univ slot "; while(*p)b[i++]=*p++; if(n>=10)b[i++]=(char)('0'+n/10); b[i++]=(char)('0'+n%10); const char* q=" out@a"; while(*q)b[i++]=*q++; b[i++]=(char)('0'+pos); b[i++]='\n'; b[i++]=0; dbg_puts(b); }
+// Loga o RETURN ADDRESS de quem chamou (o codigo do explorer logo APOS a chamada do metodo).
+// Serve p/ pinpointar o site do THROW_IF_FAILED: quando o slot 3 devolve E_NOTIMPL, esse RA e'
+// exatamente a instrucao do explorer que testa o HRESULT e (se falho) chama o wil throw helper.
+static void dbg_ra(const char* label, void* ra) {
+    char b[64]; int i=0; for (const char* p=label; *p; p++) b[i++]=*p;
+    b[i++]='0'; b[i++]='x'; unsigned long long v=(unsigned long long)ra;
+    for (int s=60; s>=0; s-=4) b[i++]=g_hx[(v>>s)&0xF];
+    b[i++]='\n'; b[i++]=0; dbg_puts(b);
+}
 // Qual thread (do explorer) esta chamando: a pilha da PRINCIPAL vive em [0x600000,0x700000);
 // as threads ring-3 do CreateThread/SHCreateThread ganham pilha na faixa do PMM (>= 0x4000000).
 // Isto revela se a init pesada do shell roda na thread PRINCIPAL ou numa WORKER.
@@ -94,7 +113,7 @@ static long univ_fill(void* self, void** a2, void** a3, void** a4, void** a5) {
 }
 #if COMBASE_DBG
 // Versoes que LOGAM o slot chamado e delegam ao MESMO univ_fill do caminho real.
-#define USLI(n) static long usl##n(void* t){(void)t; dbg_slot2(n,0); return (long)0x80004001L;}
+#define USLI(n) static long usl##n(void* t){(void)t; dbg_slot2(n,0); dbg_ra("[cb]   slot"#n" RA=", __builtin_return_address(0)); return (long)0x80004001L;}
 USLI(3)USLI(4)USLI(5)
 #define USL(n) static long usl##n(void* s,void**a2,void**a3,void**a4,void**a5){ long r=univ_fill(s,a2,a3,a4,a5); dbg_slot2(n,0); return r; }
 USL(6)USL(7)USL(8)USL(9)USL(10)USL(11)USL(12)USL(13)USL(14)USL(15)USL(16)USL(17)USL(18)USL(19)USL(20)USL(21)USL(22)USL(23)USL(24)
@@ -302,6 +321,157 @@ __declspec(dllexport) HRESULT_ CoRegisterMessageFilter(void* pNew, void** ppOld)
 __declspec(dllexport) HRESULT_ CoWaitForMultipleHandles(unsigned flags, unsigned long ms, unsigned long cH, void* pH, unsigned long* lpIdx) { (void)flags;(void)ms;(void)cH;(void)pH; if (lpIdx) *lpIdx = 0; return S_OK_; }   // handle 0 "sinalizado"
 
 // ====================================================================
+//  Objetos COM ESPECIFICOS do shell (por CLSID) — o jeito CORRETO (NAO catch-all)
+//  de fazer a init do explorer CONCLUIR. Ao contrario do objeto UNIVERSAL, cada
+//  CLSID aqui tem vtable/semantica proprias e out-params VALIDOS.
+//
+//  CLSID_TaskbandPin {90AA3A4E-1CBA-4233-B8BB-535773D48449} implementa IPinnedList3
+//  {0DD79AE2-...}: a LISTA de itens FIXADOS na barra de tarefas. Num perfil NOVO ela e'
+//  VAZIA. O worker do explorer (RVA 0x1A500, na cadeia do callback 0x2C5BC) faz:
+//     CoCreateInstance(TaskbandPin, IPinnedList3) -> pl->slot3(&enum)   [THROW_IF_FAILED]
+//     pl->QueryInterface(IID_IPinnedList {60274FA2}, &pl2)              [THROW_IF_FAILED]
+//     loop: enum->slot3(1, &ctrl, 0)  (pega proximo item)              [THROW_IF_FAILED]
+//  Antes, slot3 do objeto UNIVERSAL devolvia E_NOTIMPL -> THROW_IF_FAILED -> throw ->
+//  o callback NAO concluia (GLOBAL_C [rip+0x3ad16c] ficava 0 -> rdi=0 -> teardown).
+//  Agora: slot3 devolve S_OK + um ENUMERADOR; enum->slot3 devolve S_FALSE (sem itens),
+//  e o loop de reconciliacao termina a lista VAZIA sem lancar. Contrato observado
+//  (0x1A500): apos enum->slot3, `cmp ebx,1; jne 0x1a90d` — ebx==1 (S_FALSE) cai no
+//  caminho "lista terminada / 0 itens" (0x1a6a4); ebx==0 (S_OK) tentaria PROCESSAR um
+//  item inexistente. Por isso o enum devolve S_FALSE. O byte "hasValue" (pctrl+8) e'
+//  zerado (o caller checa `cmp [rsp+0xc0],0` p/ decidir se libera o item anterior).
+// ====================================================================
+static int guid_eq(const GUID_* a, const GUID_* b) {
+    const unsigned char* x = (const unsigned char*)a; const unsigned char* y = (const unsigned char*)b;
+    for (int i = 0; i < 16; i++) if (x[i] != y[i]) return 0;
+    return 1;
+}
+static const GUID_ CLSID_TaskbandPin = { 0x90AA3A4E, 0x1CBA, 0x4233, { 0xB8,0xBB,0x53,0x57,0x73,0xD4,0x84,0x49 } };
+
+// ---- Enumerador VAZIO da lista fixada (o out-param de IPinnedList3::slot3). ----
+static long pe_QI(void* self, const GUID_* riid, void** ppv) { (void)riid; if (!ppv) return E_POINTER_; *ppv = self; return S_OK_; }
+static ULONG_ pe_AddRef(void* s) { (void)s; return 2; }
+static ULONG_ pe_Release(void* s) { (void)s; return 1; }
+// enum->slot3(this, count, pctrl, flags): SEM itens. Zera o "hasValue" (byte em pctrl+8) e
+// devolve S_FALSE(1) -> a reconciliacao em 0x1A500 conclui a lista VAZIA sem lancar.
+static long pe_next(void* self, unsigned count, void* pctrl, void* flags) {
+    (void)self; (void)count; (void)flags;
+    if (pctrl) *((volatile unsigned char*)pctrl + 8) = 0;
+    return S_FALSE_;
+}
+static void* g_pe_vtbl[64];
+static struct { void** lpVtbl; } g_pe_obj = { 0 };
+static int g_pe_ready = 0;
+static void* pinnedenum_object(void) {
+    if (!g_pe_ready) {
+        g_pe_vtbl[0] = (void*)pe_QI; g_pe_vtbl[1] = (void*)pe_AddRef; g_pe_vtbl[2] = (void*)pe_Release;
+        g_pe_vtbl[3] = (void*)pe_next;
+        for (int i = 4; i < 64; i++) g_pe_vtbl[i] = (void*)univ_fill;   // demais getters -> out valido + S_OK
+        g_pe_obj.lpVtbl = g_pe_vtbl; g_pe_ready = 1;
+    }
+    return &g_pe_obj;
+}
+// ---- IPinnedList3 (CLSID_TaskbandPin): lista de fixados (VAZIA num perfil novo). ----
+static long pl_QI(void* self, const GUID_* riid, void** ppv) { (void)riid; if (!ppv) return E_POINTER_; *ppv = self; return S_OK_; }
+static ULONG_ pl_AddRef(void* s) { (void)s; return 2; }
+static ULONG_ pl_Release(void* s) { (void)s; return 1; }
+// IPinnedList3::slot3(this, out): devolve o enumerador VAZIO. S_OK (nao lanca).
+static long pl_slot3(void* self, void** out) { (void)self; if (out) *out = pinnedenum_object(); return S_OK_; }
+static void* g_pl_vtbl[64];
+static struct { void** lpVtbl; } g_pl_obj = { 0 };
+static int g_pl_ready = 0;
+static void* pinnedlist_object(void) {
+    if (!g_pl_ready) {
+        g_pl_vtbl[0] = (void*)pl_QI; g_pl_vtbl[1] = (void*)pl_AddRef; g_pl_vtbl[2] = (void*)pl_Release;
+        g_pl_vtbl[3] = (void*)pl_slot3;
+        for (int i = 4; i < 64; i++) g_pl_vtbl[i] = (void*)univ_fill;   // slots 11/15/16/18/19 etc.
+        g_pl_obj.lpVtbl = g_pl_vtbl; g_pl_ready = 1;
+    }
+    return &g_pl_obj;
+}
+// ====================================================================
+//  ESCADA DE PERSISTENCIA do wWinMain (mode 3), quando rdi != 0 (0x23ec2):
+//    CoCreateInstance(CLSID_ExplorerHostCreator {AB0B37EC}) -> obj em [rbp+0x2b0]
+//    obj->slot3 (vtbl+0x18, "Create")({682159D9}, ...) -> DesktopExplorerHost em [rsp+0x58]
+//    host->slot5 (vtbl+0x28)  [init]   e   host->slot10 (vtbl+0x50)  [UM roda o loop de msg]
+//  Implementamos os DOIS como objetos COM ESPECIFICOS (por CLSID), NAO pelo universal:
+//    - DesktopExplorerHost::slot5  -> S_OK (init no-op)
+//    - DesktopExplorerHost::slot10 -> LOOP DE MENSAGENS BLOQUEANTE (GetMessage/DispatchMessage
+//      via syscall do win32k) ate WM_QUIT. Enquanto roda, o wWinMain NAO retorna: o explorer
+//      REAL PERSISTE (mesmo mecanismo de fila do win32k que o desktop caseiro ja usa p/ viver).
+// ====================================================================
+static long deh_slot5(void* self)  { (void)self; return S_OK_; }   // init do host: no-op OK
+static long deh_slot10(void* self) {                                // "Run": loop de mensagens
+    (void)self;
+    cb_log("[cb] DesktopExplorerHost::slot10 -> LOOP DE MENSAGENS (o explorer REAL PERSISTE)\n");
+    unsigned char msg[64];                                          // W32_MSG (hwnd/msg/w/lParam/time/pt) < 64
+    for (;;) {
+        long r = cb_getmessage(msg);
+        if (r <= 0) break;                                          // 0 = WM_QUIT, <0 = sem janelas
+        cb_dispatchmessage(msg);                                    // o wndproc real roda no user32 (ring 3)
+    }
+    cb_log("[cb] DesktopExplorerHost::slot10 -> loop terminou (WM_QUIT); wWinMain vai encerrar\n");
+    return S_OK_;
+}
+static void* g_deh_vtbl[64];
+static struct { void** lpVtbl; } g_deh_obj = { 0 };
+static int g_deh_ready = 0;
+static void* desktopexplorerhost_object(void) {
+    if (!g_deh_ready) {
+        g_deh_vtbl[0] = (void*)pl_QI; g_deh_vtbl[1] = (void*)pl_AddRef; g_deh_vtbl[2] = (void*)pl_Release;
+        for (int i = 3; i < 64; i++) g_deh_vtbl[i] = (void*)univ_fill;
+        g_deh_vtbl[5] = (void*)deh_slot5;    // vtbl+0x28
+        g_deh_vtbl[10] = (void*)deh_slot10;  // vtbl+0x50 (loop de msg)
+        g_deh_obj.lpVtbl = g_deh_vtbl; g_deh_ready = 1;
+    }
+    return &g_deh_obj;
+}
+// ExplorerHostCreator::Create (slot3): cria o DesktopExplorerHost e o devolve por out-param.
+// O out-param real fica em [rsp+0x58] do wWinMain — passado a Create num dos args. Varremos
+// a2..a6 (rdx/r8/r9 + 2 args de pilha) por um ponteiro-p/-qword-zerado-alinhado em faixa de
+// usuario (mesma heuristica do univ_fill) e escrevemos o host ali. Logamos os args p/ mapear.
+static long ehc_create(void* self, void* a2, void* a3, void* a4, void* a5, void* a6) {
+    (void)self;
+    // NOTA (sessao 8): observado em runtime que a chamada Create do wWinMain (0x23f56) so
+    // seta rcx(this)+rdx(=CLSID_DesktopExplorerHost); r8/r9/args de pilha sao LIXO (leftover),
+    // e o retorno (rax) e' IGNORADO. Ou seja, o host em [rsp+0x58] NAO vem dos args nem do
+    // retorno de Create — vem de uma construcao interna do explorer (sub 0x2d2fc + delegates
+    // com rcx=rdi/ord#200) ainda por mapear. Portanto NAO tocamos em nenhum arg (escrever num
+    // arg-lixo corromperia um ponteiro real). Preenchemos SO um out-param genuinamente ZERADO
+    // e alinhado, se existir (contrato COM padrao) — hoje nao ocorre, mas fica correto/pronto.
+    void** cands[5] = { (void**)a2, (void**)a3, (void**)a4, (void**)a5, (void**)a6 };
+    for (int i = 0; i < 5; i++) {
+        if (cb_out_ok(cands[i]) && *cands[i] == 0) {
+            *cands[i] = desktopexplorerhost_object();
+            cb_log("[cb]   ExplorerHostCreator::Create -> host no out-param zerado\n");
+            return S_OK_;
+        }
+    }
+    return S_OK_;
+}
+static void* g_ehc_vtbl[64];
+static struct { void** lpVtbl; } g_ehc_obj = { 0 };
+static int g_ehc_ready = 0;
+static void* explorerhostcreator_object(void) {
+    if (!g_ehc_ready) {
+        g_ehc_vtbl[0] = (void*)pl_QI; g_ehc_vtbl[1] = (void*)pl_AddRef; g_ehc_vtbl[2] = (void*)pl_Release;
+        for (int i = 3; i < 64; i++) g_ehc_vtbl[i] = (void*)univ_fill;
+        g_ehc_vtbl[3] = (void*)ehc_create;   // vtbl+0x18 (Create)
+        g_ehc_obj.lpVtbl = g_ehc_vtbl; g_ehc_ready = 1;
+    }
+    return &g_ehc_obj;
+}
+static const GUID_ CLSID_ExplorerHostCreator = { 0xAB0B37EC, 0x56F6, 0x4A0E, { 0xA8,0xFD,0x7A,0x8B,0xF7,0xC2,0xDA,0x96 } };
+
+// Fabrica por-CLSID: devolve um objeto ESPECIFICO se o CLSID for conhecido, senao 0
+// (o chamador cai no objeto universal). Aditivo: novos CLSIDs entram aqui.
+static void* specific_object_for(const GUID_* clsid) {
+    if (!clsid) return 0;
+    if (guid_eq(clsid, &CLSID_TaskbandPin))         return pinnedlist_object();
+    if (guid_eq(clsid, &CLSID_ExplorerHostCreator)) return explorerhostcreator_object();
+    return 0;
+}
+
+// ====================================================================
 //  IMalloc / CoCreateInstance.
 // ====================================================================
 __declspec(dllexport) HRESULT_ CoGetMalloc(unsigned ctx, void** ppMalloc) { (void)ctx; if (!ppMalloc) return E_POINTER_; imalloc_init(); *ppMalloc = &g_imalloc; return S_OK_; }
@@ -312,8 +482,9 @@ __declspec(dllexport) HRESULT_ CoCreateInstance(const GUID_* clsid, void* outer,
     dbg_thread();
 #endif
     dbg_guid("[cb] CoCreateInstance clsid=", clsid); dbg_guid("[cb]            iid=", iid);   // no-op se COMBASE_DBG=0
-    (void)clsid; (void)iid;
-    *ppv = universal_object();     // ponteiro NAO-NULO c/ vtable; metodos -> E_NOTIMPL (degrada)
+    (void)iid;
+    void* specific = specific_object_for(clsid);   // objeto REAL por CLSID (ex.: TaskbandPin)
+    *ppv = specific ? specific : universal_object();
     return S_OK_;
 }
 

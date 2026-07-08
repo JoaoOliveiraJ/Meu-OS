@@ -128,4 +128,37 @@ __declspec(dllexport) void SetThreadFlags(unsigned mask, unsigned value) { g_she
 //      (S_OK/NULL/FALSE — o caminho benigno). Cada ordinal aponta aqui pelo .def. ----
 __declspec(dllexport) long long shell_ord_stub(void) { return 0; }
 
+// ============================================================================
+//  shell32 ordinal #200 (real: RVA 0xa8380). No Windows aloca ~0x2c0 bytes, constroi
+//  um objeto de CONTEXTO DO HOST do shell (le dimensoes de tela via GetSystemMetrics —
+//  SM_C*SCREEN/SM_CYCAPTION...) e devolve o PONTEIRO. O wWinMain do explorer (0x87568 ->
+//  0x875cd) usa esse retorno como rbx->rdi: se != 0 (e GLOBAL_C setado + GLOBAL_B==0), o
+//  wWinMain ENTRA na escada de PERSISTENCIA (0x23ec2: test rdi -> CoCreateInstance
+//  ExplorerHostCreator/DesktopExplorerHost + loop de msg). Antes: shell_ord_stub -> 0 ->
+//  rdi=0 -> teardown (~WorkerWindow -> ExitProcess), o explorer NAO persistia.
+//
+//  Aqui devolvemos um objeto NAO-NULO, ZERADO (0x2c0), com uma vtable de FALLBACK no
+//  offset 0 (QI->self, AddRef/Release->1, demais metodos->S_OK). Assim o explorer, ao usar
+//  rdi, tolera tanto LEITURA DE CAMPO (le 0) quanto CHAMADA VIRTUAL (recebe S_OK) sem #PF.
+//  Objeto singleton (o explorer pede um host so). Aditivo; nao toca em nenhum outro export.
+// ============================================================================
+static long          s200_QI(void* self, const void* riid, void** ppv) { (void)riid; if (ppv) *ppv = self; return 0; }
+static unsigned long s200_ref(void* self) { (void)self; return 1; }
+static long          s200_ok(void* self) { (void)self; return 0; }   // S_OK
+static void*         g_s200_vtbl[64];
+static unsigned char g_s200_obj[0x2c0 + 16];
+static int           g_s200_ready = 0;
+static void s_puts(const char* s) { long long r; __asm__ volatile ("int $0x80" : "=a"(r) : "a"(1LL), "D"(s) : "memory", "rcx", "r11"); }
+__declspec(dllexport) void* shell_ord200(void* arg) {
+    (void)arg;
+    s_puts("[shell32] ord#200 CHAMADA -> devolve host NAO-NULO (rdi != 0 -> persistencia)\n");
+    if (!g_s200_ready) {
+        g_s200_vtbl[0] = (void*)s200_QI; g_s200_vtbl[1] = (void*)s200_ref; g_s200_vtbl[2] = (void*)s200_ref;
+        for (int i = 3; i < 64; i++) g_s200_vtbl[i] = (void*)s200_ok;
+        *(void***)g_s200_obj = g_s200_vtbl;   // vtable no offset 0 (caso o explorer faca call virtual)
+        g_s200_ready = 1;
+    }
+    return g_s200_obj;   // ponteiro NAO-NULO -> rdi != 0 -> caminho de persistencia
+}
+
 int DllMain(void* h, unsigned reason, void* rsv) { (void)h; (void)reason; (void)rsv; return 1; }

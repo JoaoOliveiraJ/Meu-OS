@@ -67,7 +67,7 @@ EXPORTS
     _ord188 = shell_ord_stub @188 NONAME
     _ord190 = shell_ord_stub @190 NONAME
     _ord193 = shell_ord_stub @193 NONAME
-    _ord200 = shell_ord_stub @200 NONAME
+    _ord200 = shell_ord200 @200 NONAME
     _ord201 = shell_ord_stub @201 NONAME
     _ord206 = shell_ord_stub @206 NONAME
     _ord244 = shell_ord_stub @244 NONAME

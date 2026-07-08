@@ -562,6 +562,30 @@ __declspec(dllexport) void __std_terminate(void){ uc_puts("[ucrtbase] __std_term
 //   _CatchableType{ u32 props; i32 pType; ... }            pType -> _TypeDescriptor (RVA)
 //   _TypeDescriptor{ void* pVFTable; void* spare; char name[] }  name @ +0x10 (mangled)
 // O nome (ex.: ".?AV_com_error@@") diz EXATAMENTE o que o worker do explorer lanca.
+// Backtrace de bring-up: no ponto do throw a pilha ainda esta' INTACTA (o dispatch de EH
+// ainda nao rodou). Varremos a pilha por RETURN ADDRESSES que caem na IMAGEM PRINCIPAL
+// (o explorer.exe, base = PEB->ImageBaseAddress) e sao precedidos por um CALL — reconstruindo
+// a cadeia de chamada callback -> ... -> funcao que fez o THROW_IF_FAILED. Revela EXATAMENTE
+// o caminho do throw (RVA = endereco - base), p/ mapear qual init/objeto COM esta' na origem.
+static void uc_throw_backtrace(void) {
+    unsigned long long rsp; __asm__ volatile("mov %%rsp,%0":"=r"(rsp));
+    unsigned long long base = *(volatile unsigned long long*)(0x601000ULL + 0x10);  // PEB->ImageBaseAddress
+    if (!base) return;
+    unsigned long long lo = base, hi = base + 0x800000ULL;
+    uc_puts("[ucrtbase]   backtrace (explorer RVAs de retorno na pilha):\n");
+    unsigned long long* sp = (unsigned long long*)rsp;
+    int shown = 0;
+    for (int i = 0; i < 0x1400 && shown < 40; i++) {
+        unsigned long long v = sp[i];
+        if (v <= lo + 0x1000ULL || v >= hi) continue;    // ignora header/base
+        const unsigned char* p = (const unsigned char*)(__INTPTR_TYPE__)v;
+        int iscall = (p[-5]==0xE8) || (p[-6]==0xFF && p[-5]==0x15) ||
+                     (p[-2]==0xFF && (p[-1]&0xF8)==0xD0) || (p[-3]==0xFF && (p[-2]&0x38)==0x10);
+        if (!iscall) continue;
+        uc_puts("    +0x"); uc_puthex(v - base); uc_puts("\n");
+        shown++;
+    }
+}
 __declspec(dllexport) void _CxxThrowException(void* obj, void* info) {
     uc_puts("[ucrtbase] _CxxThrowException RA=");
     uc_puthex((unsigned long long)(__INTPTR_TYPE__)__builtin_return_address(0));
@@ -583,6 +607,7 @@ __declspec(dllexport) void _CxxThrowException(void* obj, void* info) {
         }
     }
     uc_puts("\n");
+    uc_throw_backtrace();
     // RAISE DE VERDADE: monta o EXCEPTION_RECORD do C++ EH da MS e chama RtlRaiseException.
     // O __CxxFrameHandler3 (estatico no explorer) recebe o dispatch, acha o catch (ex.: o
     // try/catch da threadproc do taskbar em RVA 0x7A880) e trata — o processo NAO morre.

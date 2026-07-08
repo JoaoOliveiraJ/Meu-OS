@@ -104,6 +104,7 @@ __declspec(dllexport) HRESULT_ SHSetThreadRef(void* punk) { (void)punk; return S
 
 // log na serial via SYS_WRITE (rax=1, rdi=string). Sem import -> shcore autocontido.
 static void sc_puts(const char* s) { long long r; __asm__ volatile ("int $0x80" : "=a"(r) : "a"((long long)SYS_WRITE_), "D"(s) : "memory", "rcx", "r11"); }
+static void sc_puthex(unsigned long long v) { char b[19]; b[0]='0'; b[1]='x'; const char* h="0123456789ABCDEF"; for (int i=0;i<16;i++) b[2+i]=h[(v>>((15-i)*4))&0xF]; b[18]=0; sc_puts(b); }
 
 // NtCreateThread (syscall #8) direto: rdi=out_handle, rsi=process(0=corrente),
 // rdx=start, r10=param (convencao do nosso int 0x80). Lanca uma thread ring-3
@@ -138,12 +139,28 @@ typedef unsigned (*sh_threadproc_t)(void*);
 typedef struct { void* proc; void* param; void* cb; } sh_thread_ctx;
 
 // Wrapper que roda na THREAD NOVA (ring-3 preemptiva). Ordem do Windows: primeiro o callback
-// de init (pfnCallback), depois o trabalho principal (pfnThreadProc). Ambos rodam na thread
-// nova (fiel), concorrente com a chamadora.
+// de init (pfnCallback), depois o trabalho principal (pfnThreadProc).
+//
+// MUDANCA (sessao 8): a SHCreateThread so pode BLOQUEAR o chamador ate a INIT (callback) — NAO
+// ate a threadproc. Agora que a init do taskbar CONCLUI (o throw da lista fixada foi resolvido
+// na combase), a pfnThreadProc do explorer (RVA 0x7A880) roda o LOOP DE MENSAGENS do
+// Shell_TrayWnd, que NUNCA retorna. Se o wrapper chamasse a threadproc aqui, ele nunca
+// retornaria e a SHCreateThread (join) travaria a thread PRINCIPAL p/ sempre (deadlock:
+// main esperando a worker que esta num loop de msg infinito).
+//
+// SOLUCAO: apos o callback, lancamos a threadproc numa THREAD PROPRIA e retornamos. A fila de
+// mensagens do win32k e' GLOBAL (por-processo, nao por-thread — ver win32kbase.c queue_pop),
+// entao a threadproc em outra thread processa as msgs do Shell_TrayWnd normalmente. Assim o
+// wrapper retorna logo apos a init -> a SHCreateThread devolve com GLOBAL_C ja setado -> a
+// PRINCIPAL segue p/ o host (ExplorerHostCreator/DesktopExplorerHost) com o SEU loop de msg.
 static void sh_thread_wrapper(sh_thread_ctx* c) {
-    if (c->cb)   ((sh_threadproc_t)c->cb)(c->param);    // init na THREAD NOVA (fiel ao Windows)
-    if (c->proc) ((sh_threadproc_t)c->proc)(c->param);   // trabalho principal
-    // ao retornar, cai no stub de retorno ring-3 -> sys_thread_exit (termina limpo).
+    if (c->cb) ((sh_threadproc_t)c->cb)(c->param);      // init na THREAD NOVA (cria Shell_TrayWnd, seta GLOBAL_C)
+    sc_puts("[shcore] worker: callback (init do taskbar) CONCLUIDO\n");
+    if (c->proc) {                                       // trabalho principal (loop de msg) -> thread propria
+        sc_spawn((void*)c->proc, c->param);
+        sc_puts("[shcore] worker: threadproc (loop de msg) lancada em thread propria; wrapper retorna\n");
+    }
+    // wrapper retorna -> stub de retorno ring-3 -> sys_thread_exit; a SHCreateThread (join) devolve.
 }
 
 __declspec(dllexport) int SHCreateThread(void* pfnThreadProc, void* pData, unsigned dwFlags, void* pfnCallback) {
@@ -167,7 +184,12 @@ __declspec(dllexport) int SHCreateThread(void* pfnThreadProc, void* pData, unsig
     //       retorna. (Se ainda ficar unhandled, o worker e' contido no sys_exit e o join retorna.)
     void* h = sc_spawn((void*)sh_thread_wrapper, c);
     if (!h) return 0;
-    sc_wait(h);   // join: init do taskbar concluida (ou contida) antes de devolver
+    sc_wait(h);   // join: init do taskbar concluida (a threadproc segue em thread propria)
+    // DIAGNOSTICO da persistencia: a init (callback) deve ter preenchido o "GLOBAL_C" do
+    // explorer (pData+8) — sub_0x87628 testa ESSE campo logo apos SHCreateThread; se != 0 (e
+    // GLOBAL_B==0 e shell32!ord#200 != 0), sub_0x87568 devolve rdi != 0 e o wWinMain PERSISTE.
+    sc_puts("[shcore] SHCreateThread: pData="); sc_puthex((unsigned long long)(__INTPTR_TYPE__)pData);
+    sc_puts(" GLOBAL_C(pData+8)="); sc_puthex(pData ? *(unsigned long long*)((char*)pData + 8) : 0); sc_puts("\n");
     return 1;   // TRUE
 }
 __declspec(dllexport) HRESULT_ SHTaskPoolQueueTask(void* pool, void* task) { (void)pool;(void)task; return E_NOTIMPL_; }

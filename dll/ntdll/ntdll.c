@@ -521,10 +521,312 @@ __declspec(dllexport) int  WinSqmIsOptedIn(void) { return 0; }
 __declspec(dllexport) void WinSqmAddToStreamEx(void* a, unsigned b, void* c, unsigned d) { (void)a;(void)b;(void)c;(void)d; }
 __declspec(dllexport) void WinSqmSetDWORD(void* a, unsigned b, unsigned c) { (void)a;(void)b;(void)c; }
 
-// ---- SEH/unwind: sem excecoes ativas -> sem entrada de funcao / handler ----
-__declspec(dllexport) void* RtlLookupFunctionEntry(unsigned long long pc, unsigned long long* imgbase, void* hist) { (void)pc;(void)hist; if (imgbase)*imgbase=0; return 0; }
-__declspec(dllexport) void* RtlVirtualUnwind(unsigned type, unsigned long long base, unsigned long long pc, void* fn, void* ctx, void** hdata, unsigned long long* establisher, void* ctxptrs) { (void)type;(void)base;(void)pc;(void)fn;(void)ctx;(void)establisher;(void)ctxptrs; if (hdata)*hdata=0; return 0; }
-__declspec(dllexport) void RtlCaptureContext(void* ctx) { (void)ctx; }
+// ===================================================================
+//  EXCEPTION HANDLING x64 (SEH + C++ EH) — a maquinaria de UNWIND do NT.
+// ===================================================================
+//  O explorer.exe REAL usa C++ EH da MS: `throw` -> _CxxThrowException (importado
+//  da nossa ucrtbase) e cada funcao com try/catch tem um __CxxFrameHandler3 (estatico
+//  no proprio explorer) no seu UNWIND_INFO. Sem esta maquinaria, todo `throw` virava
+//  terminate (o worker do taskbar dava THROW_IF_FAILED(E_NOTIMPL) e MORRIA o processo).
+//
+//  A DIVISAO de trabalho (ABI do Windows): nos (ntdll) implementamos os PRIMITIVOS de
+//  unwind — RtlLookupFunctionEntry / RtlVirtualUnwind / RtlDispatchException / RtlUnwindEx
+//  / RtlRaiseException / RtlCapture/RestoreContext — com os layouts EXATOS de CONTEXT /
+//  DISPATCHER_CONTEXT / EXCEPTION_RECORD. O codigo gerado pelo compilador DENTRO do
+//  explorer (o __CxxFrameHandler3 dele + os funclets de catch) faz o trabalho de C++
+//  (achar o catch, casar o tipo, rodar destrutores). Ele DIRIGE os nossos Rtl*.
+//
+//  Fluxo de um `throw`:
+//    _CxxThrowException (ucrtbase) monta um EXCEPTION_RECORD (code 0xE06D7363, 4 params:
+//      magic 0x19930520, &obj, &ThrowInfo, imagebase) e chama RtlRaiseException.
+//    RtlRaiseException captura o CONTEXT atual e chama RtlDispatchException.
+//    RtlDispatchException anda a pilha (RtlLookupFunctionEntry + RtlVirtualUnwind) e, em
+//      cada frame com EHANDLER, chama o handler (o __CxxFrameHandler3 do explorer).
+//    O handler que ACHA o catch chama RtlUnwindEx(frame-alvo, ip-do-catch, ...), que
+//      desenrola os frames intermediarios (rodando destrutores via UHANDLER) e transfere
+//      p/ o funclet de catch (RtlRestoreContext). Execucao continua no catch. NAO morre.
+
+// fwd (definido mais abaixo): acha o ptr p/ um diretorio de dados do PE (usamos p/ o .pdata).
+__declspec(dllexport) void* RtlImageDirectoryEntryToData(void* base, unsigned char mapped, unsigned short dir, unsigned long* size);
+
+typedef struct { unsigned int BeginAddress, EndAddress, UnwindData; } RUNTIME_FUNCTION_;
+
+// CONTEXT x64 (layout EXATO do windows.h — offsets fixos que o CRT do explorer le).
+typedef struct __attribute__((aligned(16))) {
+    unsigned long long P1Home,P2Home,P3Home,P4Home,P5Home,P6Home;   // 0x00
+    unsigned int ContextFlags;                                       // 0x30
+    unsigned int MxCsr;                                              // 0x34
+    unsigned short SegCs,SegDs,SegEs,SegFs,SegGs,SegSs;              // 0x38
+    unsigned int EFlags;                                             // 0x44
+    unsigned long long Dr0,Dr1,Dr2,Dr3,Dr6,Dr7;                      // 0x48
+    unsigned long long Rax,Rcx,Rdx,Rbx,Rsp,Rbp,Rsi,Rdi;             // 0x78 (nums 0..7)
+    unsigned long long R8,R9,R10,R11,R12,R13,R14,R15;               // 0xB8 (nums 8..15)
+    unsigned long long Rip;                                          // 0xF8
+    unsigned char FltSave[512];                                      // 0x100 (area FXSAVE; Xmm0 @ +0xA0)
+    unsigned long long VectorRegister[52];                           // 0x300
+    unsigned long long VectorControl;                                // 0x4A0
+    unsigned long long DebugControl,LastBranchToRip,LastBranchFromRip,LastExceptionToRip,LastExceptionFromRip; // 0x4A8
+} CONTEXT_;   // 0x4D0 bytes
+
+typedef struct _EXCEPTION_RECORD_ {
+    unsigned int ExceptionCode;                                      // 0x00
+    unsigned int ExceptionFlags;                                     // 0x04
+    struct _EXCEPTION_RECORD_* ExceptionRecord;                      // 0x08
+    void* ExceptionAddress;                                          // 0x10
+    unsigned int NumberParameters;                                   // 0x18
+    unsigned int __pad;                                              // 0x1C
+    unsigned long long ExceptionInformation[15];                     // 0x20
+} EXCEPTION_RECORD_;
+
+typedef struct {
+    unsigned long long ControlPc;        // 0x00
+    unsigned long long ImageBase;        // 0x08
+    RUNTIME_FUNCTION_* FunctionEntry;    // 0x10
+    unsigned long long EstablisherFrame; // 0x18
+    unsigned long long TargetIp;         // 0x20
+    CONTEXT_* ContextRecord;             // 0x28
+    void* LanguageHandler;               // 0x30
+    void* HandlerData;                   // 0x38 (p/ __CxxFrameHandler3 = ptr p/ RVA do FuncInfo)
+    void* HistoryTable;                  // 0x40
+    unsigned int ScopeIndex;             // 0x48
+    unsigned int Fill0;                  // 0x4C
+} DISPATCHER_CONTEXT_;
+
+// UNWIND_INFO: Version:3|Flags:5, SizeOfProlog, CountOfCodes, FrameReg:4|FrameOff:4, codes[].
+typedef struct { unsigned char VerFlags, SizeProlog, CountCodes, FrameRegOff; unsigned short Code[1]; } UNWIND_INFO_;
+
+#define UNW_EHANDLER 1
+#define UNW_UHANDLER 2
+#define UNW_CHAININFO 4
+#define EXC_UNWINDING 0x02
+#define EXC_EXIT_UNWIND 0x04
+#define EXC_TARGET_UNWIND 0x20
+#define EXC_NONCONTINUABLE 0x01
+#define SYS_MODULEFORPC 52
+
+#define EH_DBG 0     // 1 = loga o dispatch/unwind na serial (diagnostico do C++ EH)
+#if EH_DBG
+static void nt_puts(const char* s) { long long r; __asm__ volatile("int $0x80":"=a"(r):"a"(1LL),"D"(s):"memory","rcx","r11"); }
+static void nt_hex(unsigned long long v){ char b[19]; b[0]='0';b[1]='x'; for(int i=0;i<16;i++){int n=(int)((v>>((15-i)*4))&0xF); b[2+i]=(char)(n<10?'0'+n:'a'+n-10);} b[18]=0; nt_puts(b); }
+#else
+#define nt_puts(s) ((void)0)
+#define nt_hex(v) ((void)0)
+#endif
+
+// Captura o CONTEXT atual (regs no ponto da CHAMADA). Folha (sem frame) -> RIP=retorno,
+// RSP=rsp do chamador. Naked: so asm, sem prologo (assim nao ha .pdata a interpretar).
+__declspec(dllexport) __attribute__((naked)) void RtlCaptureContext(void* ctx) {
+    __asm__ volatile(
+        "movq %rax, 0x78(%rcx)\n movq %rcx, 0x80(%rcx)\n movq %rdx, 0x88(%rcx)\n movq %rbx, 0x90(%rcx)\n"
+        "leaq 8(%rsp), %rax\n movq %rax, 0x98(%rcx)\n"      // Rsp = rsp+8 (pos-ret)
+        "movq %rbp, 0xA0(%rcx)\n movq %rsi, 0xA8(%rcx)\n movq %rdi, 0xB0(%rcx)\n"
+        "movq %r8, 0xB8(%rcx)\n movq %r9, 0xC0(%rcx)\n movq %r10, 0xC8(%rcx)\n movq %r11, 0xD0(%rcx)\n"
+        "movq %r12, 0xD8(%rcx)\n movq %r13, 0xE0(%rcx)\n movq %r14, 0xE8(%rcx)\n movq %r15, 0xF0(%rcx)\n"
+        "movq (%rsp), %rax\n movq %rax, 0xF8(%rcx)\n"       // Rip = endereco de retorno
+        "movl $0x10000f, 0x30(%rcx)\n"                       // ContextFlags = AMD64|CONTROL|INTEGER|SEGMENTS|FLOAT
+        "ret\n");
+}
+// Carrega TODOS os regs de 'ctx' e salta p/ ctx->Rip (transferencia final do unwind).
+__declspec(dllexport) __attribute__((naked)) void RtlRestoreContext(void* ctx, void* rec) {
+    __asm__ volatile(
+        "movq 0x78(%rcx), %rax\n movq 0x88(%rcx), %rdx\n movq 0x90(%rcx), %rbx\n"
+        "movq 0xA0(%rcx), %rbp\n movq 0xA8(%rcx), %rsi\n movq 0xB0(%rcx), %rdi\n"
+        "movq 0xB8(%rcx), %r8\n movq 0xC0(%rcx), %r9\n movq 0xC8(%rcx), %r10\n movq 0xD0(%rcx), %r11\n"
+        "movq 0xD8(%rcx), %r12\n movq 0xE0(%rcx), %r13\n movq 0xE8(%rcx), %r14\n movq 0xF0(%rcx), %r15\n"
+        "movq 0x98(%rcx), %rsp\n"                            // rsp = alvo
+        "pushq 0xF8(%rcx)\n"                                 // empurra Rip alvo (sem red-zone no Win64)
+        "movq 0x80(%rcx), %rcx\n"                            // restaura rcx por ultimo
+        "ret\n");                                            // pop Rip -> salta
+}
+
+// Syscall #52: base do modulo que contem o PC (p/ achar o .pdata).
+static int nt_module_for_pc(unsigned long long pc, unsigned long long* base, unsigned* size) {
+    unsigned long long b=0; unsigned s=0;
+    long long ok = sc3(SYS_MODULEFORPC, (long long)pc, IP(&b), IP(&s));
+    if (base)*base=b; if (size)*size=s; return (int)ok;
+}
+
+// RtlLookupFunctionEntry(pc,&imgbase,hist): acha o RUNTIME_FUNCTION do .pdata que cobre o PC.
+__declspec(dllexport) void* RtlLookupFunctionEntry(unsigned long long pc, unsigned long long* imgbase, void* hist) {
+    (void)hist;
+    unsigned long long base=0; unsigned size=0;
+    if (!nt_module_for_pc(pc,&base,&size) || !base) { if(imgbase)*imgbase=0; return 0; }
+    if (imgbase) *imgbase = base;
+    unsigned long pdsize=0;
+    RUNTIME_FUNCTION_* pd = (RUNTIME_FUNCTION_*)RtlImageDirectoryEntryToData((void*)(__INTPTR_TYPE__)base, 1, 3, &pdsize);
+    if (!pd || !pdsize) return 0;
+    unsigned n = (unsigned)(pdsize / sizeof(RUNTIME_FUNCTION_));
+    unsigned rva = (unsigned)(pc - base);
+    unsigned lo=0, hi=n;                                     // .pdata ordenada por BeginAddress -> busca binaria
+    while (lo < hi) {
+        unsigned mid = (lo+hi)/2;
+        if (rva < pd[mid].BeginAddress) hi = mid;
+        else if (rva >= pd[mid].EndAddress) lo = mid+1;
+        else return &pd[mid];
+    }
+    return 0;
+}
+
+// RtlVirtualUnwind: desenrola UM frame interpretando os UNWIND_CODEs; restaura os regs
+// nao-volateis em 'ctx', avanca ctx->Rip/Rsp p/ o chamador, e devolve o handler (se o
+// flag pedido — EHANDLER/UHANDLER — estiver setado) + *hdata (dados do handler = FuncInfo).
+__declspec(dllexport) void* RtlVirtualUnwind(unsigned type, unsigned long long base, unsigned long long pc,
+        void* fnv, void* ctxv, void** hdata, unsigned long long* establisher, void* ctxptrs) {
+    (void)pc; (void)ctxptrs;
+    RUNTIME_FUNCTION_* fn = (RUNTIME_FUNCTION_*)fnv;
+    CONTEXT_* ctx = (CONTEXT_*)ctxv;
+    unsigned long long* gpr = &ctx->Rax;    // indexado 0..15 = RAX,RCX,RDX,RBX,RSP,RBP,RSI,RDI,R8..R15
+    UNWIND_INFO_* info = (UNWIND_INFO_*)(__INTPTR_TYPE__)(base + fn->UnwindData);
+    unsigned flags = info->VerFlags >> 3;
+    unsigned frameReg = info->FrameRegOff & 0xF;
+    unsigned frameOff = (info->FrameRegOff >> 4) & 0xF;
+    // frame base (p/ SAVE_NONVOL e EstablisherFrame): valor fixo do frame pointer, se houver.
+    unsigned long long frame_base = frameReg ? (gpr[frameReg] - (unsigned long long)frameOff*16) : ctx->Rsp;
+    if (establisher) *establisher = frame_base;
+    void* handler = 0; void* handlerdata = 0; int machframe = 0;
+    for (;;) {
+        unsigned count = info->CountCodes;
+        unsigned short* codes = info->Code;
+        unsigned i = 0;
+        while (i < count) {
+            unsigned op = codes[i] >> 8;
+            unsigned oi = (op >> 4) & 0xF; op &= 0xF;
+            switch (op) {
+                case 0: gpr[oi] = *(unsigned long long*)(__INTPTR_TYPE__)ctx->Rsp; ctx->Rsp += 8; i += 1; break; // PUSH_NONVOL
+                case 1: if (oi==0){ ctx->Rsp += (unsigned long long)codes[i+1]*8; i+=2; }               // ALLOC_LARGE
+                        else       { ctx->Rsp += *(unsigned int*)&codes[i+1]; i+=3; } break;
+                case 2: ctx->Rsp += (unsigned long long)oi*8 + 8; i += 1; break;                        // ALLOC_SMALL
+                case 3: ctx->Rsp = gpr[frameReg] - (unsigned long long)frameOff*16; i += 1; break;      // SET_FPREG
+                case 4: gpr[oi] = *(unsigned long long*)(__INTPTR_TYPE__)(frame_base + (unsigned long long)codes[i+1]*8); i += 2; break;   // SAVE_NONVOL
+                case 5: gpr[oi] = *(unsigned long long*)(__INTPTR_TYPE__)(frame_base + *(unsigned int*)&codes[i+1]); i += 3; break;        // SAVE_NONVOL_FAR
+                case 8: i += 2; break;                                                                  // SAVE_XMM128 (nao restauramos xmm)
+                case 9: i += 3; break;                                                                  // SAVE_XMM128_FAR
+                case 10: { unsigned long long sp = ctx->Rsp; if (oi) sp += 8;                           // PUSH_MACHFRAME
+                           ctx->Rip = *(unsigned long long*)(__INTPTR_TYPE__)(sp+0);
+                           ctx->Rsp = *(unsigned long long*)(__INTPTR_TYPE__)(sp+24); machframe = 1; i += 1; break; }
+                default: i += 1; break;
+            }
+        }
+        if ((flags & type) && !handler) {
+            unsigned nc = (count + 1) & ~1u;
+            unsigned int* p = (unsigned int*)&info->Code[nc];
+            handler = (void*)(__INTPTR_TYPE__)(base + *p);
+            handlerdata = (void*)(p + 1);
+        }
+        if (flags & UNW_CHAININFO) {
+            unsigned nc = (count + 1) & ~1u;
+            RUNTIME_FUNCTION_* ch = (RUNTIME_FUNCTION_*)&info->Code[nc];
+            info = (UNWIND_INFO_*)(__INTPTR_TYPE__)(base + ch->UnwindData);
+            flags = info->VerFlags >> 3;
+            continue;   // acumula os codes do pai (funclet -> funcao mae); frame_base mantem
+        }
+        break;
+    }
+    if (!machframe) { ctx->Rip = *(unsigned long long*)(__INTPTR_TYPE__)ctx->Rsp; ctx->Rsp += 8; } // pop do retorno
+    if (hdata) *hdata = handlerdata;
+    return handler;
+}
+
+typedef int (*eh_handler_t)(EXCEPTION_RECORD_*, void*, CONTEXT_*, DISPATCHER_CONTEXT_*);
+
+// RtlDispatchException: 1a passada (busca). Anda a pilha; em cada frame com EHANDLER chama
+// o language handler. ContinueSearch(1) -> proximo frame. ContinueExecution(0) -> retoma.
+// Se o handler ACHA um catch, ele chama RtlUnwindEx e NAO retorna (transfere p/ o catch).
+__declspec(dllexport) int RtlDispatchException(EXCEPTION_RECORD_* rec, CONTEXT_* ctx) {
+    CONTEXT_ cur = *ctx;
+    for (int f = 0; f < 4096; f++) {
+        unsigned long long base = 0;
+        RUNTIME_FUNCTION_* fn = (RUNTIME_FUNCTION_*)RtlLookupFunctionEntry(cur.Rip, &base, 0);
+        if (!fn) {                                          // folha: sem unwind info
+            if (cur.Rsp < 0x10000) break;
+            cur.Rip = *(unsigned long long*)(__INTPTR_TYPE__)cur.Rsp; cur.Rsp += 8;
+            if (!cur.Rip) break;
+            continue;
+        }
+        CONTEXT_ unwound = cur;
+        void* hdata = 0; unsigned long long est = 0;
+        void* handler = RtlVirtualUnwind(UNW_EHANDLER, base, cur.Rip, fn, &unwound, &hdata, &est, 0);
+#if EH_DBG
+        nt_puts("  [disp] rip="); nt_hex(cur.Rip); nt_puts(" base="); nt_hex(base);
+        nt_puts(" -> next="); nt_hex(unwound.Rip); nt_puts(" handler="); nt_hex((unsigned long long)(__INTPTR_TYPE__)handler); nt_puts("\n");
+#endif
+        if (handler) {
+            DISPATCHER_CONTEXT_ dc;
+            dc.ControlPc=cur.Rip; dc.ImageBase=base; dc.FunctionEntry=fn; dc.EstablisherFrame=est;
+            dc.TargetIp=0; dc.ContextRecord=ctx; dc.LanguageHandler=handler; dc.HandlerData=hdata;
+            dc.HistoryTable=0; dc.ScopeIndex=0; dc.Fill0=0;
+            int disp = ((eh_handler_t)handler)(rec, (void*)(__INTPTR_TYPE__)est, ctx, &dc);
+            if (disp == 0) {                                // ContinueExecution
+                if (rec->ExceptionFlags & EXC_NONCONTINUABLE) return 0;
+                RtlRestoreContext(ctx, rec);                // nao retorna
+            }
+            // disp==1 (ContinueSearch): segue. (Nested/Collided: tratamos como search.)
+        }
+        cur = unwound;
+        if (!cur.Rip) break;
+    }
+    return 0;   // ninguem tratou -> volta p/ RtlRaiseException (terminate)
+}
+
+// RtlUnwindEx(alvo_frame, alvo_ip, rec, retval, ctx, hist): desenrola da chamada atual ate
+// o frame-alvo, rodando os handlers de unwind (UHANDLER: destrutores/__finally), e transfere
+// p/ alvo_ip com o CONTEXT do frame-alvo (rax=retval). Chamado pelo __CxxFrameHandler3 do
+// explorer ao achar o catch. NAO retorna.
+__declspec(dllexport) void RtlUnwindEx(void* target_frame, void* target_ip, EXCEPTION_RECORD_* rec,
+        void* retval, CONTEXT_* ctx, void* hist) {
+    (void)hist;
+    RtlCaptureContext(ctx);                                 // ponto atual (dentro do RtlUnwindEx)
+    static EXCEPTION_RECORD_ s_unwrec;
+    if (!rec) { s_unwrec.ExceptionCode=0xC0000027; s_unwrec.ExceptionFlags=0; s_unwrec.NumberParameters=0; rec = &s_unwrec; }
+    rec->ExceptionFlags |= EXC_UNWINDING;
+    if (!target_frame) rec->ExceptionFlags |= EXC_EXIT_UNWIND;
+    CONTEXT_ cur = *ctx;
+    for (int f = 0; f < 4096; f++) {
+        unsigned long long base = 0;
+        RUNTIME_FUNCTION_* fn = (RUNTIME_FUNCTION_*)RtlLookupFunctionEntry(cur.Rip, &base, 0);
+        if (!fn) {
+            if (cur.Rsp < 0x10000) break;
+            cur.Rip = *(unsigned long long*)(__INTPTR_TYPE__)cur.Rsp; cur.Rsp += 8;
+            if (!cur.Rip) break;
+            continue;
+        }
+        CONTEXT_ unwound = cur;
+        void* hdata = 0; unsigned long long est = 0;
+        void* handler = RtlVirtualUnwind(UNW_UHANDLER, base, cur.Rip, fn, &unwound, &hdata, &est, 0);
+        int is_target = (est == (unsigned long long)(__INTPTR_TYPE__)target_frame);
+        if (is_target) rec->ExceptionFlags |= EXC_TARGET_UNWIND;
+        if (handler) {
+            DISPATCHER_CONTEXT_ dc;
+            dc.ControlPc=cur.Rip; dc.ImageBase=base; dc.FunctionEntry=fn; dc.EstablisherFrame=est;
+            dc.TargetIp=(unsigned long long)(__INTPTR_TYPE__)target_ip; dc.ContextRecord=&cur;
+            dc.LanguageHandler=handler; dc.HandlerData=hdata; dc.HistoryTable=0; dc.ScopeIndex=0; dc.Fill0=0;
+            ((eh_handler_t)handler)(rec, (void*)(__INTPTR_TYPE__)est, &cur, &dc);  // roda destrutores/finally
+        }
+        if (is_target) break;
+        cur = unwound;
+        if (!cur.Rip) break;
+    }
+    // transfere p/ o catch: mesmo CONTEXT do frame-alvo, mas Rip=alvo_ip e rax=retval.
+    cur.Rip = (unsigned long long)(__INTPTR_TYPE__)target_ip;
+    cur.Rax = (unsigned long long)(__INTPTR_TYPE__)retval;
+    RtlRestoreContext(&cur, rec);                           // nao retorna
+}
+
+// RtlRaiseException: captura o contexto e dispara a 1a passada de dispatch. Se ninguem
+// tratar (dispatch devolve 0), retorna ao chamador (que decide terminar).
+__declspec(dllexport) void RtlRaiseException(EXCEPTION_RECORD_* rec) {
+    CONTEXT_ ctx;
+    RtlCaptureContext(&ctx);
+    rec->ExceptionAddress = (void*)(__INTPTR_TYPE__)ctx.Rip;
+#if EH_DBG
+    nt_puts("[ntdll] RtlRaiseException code="); nt_hex(rec->ExceptionCode);
+    nt_puts(" rip="); nt_hex(ctx.Rip); nt_puts(" rsp="); nt_hex(ctx.Rsp); nt_puts("\n");
+#endif
+    RtlDispatchException(rec, &ctx);
+#if EH_DBG
+    nt_puts("[ntdll] RtlRaiseException: NENHUM handler tratou (unhandled)\n");
+#endif
+}
 
 // ---- diversos: mapeamento de status, imagem, path, policy — stubs especificos ----
 __declspec(dllexport) unsigned char RtlIsStateSeparationEnabled(void) { return 0; }

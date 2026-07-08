@@ -427,7 +427,7 @@ if (Test-Path $ntdllSrc) {
     if (Test-Path $ucrtbaseSrc) {
         Write-Host "[dll] ucrtbase.dll (CRT minimo p/ .exe real)"
         & $zig cc @dc '-Wl,--image-base=0x3300000' "-Wl,--out-implib,$(Join-Path $out 'libucrtbase.a')" `
-            -o (Join-Path $out 'ucrtbase.dll') $ucrtbaseSrc (Join-Path $out 'libkernel32.a')
+            -o (Join-Path $out 'ucrtbase.dll') $ucrtbaseSrc (Join-Path $out 'libkernel32.a') (Join-Path $out 'libntdll.a')
         if ($LASTEXITCODE) { throw "ucrtbase.dll falhou." }
     }
     # ddraw.dll: pulado na 1a passada — sera construido APOS d3d11.dll (que

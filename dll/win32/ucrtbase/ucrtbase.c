@@ -15,6 +15,35 @@ unsigned int _tls_index = 0;
 __declspec(dllimport) void  ExitProcess(unsigned code);
 __declspec(dllimport) void* GetStdHandle(unsigned which);
 __declspec(dllimport) int   WriteFile(void* h, const void* buf, unsigned len, unsigned* written, void* ov);
+__declspec(dllimport) void  RtlRaiseException(void* rec);   // ntdll: dispara o C++ EH (dispatch/unwind)
+
+// ---------------------------------------------------------------------------
+//  DIAGNOSTICO — log direto na serial via SYS_WRITE (int 0x80 #1, rdi=string),
+//  sem depender de WriteFile/console (o kernel imprime rdi como C-string). Usado
+//  p/ instrumentar os caminhos FATAIS do CRT (abort/terminate/_CxxThrowException):
+//  quando o worker do explorer REAL "morre", precisamos saber QUAL caminho e de ONDE
+//  (endereco de retorno do chamador) — e, no caso de throw C++, QUAL TIPO foi lancado.
+// ---------------------------------------------------------------------------
+static void uc_puts(const char* s) { long long r; __asm__ volatile("int $0x80":"=a"(r):"a"(1LL),"D"(s):"memory","rcx","r11"); }
+static void uc_puthex(unsigned long long v) {
+    char b[19]; b[0]='0'; b[1]='x';
+    for (int i=0;i<16;i++){ int nib=(int)((v>>((15-i)*4))&0xF); b[2+i]=(char)(nib<10?('0'+nib):('a'+nib-10)); }
+    b[18]=0; uc_puts(b);
+}
+// Acha a base (header 'MZ'/'PE') do modulo que contem 'p', varrendo p/ tras em passos de
+// pagina. As RVAs dentro de _ThrowInfo sao relativas a essa base. O('MZ' @ base, imagem
+// mapeada contigua) garante que paramos ANTES de tocar pagina nao-mapeada abaixo da base.
+static const unsigned char* uc_module_base(const void* p) {
+    unsigned long long a = ((unsigned long long)(__INTPTR_TYPE__)p) & ~0xFFFULL;
+    for (int i=0; i<8192 && a>=0x10000ULL; i++, a-=0x1000ULL) {
+        const unsigned char* m = (const unsigned char*)(__INTPTR_TYPE__)a;
+        if (m[0]=='M' && m[1]=='Z') {
+            unsigned e = *(const unsigned*)(m+0x3C);
+            if (e < 0x10000 && *(const unsigned*)(m+e)==0x00004550u) return m;   // 'PE\0\0'
+        }
+    }
+    return 0;
+}
 
 // ---------------------------------------------------------------------------
 //  heap — bump allocator sobre um buffer estatico (sem free real; basta p/ o CRT).
@@ -180,7 +209,7 @@ __declspec(dllexport) void _cexit(void) { }
 // assume p/ exit/_exit/abort (ele nao sabe que ExitProcess nao retorna).
 __declspec(dllexport) void exit(int code)  { ExitProcess((unsigned)code); for (;;) {} }
 __declspec(dllexport) void _exit(int code) { ExitProcess((unsigned)code); for (;;) {} }
-__declspec(dllexport) void abort(void)     { ExitProcess(3);              for (;;) {} }
+__declspec(dllexport) void abort(void)     { uc_puts("[ucrtbase] abort() RA="); uc_puthex((unsigned long long)(__INTPTR_TYPE__)__builtin_return_address(0)); uc_puts("\n"); ExitProcess(3); for (;;) {} }
 
 // ---------------------------------------------------------------------------
 //  private / SEH — __C_specific_handler. So existe p/ resolver; sem exceptions
@@ -524,9 +553,55 @@ __declspec(dllexport) unsigned ___lc_codepage_func(void) { return 0; }
 __declspec(dllexport) int*      __p__commode2(void) { return __p__commode(); }
 
 // ---- terminate / C++ EH (ainda nao implementado -> throw = terminate) ----
-__declspec(dllexport) void terminate(void)      { ExitProcess(3); for(;;){} }
-__declspec(dllexport) void __std_terminate(void){ ExitProcess(3); for(;;){} }
-__declspec(dllexport) void _CxxThrowException(void* obj, void* info) { (void)obj; (void)info; ExitProcess(3); for(;;){} }
+__declspec(dllexport) void terminate(void)      { uc_puts("[ucrtbase] terminate() RA="); uc_puthex((unsigned long long)(__INTPTR_TYPE__)__builtin_return_address(0)); uc_puts("\n"); ExitProcess(3); for(;;){} }
+__declspec(dllexport) void __std_terminate(void){ uc_puts("[ucrtbase] __std_terminate() RA="); uc_puthex((unsigned long long)(__INTPTR_TYPE__)__builtin_return_address(0)); uc_puts("\n"); ExitProcess(3); for(;;){} }
+// _CxxThrowException(obj, _ThrowInfo*) — o compilador MSVC emite ISTO p/ cada `throw`
+// C++. Sem dispatch de EH aqui, um throw = fim. INSTRUMENTADO: decodifica o tipo lancado.
+//   _ThrowInfo{ u32 attrs; i32 pmfnUnwind; i32 pForwardCompat; i32 pCatchableTypeArray }
+//   _CatchableTypeArray{ i32 nTypes; i32 arrayOfTypes[] }  (RVAs, base = modulo do throw)
+//   _CatchableType{ u32 props; i32 pType; ... }            pType -> _TypeDescriptor (RVA)
+//   _TypeDescriptor{ void* pVFTable; void* spare; char name[] }  name @ +0x10 (mangled)
+// O nome (ex.: ".?AV_com_error@@") diz EXATAMENTE o que o worker do explorer lanca.
+__declspec(dllexport) void _CxxThrowException(void* obj, void* info) {
+    uc_puts("[ucrtbase] _CxxThrowException RA=");
+    uc_puthex((unsigned long long)(__INTPTR_TYPE__)__builtin_return_address(0));
+    uc_puts(" obj="); uc_puthex((unsigned long long)(__INTPTR_TYPE__)obj);
+    uc_puts(" info="); uc_puthex((unsigned long long)(__INTPTR_TYPE__)info);
+    const unsigned char* base = info ? uc_module_base(info) : 0;
+    if (base) {
+        int cta_rva = *(const int*)((const char*)info + 12);        // pCatchableTypeArray
+        if (cta_rva) {
+            const char* cta = (const char*)base + (unsigned)cta_rva;
+            int n = *(const int*)cta;
+            if (n > 0) {
+                int ct_rva = *(const int*)(cta + 4);                // 1o _CatchableType
+                const char* ct = (const char*)base + (unsigned)ct_rva;
+                int td_rva = *(const int*)(ct + 4);                 // pType -> _TypeDescriptor
+                const char* td = (const char*)base + (unsigned)td_rva;
+                uc_puts(" type="); uc_puts(td + 16);                 // name mangled
+            }
+        }
+    }
+    uc_puts("\n");
+    // RAISE DE VERDADE: monta o EXCEPTION_RECORD do C++ EH da MS e chama RtlRaiseException.
+    // O __CxxFrameHandler3 (estatico no explorer) recebe o dispatch, acha o catch (ex.: o
+    // try/catch da threadproc do taskbar em RVA 0x7A880) e trata — o processo NAO morre.
+    // Layout do EXCEPTION_RECORD igual ao da ntdll. 4 params (x64 C++ EH):
+    //   [0]=EH_MAGIC(0x19930520) [1]=&obj [2]=&ThrowInfo [3]=imagebase (base das RVAs do ThrowInfo).
+    struct { unsigned code, flags; void* rec; void* addr; unsigned nparams, pad; unsigned long long info[15]; } er;
+    for (unsigned i = 0; i < sizeof(er); i++) ((unsigned char*)&er)[i] = 0;
+    er.code = 0xE06D7363u;            // 'msc' | 0xE0000000 = C++ exception
+    er.flags = 1;                     // EXCEPTION_NONCONTINUABLE
+    er.nparams = 4;
+    er.info[0] = 0x19930520ULL;       // EH_MAGIC_NUMBER1
+    er.info[1] = (unsigned long long)(__INTPTR_TYPE__)obj;
+    er.info[2] = (unsigned long long)(__INTPTR_TYPE__)info;
+    er.info[3] = (unsigned long long)(__INTPTR_TYPE__)base;   // imagebase (do modulo do throw)
+    RtlRaiseException(&er);
+    // So chega aqui se NINGUEM tratou (unhandled) -> terminate, como o Windows.
+    uc_puts("[ucrtbase] throw NAO tratado -> terminate\n");
+    ExitProcess(3); for(;;){}
+}
 __declspec(dllexport) int  __CxxFrameHandler3(void* r, void* f, void* c, void* d) { (void)r;(void)f;(void)c;(void)d; return 1; }
 __declspec(dllexport) int  __CxxFrameHandler4(void* r, void* f, void* c, void* d) { (void)r;(void)f;(void)c;(void)d; return 1; }
 __declspec(dllexport) void __std_exception_copy(void* from, void* to)   { (void)from; (void)to; }

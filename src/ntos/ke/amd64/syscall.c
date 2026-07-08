@@ -94,6 +94,69 @@ static void sys_messagebox(struct regs* r) {
     win32k_messagebox((const char*)(uintptr_t)r->rdi, (const char*)(uintptr_t)r->rsi);
     r->rax = 1;   // IDOK
 }
+// ---------------------------------------------------------------------------
+// SIMBOLIZADOR DE PILHA (diagnostico do FailFast do worker do explorer real)
+// ---------------------------------------------------------------------------
+// O dump antigo imprimia 24 slots CRUS da pilha do worker. PROBLEMA: a maioria
+// desses valores NAO sao enderecos de retorno — sao ponteiros p/ strings (.rdata),
+// vtables, ou lixo de frames ja retornados. Ao "casar" coincidencias eu perseguia
+// fantasmas (ex.: 0x046BFCA0 parecia explorer+0x3A6CA0, mas 0x3A6CA0 e' a STRING
+// "Explorer"; e todos os dui70+0xD6xx caiam NO MEIO de instrucoes). Resultado: o
+// muro foi mal-mapeado.
+//
+// A solucao correta e' SIMBOLIZAR: para cada slot da pilha,
+//   (1) achar o modulo carregado que CONTEM o valor (via tabela do loader), e
+//   (2) confirmar que os bytes ANTES do valor formam um CALL (senao nao e' um
+//       endereco de retorno, e' dado). So imprimimos os que passam nos dois testes.
+// Isso separa cirurgicamente a cadeia REAL de chamadas (frames vivos) do lixo, e
+// da' o "modulo+RVA" de cada frame — exatamente o que preciso p/ desmontar o ponto
+// do FailFast e implementar o objeto/metodo COM/DirectUI que o explorer exige.
+
+// Acha o modulo carregado que contem 'addr'. Como o PMM empacota as imagens de
+// forma contigua (explorer, msvcp, combase quase colados), escolhemos o modulo de
+// MAIOR base que ainda contem o endereco (o "mais proximo por baixo") — assim um
+// endereco na combase nao e' atribuido por engano ao explorer que a precede.
+static int sc_symbolize(uint64_t addr, const char** out_name, uint64_t* out_rva) {
+    int n = ldr_get_module_count();
+    int best = -1; uint64_t best_base = 0, best_rva = 0; const char* best_name = 0;
+    for (int i = 0; i < n; i++) {
+        uint64_t base; uint32_t size; const char* nm;
+        if (!ldr_get_module_info(i, &base, &size, &nm)) continue;
+        if (size == 0) continue;
+        if (addr >= base && addr < base + (uint64_t)size) {
+            if (base >= best_base) { best_base = base; best = i; best_rva = addr - base; best_name = nm; }
+        }
+    }
+    if (best < 0) return 0;
+    if (out_name) *out_name = best_name;
+    if (out_rva)  *out_rva  = best_rva;
+    return 1;
+}
+
+// Heuristica "isto e' um endereco de RETORNO?": um retorno aponta p/ a instrucao
+// logo APOS um CALL. Lemos os bytes imediatamente antes de 'ra' e casamos as formas
+// de CALL do x86-64 que o compilador da MS emite (as unicas que importam aqui):
+//   E8 rel32                     -> call direto (5 bytes)          [ra-5]=E8
+//   FF 15 disp32                 -> call [rip+disp] (import/IAT)    [ra-6]=FF [ra-5]=15
+//   [41] FF D0..D7               -> call reg (rax..r15)            [ra-2]=FF, D0..D7
+//   FF 10..17 (!=14,15)          -> call [reg]                     [ra-2]=FF, 10..17
+//   [REX] FF 50..57 disp8        -> call [reg+disp8] (metodo virt) [ra-3]=FF, 50..57
+//   FF 90..97 disp32             -> call [reg+disp32] (virt longo) [ra-7]=FF, 90..97
+// 'ra' ja passou por sc_symbolize (esta dentro de uma imagem mapeada e bem acima do
+// header), entao ler ra-7..ra-1 e' seguro.
+static int sc_is_retaddr(uint64_t ra) {
+    if (ra < 0x1000) return 0;
+    const uint8_t* p = (const uint8_t*)(uintptr_t)ra;
+    if (p[-5] == 0xE8) return 1;                                   // call rel32
+    if (p[-6] == 0xFF && p[-5] == 0x15) return 1;                  // call [rip+disp32]
+    if (p[-2] == 0xFF && p[-1] >= 0xD0 && p[-1] <= 0xD7) return 1; // call reg
+    if (p[-2] == 0xFF && p[-1] >= 0x10 && p[-1] <= 0x17
+                      && p[-1] != 0x14 && p[-1] != 0x15) return 1; // call [reg]
+    if (p[-3] == 0xFF && p[-2] >= 0x50 && p[-2] <= 0x57) return 1; // call [reg+disp8]
+    if (p[-7] == 0xFF && p[-6] >= 0x90 && p[-6] <= 0x97) return 1; // call [reg+disp32]
+    return 0;
+}
+
 static void sys_exit(struct regs* r) {
     // Quem chamou ExitProcess? A pilha da thread PRINCIPAL (idle/boot sobre a qual o .exe roda)
     // vive em [0x600000,0x700000); uma thread ring-3 de WORKER (CreateThread/SHCreateThread)
@@ -120,11 +183,22 @@ static void sys_exit(struct regs* r) {
         // explorer, logado no [ps] EPROCESS). Alvo p/ implementar o objeto COM de shell que
         // falta (o worker do taskbar aborta ao usar o objeto COM universal). So p/ ring-3.
         PEPROCESS cur = PsGetCurrentProcess();
-        kputs("  [sys_exit] worker stack (retornos p/ achar o FailFast; ImageBase=");
-        kput_hex(cur ? cur->ImageBase : 0); kputs("):\n   ");
+        kputs("  [sys_exit] worker call-chain SIMBOLIZADA (modulo+RVA; ImageBase explorer=");
+        kput_hex(cur ? cur->ImageBase : 0); kputs("):\n");
+        // Varre a pilha do worker de rsp p/ cima (256 slots = 0x800 bytes, dentro da
+        // regiao mapeada da stack) e imprime SO os slots que sao enderecos de retorno
+        // reais (dentro de um modulo E precedidos por um CALL). Do topo (frame mais
+        // interno = onde estamos, junto do FailFast) p/ o fundo (RtlUserThreadStart).
         const uint64_t* sp = (const uint64_t*)(uintptr_t)rsp;
-        for (int i = 0; i < 24; i++) { kput_hex(sp[i]); kputs(i == 11 ? "\n   " : " "); }
-        kputs("\n");
+        for (int i = 0; i < 256; i++) {
+            uint64_t v = sp[i];
+            const char* nm; uint64_t rva;
+            if (sc_symbolize(v, &nm, &rva) && sc_is_retaddr(v)) {
+                kputs("    [rsp+0x"); kput_hex((uint64_t)(i * 8)); kputs("] ");
+                kput_hex(v); kputs(" = "); kputs(nm); kputs(" + 0x"); kput_hex(rva);
+                kputs("\n");
+            }
+        }
         ki_ring3_thread_exit();   // marca TERMINATED, acorda waiters, cede p/ sempre — NAO retorna
     }
     kputs("[sys_exit] ExitProcess da thread PRINCIPAL -> encerra o processo\n");
@@ -1236,6 +1310,48 @@ static void sys_virtualalloc(struct regs* r) {
     r->rax = phys;   // VA == phys (identidade, 1o GiB)
 }
 
+// sys_module_for_pc(pc, out_base, out_size) — dado um PC de ring-3, devolve a BASE de
+// carga e o SizeOfImage do modulo que o contem (via a tabela do loader). e' o unico
+// tijolo que a RtlLookupFunctionEntry (ntdll, ring-3) precisa do kernel: sabendo a base,
+// a ntdll acha sozinha o diretorio de excecao (.pdata) do PE e faz o unwind (C++ EH/SEH
+// do explorer REAL). Escolhe a MAIOR base que contem o PC (imagens empacotadas pelo PMM
+// ficam coladas — a base mais alta que cobre e' a correta). rax=1 achou / 0 nao.
+static void sys_module_for_pc(struct regs* r) {
+    uint64_t  pc       = r->rdi;
+    uint64_t* out_base = (uint64_t*)(uintptr_t)r->rsi;
+    uint32_t* out_size = (uint32_t*)(uintptr_t)r->rdx;
+    int n = ldr_get_module_count();
+    uint64_t best_base = 0; uint32_t best_size = 0; int found = 0;
+    for (int i = 0; i < n; i++) {
+        uint64_t base; uint32_t size; const char* nm;
+        if (!ldr_get_module_info(i, &base, &size, &nm)) continue;
+        if (size == 0) continue;
+        if (pc >= base && pc < base + (uint64_t)size) {
+            if (base >= best_base) { best_base = base; best_size = size; found = 1; }
+        }
+    }
+    // Fallback: a IMAGEM PRINCIPAL (o .exe, ex.: explorer) NAO fica em s_mods — o loader so
+    // registra DLLs; o .exe entra por outro caminho. Sem isto, RtlLookupFunctionEntry falhava
+    // p/ TODO frame do explorer -> o C++ EH nunca achava o catch (o unwind derailava tratando
+    // a funcao do explorer como folha). Consideramos a imagem do processo corrente como
+    // candidato: base = EPROCESS->ImageBase, size = SizeOfImage lido do PE (opt header +0x38).
+    if (!found) {
+        PEPROCESS cur = PsGetCurrentProcess();
+        if (cur && cur->ImageBase) {
+            uint64_t ib = cur->ImageBase;
+            const uint8_t* f = (const uint8_t*)(uintptr_t)ib;
+            uint32_t e = *(const uint32_t*)(f + 0x3C);
+            if (*(const uint32_t*)(f + e) == 0x00004550u) {                 // 'PE\0\0'
+                uint32_t sz = *(const uint32_t*)(f + e + 4 + 20 + 0x38);    // SizeOfImage
+                if (pc >= ib && pc < ib + (uint64_t)sz) { best_base = ib; best_size = sz; found = 1; }
+            }
+        }
+    }
+    if (out_base) *out_base = found ? best_base : 0;
+    if (out_size) *out_size = found ? best_size : 0;
+    r->rax = found ? 1 : 0;
+}
+
 // ---- SSDT: tabela central de serviços ----
 typedef void (*syscall_fn)(struct regs*);
 static syscall_fn s_ssdt[] = {
@@ -1291,6 +1407,7 @@ static syscall_fn s_ssdt[] = {
     sys_querysystemtime,        // 49 (Frente C: tempo p/ o explorer real)
     sys_virtualalloc,           // 50 (Frente C: VirtualAlloc p/ o heap do explorer)
     sys_thread_exit,            // 51 (Frente THREADS RING-3: stub de retorno -> ki_ring3_thread_exit)
+    sys_module_for_pc,          // 52 (C++ EH: RtlLookupFunctionEntry resolve PC->base do modulo)
 };
 #define SSDT_COUNT (sizeof(s_ssdt) / sizeof(s_ssdt[0]))
 

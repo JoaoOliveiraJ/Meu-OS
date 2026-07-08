@@ -108,7 +108,7 @@ static void sc_puts(const char* s) { long long r; __asm__ volatile ("int $0x80" 
 // NtCreateThread (syscall #8) direto: rdi=out_handle, rsi=process(0=corrente),
 // rdx=start, r10=param (convencao do nosso int 0x80). Lanca uma thread ring-3
 // preemptiva que roda start(param). Devolve 1 se o kernel reportou STATUS_SUCCESS.
-static int sc_spawn(void* start, void* param) {
+static void* sc_spawn(void* start, void* param) {
     void* h = 0;
     register long long r10 asm("r10") = (long long)(__INTPTR_TYPE__)param;
     long long ret;
@@ -120,7 +120,15 @@ static int sc_spawn(void* start, void* param) {
           "d"((long long)(__INTPTR_TYPE__)start),// start
           "r"(r10)                               // param
         : "memory", "rcx", "r11");
-    return ret == 0;   // STATUS_SUCCESS == 0
+    return (ret == 0) ? h : 0;   // STATUS_SUCCESS == 0 -> devolve o HANDLE (0 se falhou)
+}
+#define SYS_WAITFORSINGLEOBJECT_ 10
+// Espera (join) uma thread pelo handle (WaitForSingleObject, INFINITE). Na thread PRINCIPAL
+// (idle) o kernel faz yield cooperativo ate a thread terminar.
+static void sc_wait(void* h) {
+    long long r; __asm__ volatile ("int $0x80":"=a"(r)
+        : "a"((long long)SYS_WAITFORSINGLEOBJECT_), "D"((long long)(__INTPTR_TYPE__)h), "S"(-1LL)
+        : "memory","rcx","r11");
 }
 
 typedef unsigned (*sh_threadproc_t)(void*);
@@ -145,15 +153,21 @@ __declspec(dllexport) int SHCreateThread(void* pfnThreadProc, void* pData, unsig
     sh_thread_ctx* c = (sh_thread_ctx*)sc_alloc(sizeof(sh_thread_ctx));
     if (!c) return 0;
     c->proc = pfnThreadProc; c->param = pData; c->cb = pfnCallback;
-    // Lanca sh_thread_wrapper(c) como thread ring-3 PREEMPTIVA de verdade (infra da sessao 5),
-    // que roda CONCORRENTE com a chamadora, e RETORNA (nao bloqueia). O Windows bloquearia ate o
-    // callback de init terminar; NAO fazemos isso de proposito: a init do worker do taskbar do
-    // explorer.exe atual da FailFast (ExitProcess, CONTIDO no kernel — sys_exit termina so a
-    // thread) por um objeto COM de shell ainda universal (muro conhecido). Bloquear so faria a
-    // chamadora girar a toa (o "done" nunca viria) — falsa persistencia. Lancar-e-retornar
-    // mantem o fluxo da PRINCIPAL intacto (Worker Window -> WaitForSingleObject -> DestroyWindow
-    // -> ExitProcess da principal) e a worker roda de verdade (contida se abortar).
-    if (!sc_spawn((void*)sh_thread_wrapper, c)) return 0;
+    // Lanca sh_thread_wrapper(c) como thread ring-3 PREEMPTIVA de verdade e ESPERA (join) ela
+    // terminar antes de retornar. POR QUE esperar agora (a sessao anterior lancava-e-retornava):
+    //   (1) FIDELIDADE: o Windows bloqueia o chamador de SHCreateThread ate o callback de init
+    //       terminar — o codigo apos SHCreateThread (sub_0x87628) TESTA um global que a init
+    //       preenche; sem esperar, esse teste corre com a init (rdi=0 mesmo se a init desse certo).
+    //   (2) DETERMINISMO: sem o join, a thread PRINCIPAL corria com a worker — as vezes a
+    //       principal chamava ExitProcess (fim do processo) ANTES da worker terminar, e a worker
+    //       (ainda escalonada) faltava acessando a pilha apos o teardown. Esperar serializa.
+    //   (3) Agora que o C++ EH REAL funciona (ntdll RtlRaiseException/Dispatch/Unwind), um throw
+    //       da init (ex.: wil::ResultException do THROW_IF_FAILED) e' CAPTURADO pelo try/catch da
+    //       propria threadproc do explorer (RVA 0x7A880) — a worker NAO morre; conclui e o join
+    //       retorna. (Se ainda ficar unhandled, o worker e' contido no sys_exit e o join retorna.)
+    void* h = sc_spawn((void*)sh_thread_wrapper, c);
+    if (!h) return 0;
+    sc_wait(h);   // join: init do taskbar concluida (ou contida) antes de devolver
     return 1;   // TRUE
 }
 __declspec(dllexport) HRESULT_ SHTaskPoolQueueTask(void* pool, void* task) { (void)pool;(void)task; return E_NOTIMPL_; }

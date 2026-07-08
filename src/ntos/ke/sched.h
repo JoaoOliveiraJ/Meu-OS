@@ -69,6 +69,21 @@ typedef struct ki_thread {
     void*             wait_object;
     // Conta quantum atual (decrementado pelo APIC timer).
     int               quantum;
+
+    // ------------------------------------------------------------------
+    // FRENTE THREADS RING-3 PREEMPTIVAS
+    // ------------------------------------------------------------------
+    // Uma thread ring-3 e' um KTHREAD normal cujo entry de KERNEL (ring3_trampoline)
+    // faz IRETQ p/ ring 3 e roda codigo de usuario (a threadproc do CreateThread do
+    // explorer). Enquanto ela roda em ring 3, o timer a preempta como qualquer thread;
+    // o trap usa a pilha de KERNEL DESTA thread (via TSS.rsp0) e o gs.base DELA (TEB).
+    // O escalonador (ki_quantum_end) restaura esses dois por-thread a cada troca.
+    uint64_t          is_ring3;      // 1 = roda em ring 3 (tem user_teb/kstack_top validos)
+    uint64_t          user_teb;      // gs.base a programar ao escalonar esta thread (TEB de ring 3)
+    uint64_t          kstack_top;    // topo da pilha de KERNEL desta thread -> TSS.rsp0 ao escalonar
+    uint64_t          user_start;    // RIP inicial de ring 3 (threadproc do CreateThread)
+    uint64_t          user_param;    // 1o arg de ring 3 (lpParameter), em rcx
+    uint64_t          user_stack_top;// topo da pilha de USUARIO (ring 3) desta thread
 } ki_thread_t;
 
 // Per-CPU PRCB do scheduler.
@@ -129,3 +144,33 @@ void ki_ipi_reschedule(void);
 int  ki_can_block(void);               // true se a thread corrente pode bloquear
 void ki_block_current(void* obj);      // marca WAITING + insere na lista de espera
 int  ki_wake(void* obj, int wake_all); // acorda waiters de 'obj' (-> ready)
+
+// ---------------------------------------------------------------------------
+// FRENTE THREADS RING-3 PREEMPTIVAS — API
+// ---------------------------------------------------------------------------
+// g_ring3_active: liga a logica de troca de TSS.rsp0 + gs.base por-thread no
+// ki_quantum_end. Fica 0 ate a 1a thread ring-3 nascer. No cenario do pintok
+// (sem threads ring-3) NUNCA liga -> ki_quantum_end roda identico ao baseline
+// (regra de ouro: nao mexer no caminho do pintok). So o CPU 0 roda ring 3.
+extern volatile int g_ring3_active;
+
+// Marca a thread CORRENTE como "roda em ring 3" com este TEB. Chamado por
+// usermode_enter p/ a thread principal do explorer (que roda sobre a idle/boot):
+// assim, ao voltar a escalona-la, o ki_quantum_end restaura gs.base=TEB e
+// TSS.rsp0=pilha de kernel dela. kstack_top = TSS.rsp0 atual (pilha do boot).
+void ki_mark_current_ring3(uint64_t user_teb);
+
+// Cria e enfileira uma thread RING-3 preemptiva de verdade: aloca pilha de
+// usuario + TEB + stub de retorno, cria um KTHREAD (pilha de kernel propria)
+// cujo entry (ring3_trampoline, em usermode.c) faz IRETQ p/ user_start(param)
+// em ring 3. Fixada no CPU 0 (TSS unico). Retorna o KTHREAD (NULL se sem RAM).
+ki_thread_t* ki_launch_ring3_thread(uint64_t user_start, uint64_t user_param);
+
+// Termina a thread CORRENTE (chamado pelo stub de retorno via sys_thread_exit
+// quando a threadproc de ring 3 retorna): marca TERMINATED, acorda quem espera
+// no handle dela, e cede a CPU p/ sempre (nunca mais escalonada). NAO retorna.
+void ki_ring3_thread_exit(void);
+
+// true se a thread (por ponteiro KTHREAD) ja terminou. Usado pelo
+// WaitForSingleObject cooperativo da thread principal (idle nao pode bloquear).
+int  ki_thread_is_terminated(ki_thread_t* t);

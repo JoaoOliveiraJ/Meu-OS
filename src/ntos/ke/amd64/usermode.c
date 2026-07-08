@@ -2,6 +2,8 @@
 #include "ke/amd64/usermode.h"
 #include "ke/amd64/syscall.h"
 #include "ke/amd64/kpcr.h"
+#include "ke/amd64/gdt.h"       // tss_set_rsp0 (pilha de kernel da thread ring-3)
+#include "ke/sched.h"           // ki_create_thread / ki_ready_thread / ki_thread_t (threads ring-3 preemptivas)
 #include "hal/cpu.h"            // HalWriteMsr / MSR_IA32_GS_BASE
 #include "mm/paging.h"
 #include "mm/pmm.h"              // pmm_alloc_contiguous (pilha do worker ring-3)
@@ -122,23 +124,30 @@ static void enter_ring3_arg(uint64_t entry, uint64_t stack_top, uint64_t teb, ui
         : : "r"(stack_top), "r"(entry), "r"(teb), "r"(arg) : "rax", "rcx", "rdx", "memory");
 }
 
-// FRENTE THREADS — roda um threadproc de ring-3 (do CreateThread real) numa PILHA + TEB
-// NOVOS, no mesmo processo (mesmo CR3). Modelo COOPERATIVO com o esquema de UMA thread
-// ring-3: a thread principal (parada em WaitForSingleObject sobre o handle do worker) e'
-// ABANDONADA aqui — este threadproc PASSA A SER a thread ring-3 corrente. A preempcao do
-// timer que ja funciona p/ 1 thread ring-3 (o explorer roda sobre o contexto idle/boot)
-// segue valendo: o timer preempta o worker, roda os kthreads de kernel e volta pro worker.
-// Assim o PROCESSO PERSISTE (nao chega ao DestroyWindow/ExitProcess). NAO retorna.
-#define WK_STACK_SIZE 0x40000ULL   // 256 KiB por thread worker
-void usermode_run_worker(uint64_t start, uint64_t param) {
-    if (!start) return;
+// ============================================================================
+//  THREADS RING-3 PREEMPTIVAS — cada CreateThread do explorer vira um KTHREAD real
+//  que roda em ring 3 e e' escalonado pelo timer LADO A LADO com a thread principal.
+//
+//  POR QUE PREEMPTIVO (e nao mais cooperativo): o explorer real cria a Worker Window
+//  e a thread dela (0x72270) DURANTE o wWinMain e SEGUE rodando (mais setup do shell).
+//  So la no fim (~WorkerWindow) ele faz WaitForSingleObject(thread). No modelo antigo
+//  (rodar a threadproc so no WaitForSingleObject) a thread principal ficava CONGELADA
+//  no wait e a worker rodava tarde e sozinha. Agora as duas rodam CONCORRENTES, na
+//  ordem certa: a principal segue o fluxo COMPLETO e a worker roda em paralelo.
+// ============================================================================
+#define WK_STACK_SIZE 0x40000ULL   // 256 KiB de pilha de USUARIO por thread worker
+
+// Aloca pilha de usuario + TEB + stub de retorno p/ uma thread ring-3. Devolve o TEB
+// (no fundo da regiao) e o RSP inicial (topo-8, ja com o endereco do stub de retorno).
+// Regiao contigua do PMM, mapeada user (2 MiB granular -> user+exec). O TEB compartilha
+// o PEB do processo (PEB_ADDR): threads dividem o mesmo PEB, como no NT real.
+static int usermode_alloc_ring3_stack(uint64_t* out_teb, uint64_t* out_rsp) {
     uint64_t pages = WK_STACK_SIZE >> 12;
     uint64_t phys = pmm_alloc_contiguous(pages);
-    if (!phys) { kputs("[thread] sem RAM p/ pilha do worker ring-3\n"); return; }
-    mm_map_user(phys, WK_STACK_SIZE);                    // torna a pilha acessivel ao ring 3
+    if (!phys) { kputs("[thread] sem RAM p/ pilha de thread ring-3\n"); return 0; }
+    mm_map_user(phys, WK_STACK_SIZE);                    // pilha acessivel ao ring 3
     uint64_t teb = phys;                                 // TEB no fundo da regiao
     uint64_t stack_top = (phys + WK_STACK_SIZE) & ~0xFULL;
-    // TEB minimo (compartilha o PEB do processo em PEB_ADDR — threads dividem o mesmo PEB).
     volatile uint8_t* t = (volatile uint8_t*)(uintptr_t)teb;
     for (int i = 0; i < 0x1000; i++) t[i] = 0;
     *(volatile uint64_t*)(uintptr_t)(teb + 0x08) = stack_top;      // NtTib.StackBase
@@ -146,37 +155,68 @@ void usermode_run_worker(uint64_t start, uint64_t param) {
     *(volatile uint64_t*)(uintptr_t)(teb + 0x30) = teb;           // NtTib.Self  -> gs:[0x30]
     *(volatile uint64_t*)(uintptr_t)(teb + 0x60) = PEB_ADDR;      // PEB -> gs:[0x60]
 
-    // STUB DE RETORNO da threadproc. A threadproc do worker (0x72270 no explorer) e' uma
-    // funcao que RODA E RETORNA (nao um loop infinito — ver sys_worker_returned). Ao entrar
-    // via IRETQ em `start` com RSP=stack_top-8, a CPU NAO empilha endereco de retorno (nao
-    // houve `call`); logo [stack_top-8] (o slot que a threadproc ve como "seu endereco de
-    // retorno") estava ZERADO e o `ret` final pulava p/ 0 -> #PF rip=0 -> HALT. Agora
-    // escrevemos um stub REAL de ring-3 numa pagina user+exec da regiao do worker (teb+0x1000,
-    // longe da pilha que desce do topo e do TEB no fundo) e apontamos [stack_top-8] p/ ele.
-    // Quando a threadproc retorna, cai no stub, que passa o valor de retorno (rax) e chama o
-    // syscall 51 (sys_worker_returned) -> loga + parka -> o explorer PERSISTE sem crashar.
-    // Bytes do stub (x64):
-    //   48 89 c7            mov rdi, rax        ; arg1 = valor de retorno da threadproc
-    //   b8 33 00 00 00      mov eax, 51         ; SYS_WORKER_RETURNED (0x33)
-    //   cd 80               int 0x80            ; -> sys_worker_returned (nao retorna)
-    //   eb fe               jmp $               ; seguranca: spin se o syscall voltar
-    {
-        static const uint8_t retstub[] = {
-            0x48, 0x89, 0xc7,               // mov rdi, rax
-            0xb8, 0x33, 0x00, 0x00, 0x00,   // mov eax, 51
-            0xcd, 0x80,                     // int 0x80
-            0xeb, 0xfe                      // jmp $
-        };
-        uint64_t stub_va = teb + 0x1000;
-        volatile uint8_t* s = (volatile uint8_t*)(uintptr_t)stub_va;
-        for (unsigned i = 0; i < sizeof(retstub); i++) s[i] = retstub[i];
-        *(volatile uint64_t*)(uintptr_t)(stack_top - 8) = stub_va;   // endereco de retorno da threadproc
-    }
+    // STUB DE RETORNO. A threadproc entra via IRETQ (nao via `call`), entao a CPU nao
+    // empilha endereco de retorno; se a threadproc RETORNA (a 0x72270 do explorer e' uma
+    // rotina de init que retorna com STATUS_SUCCESS), o `ret` pularia p/ [stack_top-8]=0
+    // -> #PF rip=0. Escrevemos um stub REAL de ring-3 (pagina user+exec da regiao) e
+    // apontamos [stack_top-8] p/ ele. Ao retornar, a threadproc cai no stub, que faz o
+    // syscall 51 (sys_thread_exit) -> ki_ring3_thread_exit: a thread ring-3 termina
+    // LIMPO (marca TERMINATED + acorda quem espera nela). Bytes (x64):
+    //   48 89 c7            mov rdi, rax   ; arg1 = valor de retorno da threadproc (log)
+    //   b8 33 00 00 00      mov eax, 51    ; SYS_THREAD_EXIT (0x33)
+    //   cd 80               int 0x80       ; -> sys_thread_exit (nao retorna)
+    //   eb fe               jmp $          ; seguranca
+    static const uint8_t retstub[] = {
+        0x48, 0x89, 0xc7, 0xb8, 0x33, 0x00, 0x00, 0x00, 0xcd, 0x80, 0xeb, 0xfe
+    };
+    uint64_t stub_va = teb + 0x1000;
+    volatile uint8_t* s = (volatile uint8_t*)(uintptr_t)stub_va;
+    for (unsigned i = 0; i < sizeof(retstub); i++) s[i] = retstub[i];
+    *(volatile uint64_t*)(uintptr_t)(stack_top - 8) = stub_va;    // endereco de retorno
 
-    kputs("[thread] worker ring-3: start="); kput_hex(start);
-    kputs(" param="); kput_hex(param);
-    kputs(" stack_top="); kput_hex(stack_top); kputs(" teb="); kput_hex(teb); kputs("\n");
-    enter_ring3_arg(start, stack_top - 8, teb, param);   // vira a thread ring-3; NAO retorna
+    *out_teb = teb;
+    *out_rsp = stack_top - 8;
+    return 1;
+}
+
+// ENTRY DE KERNEL de uma thread ring-3 (rodado por ki_thread_startup apos o 1o dispatch,
+// com IF=1). Le os parametros ring-3 do proprio KTHREAD e faz IRETQ p/ ring 3. A partir
+// daqui a thread e' preemptada pelo timer como qualquer outra; o trap dela aterrissa na
+// pilha de kernel DESTA thread (TSS.rsp0, ja programado pelo ki_quantum_end ao escala-la;
+// re-afirmamos aqui por seguranca no 1o entry). NAO retorna: a threadproc roda e, ao
+// retornar, cai no stub -> sys_thread_exit -> ki_ring3_thread_exit.
+static void ring3_trampoline(void* arg) {
+    (void)arg;
+    ki_thread_t* self = ki_current_thread();
+    if (!self) { for (;;) __asm__ volatile ("hlt"); }
+    tss_set_rsp0(self->kstack_top);                      // trap de ring 3 -> pilha DESTA thread
+    kputs("[thread] ring-3 preemptiva: start="); kput_hex(self->user_start);
+    kputs(" param="); kput_hex(self->user_param);
+    kputs(" rsp="); kput_hex(self->user_stack_top); kputs(" teb="); kput_hex(self->user_teb);
+    kputs(" tid="); kput_hex(self->tid); kputs("\n");
+    enter_ring3_arg(self->user_start, self->user_stack_top, self->user_teb, self->user_param);
+    // nao retorna
+}
+
+// Cria e enfileira uma thread RING-3 preemptiva. Fixa no CPU 0 (TSS unico -> so o CPU 0
+// pode entrar em ring 3 com troca de pilha de kernel). Chamado por sys_createthread.
+ki_thread_t* ki_launch_ring3_thread(uint64_t user_start, uint64_t user_param) {
+    if (!user_start) return 0;
+    uint64_t teb = 0, rsp = 0;
+    if (!usermode_alloc_ring3_stack(&teb, &rsp)) return 0;
+
+    // KTHREAD com pilha de KERNEL propria (16 KiB, alocada em ki_create_thread). O entry
+    // de kernel e' ring3_trampoline; afinidade 0 = so CPU 0.
+    ki_thread_t* t = ki_create_thread(ring3_trampoline, 0, 8 /*prio*/, 0 /*cpu0*/);
+    if (!t) { kputs("[thread] ki_create_thread falhou p/ thread ring-3\n"); return 0; }
+    t->is_ring3       = 1;
+    t->user_teb       = teb;
+    t->user_start     = user_start;
+    t->user_param     = user_param;
+    t->user_stack_top = rsp;
+    g_ring3_active    = 1;   // liga a troca de TSS.rsp0/gs.base por-thread no ki_quantum_end
+    ki_ready_thread(t);      // enfileira -> o timer a escalona lado a lado com a principal
+    return t;
 }
 
 void usermode_enter(void (*entry)(void)) {
@@ -204,6 +244,14 @@ void usermode_enter(void (*entry)(void)) {
     }
     kputs("[ps] TEB @ "); kput_hex(TEB_ADDR); kputs(" PEB @ "); kput_hex(PEB_ADDR);
     kputs(" (PEB->ImageBase="); kput_hex(load_base); kputs(")\n");
+
+    // FRENTE THREADS RING-3 PREEMPTIVAS — marca a thread CORRENTE (a idle/boot do CPU 0,
+    // sobre a qual o .exe roda) como thread ring-3 com este TEB. A partir daqui, quando o
+    // timer preemptar a thread principal p/ rodar uma worker (e depois voltar), o
+    // ki_quantum_end restaura gs.base=TEB_ADDR e TSS.rsp0=pilha do boot desta thread. Sem
+    // isso, ao voltar da worker a principal rodaria com gs.base/pilha da worker. Tambem
+    // LIGA g_ring3_active (a logica so age no CPU 0; o cenario pintok nao chama isto).
+    ki_mark_current_ring3(TEB_ADDR);
 
     if (__builtin_setjmp(g_user_exit) == 0) {
         if (proc_cr3) mm_switch_cr3(proc_cr3);        // entra no espaco do processo

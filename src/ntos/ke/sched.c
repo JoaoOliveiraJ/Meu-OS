@@ -35,6 +35,9 @@
 #include <stddef.h>
 #include "ke/sched.h"
 #include "ke/amd64/apic.h"
+#include "ke/amd64/gdt.h"       // tss_set_rsp0 / tss_get_rsp0 (pilha de kernel por thread ring-3)
+#include "ke/amd64/kpcr.h"      // kpcr_get (gs.base das threads de kernel)
+#include "hal/cpu.h"            // HalWriteMsr / MSR_IA32_GS_BASE (troca de gs.base por thread)
 #include "mm/heap.h"
 
 extern void  kputs(const char* s);
@@ -45,6 +48,12 @@ extern void* memset(void* dst, int v, size_t n);
 // --- estado global -------------------------------------------------------
 ki_prcb_t       g_ki_prcb[MAX_CPUS];
 int             g_ki_cpu_count = 0;
+
+// FRENTE THREADS RING-3 PREEMPTIVAS — gate global. Enquanto 0, o ki_quantum_end
+// roda EXATAMENTE como o baseline (nao toca TSS.rsp0 nem gs.base). Vira 1 quando a
+// 1a thread ring-3 (ou a thread principal do explorer, via ki_mark_current_ring3)
+// aparece. No cenario do pintok NUNCA liga -> baseline anti-cheat intacto.
+volatile int    g_ring3_active = 0;
 
 // Dispatcher lock: aproximacao single lock. NT real tem per-PRCB.
 static volatile int s_dispatcher_lock = 0;
@@ -207,6 +216,11 @@ void ki_init_processor(uint32_t cpu_index, uint32_t apic_id) {
     idle->arg          = 0;
     idle->quantum      = s_quantum_default;
     idle->tid          = 0;
+    // FRENTE THREADS RING-3: a idle/boot desta CPU roda sobre a pilha de kernel do
+    // boot (a que o TSS.rsp0 aponta agora). Guardamos p/ restaurar TSS.rsp0 ao voltar
+    // a escalona-la. No CPU 0 e' sobre esta idle que a thread PRINCIPAL do explorer
+    // roda em ring 3 (usermode_enter -> ki_mark_current_ring3 seta user_teb depois).
+    idle->kstack_top   = tss_get_rsp0();
 
     // Publica o idle E current_thread atomicamente (DEPOIS do struct populado).
     __atomic_store_n((void**)&p->idle_thread,    idle, __ATOMIC_RELEASE);
@@ -251,6 +265,11 @@ ki_thread_t* ki_create_thread(void (*entry)(void*), void* arg, int priority, int
     // O KiSwapContext (asm) faz pop r15/r14/r13/r12/rbx/rbp, ret. O ret cai
     // em ki_thread_startup_asm que apenas chama ki_thread_startup (C).
     uint64_t top = ((uint64_t)(uintptr_t)stack + STACK_BYTES) & ~0xFULL;
+    // FRENTE THREADS RING-3: guarda o topo da pilha de KERNEL. Uma thread ring-3
+    // usa isto como TSS.rsp0 (todo trap/syscall dela vindo de ring 3 aterrissa AQUI,
+    // na pilha de kernel DESTA thread — nunca na pilha de outra). Threads de kernel
+    // tambem preenchem (inofensivo; kernel->kernel nao usa TSS.rsp0).
+    t->kstack_top = top;
     uint64_t* sp = (uint64_t*)top;
     *--sp = (uint64_t)(uintptr_t)&ki_thread_startup_asm;   // ret target
     *--sp = 0;   // RBP
@@ -358,6 +377,28 @@ void ki_quantum_end(void) {
     p->current_thread  = next;
     disp_unlock();
 
+    // ------------------------------------------------------------------
+    // FRENTE THREADS RING-3 PREEMPTIVAS — programa TSS.rsp0 + gs.base p/ 'next'.
+    //
+    // POR QUE: threads que rodam em ring 3 (a principal do explorer sobre a idle, e
+    // as worker do CreateThread) tomam trap/syscall vindo de ring 3. A CPU carrega a
+    // pilha de kernel do TSS.rsp0 e o codigo do kernel espera gs.base valido. Cada
+    // thread ring-3 tem SUA pilha de kernel (kstack_top) e SEU TEB (user_teb=gs.base).
+    // Sem trocar isso a cada dispatch, o trap de uma thread aterrissaria na pilha de
+    // OUTRA (corrompendo o frame) e o gs.base ficaria o da thread errada.
+    //
+    // So no CPU 0 (o unico que roda ring 3 — TSS e' unico) e so com g_ring3_active
+    // (ligado quando nasce a 1a thread ring-3). No cenario pintok isto NUNCA roda ->
+    // ki_quantum_end identico ao baseline anti-cheat (regra de ouro).
+    //   - next e' thread ring-3 (is_ring3): TSS.rsp0 = pilha de kernel dela; gs.base = TEB dela.
+    //   - next e' thread de KERNEL (kthreads worker/idle sem user): TSS.rsp0 = pilha dela
+    //     (inofensivo) e gs.base = KPCR do CPU 0 (corrige o gs que uma thread ring-3 deixou).
+    if (g_ring3_active && cpu == 0) {
+        tss_set_rsp0(next->kstack_top);
+        uint64_t gsbase = next->is_ring3 ? next->user_teb : (uint64_t)(uintptr_t)kpcr_get();
+        HalWriteMsr(MSR_IA32_GS_BASE, gsbase);
+    }
+
     // KiSwapContext: salva RSP de cur, restaura RSP de next, ret.
     // Se cur == idle, ainda salvamos saved_rsp do idle pra restaurar depois.
     ki_swap_context(&cur->saved_rsp, next->saved_rsp);
@@ -442,4 +483,47 @@ int ki_wake(void* obj, int wake_all) {
     // ki_ready_thread seta READY + enfileira (toma o disp_lock por dentro).
     for (int i = 0; i < n; i++) ki_ready_thread(batch[i]);
     return n;
+}
+
+// ============================================================================
+//  FRENTE THREADS RING-3 PREEMPTIVAS — implementacao
+// ============================================================================
+
+// Marca a thread CORRENTE como "roda em ring 3" com este TEB e LIGA o gate global.
+// Chamado por usermode_enter p/ a thread PRINCIPAL do explorer, que roda sobre a
+// idle/boot do CPU 0: dai em diante, ao re-escalonar essa thread, o ki_quantum_end
+// restaura gs.base = user_teb (0x600000) e TSS.rsp0 = kstack_top (pilha do boot, ja
+// gravada em ki_init_processor). Idempotente. Ligar g_ring3_active aqui e' seguro: so
+// acontece no boot do explorer (nunca no cenario pintok, que nao entra em ring 3 via
+// usermode_enter com este caminho — pintok e' um .sys de ring 0).
+void ki_mark_current_ring3(uint64_t user_teb) {
+    uint32_t cpu = ki_current_cpu_index();
+    ki_thread_t* cur = g_ki_prcb[cpu].current_thread;
+    if (!cur) return;
+    cur->is_ring3 = 1;
+    cur->user_teb = user_teb;
+    if (!cur->kstack_top) cur->kstack_top = tss_get_rsp0();
+    g_ring3_active = 1;
+}
+
+// true se a thread (por KTHREAD) ja terminou. Usado pelo WaitForSingleObject
+// COOPERATIVO da thread principal (a idle nao pode bloquear via ki_block_current;
+// entao ela cede a CPU em loop ate a worker terminar — ver sys_waitforsingleobject).
+int ki_thread_is_terminated(ki_thread_t* t) {
+    return (!t || t->state == KI_THREAD_TERMINATED) ? 1 : 0;
+}
+
+// Termina a thread ring-3 CORRENTE. Chamado indiretamente pela threadproc do explorer
+// quando ela RETORNA: o stub de retorno (usermode.c) faz `int 0x80` #51, e sys_thread_exit
+// chama isto. Marca TERMINATED (o ki_quantum_end nunca re-enfileira TERMINATED), acorda
+// quem espera neste KTHREAD (WaitForSingleObject de outra thread real), e CEDE p/ sempre —
+// a thread nunca mais roda; sua pilha de kernel/usuario fica ociosa (liberacao fica p/ depois).
+void ki_ring3_thread_exit(void) {
+    uint32_t cpu = ki_current_cpu_index();
+    ki_thread_t* cur = g_ki_prcb[cpu].current_thread;
+    if (cur) {
+        cur->state = KI_THREAD_TERMINATED;
+        ki_wake(cur, 1);   // acorda waiters bloqueados neste KTHREAD (se houver)
+    }
+    for (;;) ki_yield_processor();   // nunca retorna (TERMINATED nao volta a ready)
 }

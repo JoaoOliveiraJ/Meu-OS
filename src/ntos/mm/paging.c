@@ -260,8 +260,23 @@ int mm_map_zero_page(uint64_t va) {
         uint64_t* pdpt = pt_addr(pml4[pml4_idx]);
         if (pdpt[pdpt_idx] & PG_PRESENT) {
             uint64_t* pd = pt_addr(pdpt[pdpt_idx]);
-            // Huge page (PS=1) ja cobre o endereco — apenas devolve sucesso.
-            if (pd[pd_idx] & 0x80ULL) return 1;
+            // Huge page (PS=1) de 2 MiB ja cobre o endereco. ANTES: `return 1` (no-op) —
+            // mas se o FAULT foi de PERMISSAO (write/user numa huge page present mas
+            // supervisor ou read-only), devolver 1 sem mexer fazia a falta REPETIR
+            // (anti-loop abandonava). Era EXATAMENTE o caso da PILHA de thread ring-3
+            // (a threadproc do taskbar do explorer, RVA 0x7A880, faltava em 0x7A933
+            // escrevendo na propria pilha, que caia numa huge page nao-gravavel p/ ring-3
+            // no cr3 daquela thread). CORRECAO cr3-agnostica: a recovery roda no cr3 da
+            // thread que faltou, entao aqui ABRIMOS a huge page p/ ring-3 (PG_USER) e
+            // gravavel (PG_RW), + os niveis acima, e devolvemos sucesso. O write retorna
+            // e prossegue. (Recovery so age p/ cr2 >= MIN_CR2_RECOVER e com anti-loop.)
+            if (pd[pd_idx] & 0x80ULL) {
+                pml4[pml4_idx] |= PG_USER;
+                pdpt[pdpt_idx] |= PG_USER;
+                pd[pd_idx]     |= PG_USER | PG_RW;
+                __asm__ volatile ("mov %%cr3,%%rax\n mov %%rax,%%cr3" ::: "rax", "memory"); // flush TLB
+                return 1;
+            }
             if (pd[pd_idx] & PG_PRESENT) {
                 uint64_t* pt = pt_addr(pd[pd_idx]);
                 if (pt[pt_idx] & PG_PRESENT) {

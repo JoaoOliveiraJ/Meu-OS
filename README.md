@@ -16,11 +16,16 @@ por vez. Em paralelo, o MeuOS é validado contra um **driver de anti-cheat REAL*
 (`pintok.sys` = Riot Vanguard), que exercita mecânicas de ring 0 profundas.
 
 **Onde está hoje (resumo):** o explorer real **carrega, mapeia e reloca inteiro**, roda
-o `wWinMain` em **modo shell (mode 3)**, cria a *Worker Window*, sobe o **worker do
-taskbar** (Taskband Pin / jump lists) numa **thread ring-3 preemptiva** e encerra
-limpo. A **fronteira** é a persistência do desktop: o worker do shell dá *FailFast* na
-init de **DirectUI (dui70) + objetos COM de shell** — quando isso for implementado por
-completo, o explorer entra no `DesktopExplorerHost` (host persistente) e não sai.
+o `wWinMain` em **modo shell (mode 3)**, conclui a init do taskbar (cria a `Shell_TrayWnd`)
+e — **desde a sessão 9 — PERSISTE com o desktop PINTADO**: a thread principal entra num
+**loop de mensagens** (via `AppResolver::slot10`, o objeto retido em `[rsp+0x58]` do
+`wWinMain`) e **não chama mais `ExitProcess`**. Enquanto o loop roda, o win32k mantém o
+desktop **Windows 10 desenhado** (papel de parede + taskbar) com o **relógio andando**.
+Rodou **60 s estável, 0 falhas, 0 saídas**; `pintok` intacto. A **próxima fronteira** é a
+fidelidade profunda: a *threadproc* do taskbar (loop `PeekMessage` do `Shell_TrayWnd`)
+depende do objeto DirectUI em `[pData+0x320]` (criado por uma cadeia COM/DUI ainda não
+exercitada) e de *fairness* de scheduler; e a renderização própria da UI do explorer
+(DirectUI) — hoje o desktop visível é o **compose sintético** do win32k.
 
 ## Início rápido
 ```powershell

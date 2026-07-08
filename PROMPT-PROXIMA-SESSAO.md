@@ -18,14 +18,23 @@ NT/Windows) e o CONTEXTO do explorer (qual RVA/função exercita aquilo). Vale p
 **pintok DESTRAVADO** — pode mexer no kernel, mas rode o pintok a CADA mudança de kernel
 (`.\run.ps1 -Scenario pintok -Headless -TimeoutSec 40`) e NÃO deixe quebrar (regra de ouro).
 
-**COMMITS: NÃO use `Co-Authored-By: Claude`** (preferência do usuário). Tudo na branch `main`.
+**COMMITS: NÃO use `Co-Authored-By: Claude`** (preferência do usuário). Mensagens humanas,
+descrevendo o que foi feito — SEM "PROMPT sessão", numeração, emojis ou marketing. Tudo na `main`.
 Disciplina: **build → rodar explorer → diagnosticar → implementar REAL → build → pintok →
 commit + push**. Zig: `tools\zig-windows-x86_64-0.13.0\zig.exe`. Do bash rode PowerShell:
 `powershell.exe -ExecutionPolicy Bypass -File run.ps1 -Scenario explorerreal -Headless -TimeoutSec 55`.
 
-**BUILD RÁPIDO (1 DLL só, sem rodar build.ps1 inteiro)** — cada DLL é 1 comando zig. Ex.:
+**BUILD RÁPIDO DO KERNEL (~7 s, sem build.ps1 inteiro)** — recompila só `win32k.c` (que inclui
+win32kbase/full/shell) e re-linka os `build\*.o` já cacheados (salvo em `/tmp/kbuild.sh`):
 ```
 ZIG=tools/zig-windows-x86_64-0.13.0/zig.exe
+CF="-target x86_64-freestanding-none -ffreestanding -nostdlib -fno-stack-protector -fno-pic -fno-pie -mno-red-zone -Isrc -Isrc/ntos -Isrc/ntos/inc -Isrc/drivers -Isrc/subsystems -Isdk -Isdk/ddk -std=c11 -O2 -c"
+$ZIG cc $CF src/subsystems/win32/win32k.c -o build/subsystems_win32_win32k_c.o
+$ZIG cc -target x86_64-freestanding-none -nostdlib -static -no-pie -Wl,-T,linker.ld -Wl,--build-id=none -Wl,-z,noexecstack build/*.o -o build/kernel.elf
+$ZIG objcopy -O binary build/kernel.elf build/kernel.bin
+```
+**BUILD RÁPIDO DE 1 DLL** — cada DLL é 1 comando zig. Ex.:
+```
 $ZIG cc -target x86_64-windows-gnu -shared -nostdlib -e DllMain -Wl,--image-base=0x5500000 -Wl,--dynamicbase -o build/combase.dll dll/win32/combase/combase.c
 ```
 Bases: combase=0x5500000, shell32=0x5700000, shcore=0x5800000. ucrtbase=0x3300000 (linka
@@ -34,167 +43,146 @@ copia os build\*.dll e roda; não precisa rebuildar tudo.
 
 ## 🎯 A MISSÃO
 Rodar o **binário REAL** `C:\Windows\explorer.exe` no MeuOS (modelo Wine/ReactOS: implementar as
-DLLs/mecânicas do NT que o binário exige). Ideal: desktop PERSISTENTE e PINTADO.
+DLLs/mecânicas do NT que o binário exige). Ideal: **desktop PERSISTENTE e PINTADO — ✅ ATINGIDO
+na sessão 9.**
 
-## 📍 ESTADO — MARCOS DA SESSÃO 8 (a init do taskbar CONCLUI; explorer entra na escada de persistência)
-Commit `3e57d3b`. **3 muros derrubados DE VERDADE (sem catch-all)** — o explorer.exe REAL agora
-roda a init COMPLETA do taskbar e cria a janela `Shell_TrayWnd` (a barra de tarefas real).
+## 📍 ESTADO — SESSÃO 9: o explorer.exe REAL **PERSISTE com o desktop PINTADO** 🎉
+Commit `364e96e` (persistência + pintura) + limpeza de log + docs. **Marco da missão atingido.**
 
-1. 🎉 **IPinnedList3 REAL (combase).** O throw da s7 era `CoCreateInstance(CLSID_TaskbandPin
-   {90AA3A4E})` → objeto UNIVERSAL slot3=E_NOTIMPL → `THROW_IF_FAILED` (`wil::ResultException`).
-   RE: o throw estava na função **0x1A500** ("carrega/reconcilia a lista fixada"), chamada de
-   **0x1B066**, na cadeia do callback do worker **0x2C5BC** (backtrace provado: callback 0x2C807
-   → 0x1B066 → 0x1A500 → throw). Fix: objeto ESPECÍFICO por CLSID em `specific_object_for()`:
-   `pl_slot3` devolve um ENUMERADOR vazio; `enum->slot3` devolve **S_FALSE** (lista vazia — S_OK
-   tentaria PROCESSAR item inexistente; o contrato observado em 0x1A69B é `cmp ebx,1; jne`).
-   ⇒ o callback CONCLUI, cria **Shell_TrayWnd** e seta **GLOBAL_C** (`pData+8`, RVA 0x434828 = 1).
+Screenshot (headless, `-Screendump`): papel de parede Win10 (gradiente azul) + taskbar com botão
+Iniciar + system tray ("2 nucleos", relógio andando "00:00:38", "MeuOS 11"). Rodou **60 s
+estável, 0 falhas, 0 saídas**. `pintok` VERDE. Steady-state limpo (após slot10: 3 DispatchMessage
++ 1 compose, depois só `gpu_present`).
 
-2. 🎉 **SHCreateThread split (shcore).** Era síncrono no worker inteiro (callback+threadproc);
-   agora que a init conclui, a threadproc (RVA **0x7A880**) roda o LOOP DE MSG do taskbar (nunca
-   retorna) → o join travava a thread PRINCIPAL (deadlock). Fix: após o callback, a threadproc é
-   lançada em THREAD PRÓPRIA (a fila do win32k é GLOBAL/por-processo — `queue_pop` em
-   win32kbase.c) e o wrapper retorna → `SHCreateThread` devolve com GLOBAL_C JÁ setado.
+### Como a persistência foi RESOLVIDA (corrige o modelo da s7/s8)
+Na escada `rdi!=0` do `wWinMain` (0x23ec2..0x24035), o objeto criado em **0x23d6d** por
+`CoCreateInstance(AppResolver {660B90C8-73A9-4B58-8CAE-355B7F55341B}, IID {BA5A92AE-...})` é
+**RETIDO em `[rsp+0x58]`** até o teardown. Varredura de TODOS os acessos a `[rsp+0x58]` no
+wWinMain: entre a criação (0x23d6d) e a leitura-porteira (0x23fdb) **NÃO há escrita** — o
+"released→0" anotado na s8 estava ERRADO. No fim da escada o explorer chama, nesse objeto,
+`slot5` (vtbl+0x28, "pre-run") e **`slot10` (vtbl+0x50) = o "RUN" / loop de mensagens**. Tudo
+depois de 0x23ffe é teardown (Release/CoUninitialize/ExitProcess) — só alcançado quando o loop
+retorna. **NÃO era o DesktopExplorerHost** (a escada ExplorerHostCreator→Create não preenche
+`[rsp+0x58]`; Create só recebe rcx+rdx). E **0x23edd** é só `PostMessageW(GLOBAL_A [0x433980]=hwnd,
+0x590, 1, 0)` via delay-import (`.didat` slot 0x45D600), NÃO um loop.
 
-3. 🎉 **shell32 ord#200 REAL.** Era `shell_ord_stub`→0 → rdi=0 → teardown. Agora `shell_ord200`
-   devolve um host NÃO-NULO (0x2c0, zerado, vtable de fallback QI→self/S_OK) → **rdi != 0** →
-   o wWinMain (mode 3, `0x23ec2 test rdi`) **ENTRA na escada de persistência**.
+**Fix (combase, `specific_object_for`):** CLSID_AppResolver devolve um objeto cujo `slot10` roda
+`run_message_loop()` (GetMessage/DispatchMessage do win32k, nunca retorna). Antes `[rsp+0x58]`
+recebia o objeto UNIVERSAL (slot10 = univ_fill, retorno imediato) → wWinMain caía no ExitProcess.
 
-### ⇒ RUNTIME ATUAL (explorerreal, limpo): SEM throw, SEM hang, SEM "Sistema parado".
-Log-chave: `RegisterClass 'Shell_TrayWnd'` + `CreateWindowEx HWND #1` · `GLOBAL_C(pData+8)=0x1` ·
-`ord#200 CHAMADA`. A PRINCIPAL entra na escada (rdi!=0), mas `[rsp+0x58]`==0 → pula slot5/slot10
-→ cai no cleanup → `ExitProcess(0)`. A threadproc do taskbar (0x7A880) roda em thread própria;
-após o fix de MM da s8 ela passa da pilha (0x7A933) e avança até um deref COM nulo em 0x7A969
-(pData+0x320) — contido (mata só a thread; a principal segue). pintok VERDE. desktop PERSISTE.
+**Fix (win32kbase, `NtUserGetMessage_k` idle):** com o explorer parado no loop de msg, a thread
+PRINCIPAL vive ociosa ali. Passou a ser o lugar de manter o desktop PINTADO: 1ª volta ociosa faz
+`win32k_compose()` completo (papel de parede + taskbar); depois ~2x/s (throttle por `g_ticks`
+@100Hz) faz `win32k_refresh_taskbar()` (relógio ao vivo) sem repintar janelas.
 
-## 🧭 PRÓXIMA FRONTEIRA — a PERSISTÊNCIA (reavaliar o modelo da s7!)
-A escada `rdi!=0` do wWinMain (**0x23ec2..0x24004**) faz:
-`CoCreateInstance(CLSID_ExplorerHostCreator {AB0B37EC-56F6-4A0E-A8FD-7A8BF7C2DA96})` (0x23f31)
-→ `Create` (slot3 vtbl+0x18)({682159D9}=CLSID_DesktopExplorerHost) (0x23f56) → lê **`[rsp+0x58]`**
-(0x23fdb) → `slot5`(vtbl+0x28) + `slot10`(vtbl+0x50).
+## 🧭 PRÓXIMAS FRONTEIRAS (mapeadas na s9; todas DEEP — o visível já está pronto via compose)
+O desktop VISÍVEL é o **compose sintético** do win32k (não os pixels do explorer). As frentes
+abaixo aumentam a FIDELIDADE ("o explorer rodando de verdade por completo") mas quase não mudam a
+tela — por isso são deep/low-visible-payoff. Escolha com esse trade-off em mente.
 
-**⚠️ DESCOBERTAS DA S8 que MUDAM o modelo da s7 (que dizia "slot5/slot10 = loop de msg"):**
-- `Create` (0x23f56) só seta **rcx(this)+rdx(=CLSID)** — os demais args e o RETORNO (rax) são
-  LIXO/IGNORADOS. **O host NÃO vem dos args nem do retorno de Create.**
-- `[rsp+0x58]` é um ComPtr local **REUTILIZADO**: o AppResolver {660B90C8} é criado ali em
-  **0x23d6d** (CoCreateInstance PADRÃO, out=&[rsp+0x58]), usa slot4, e é LIBERADO→0.
-- **ord#201/ord#206** (chamados em 0x23f95/0x23fcf com rcx=rdi/ord#200) são **CLEANUP** — no
-  shell32 REAL fazem `DestroyWindow`/release (ord#201 RVA 0xa7df0: `lock inc [rcx+0x84]`,
-  `DestroyWindow([rcx+0x88])`; ord#206 0xa7de0 → salta p/ 0xa8190). ⇒ **a escada 0x23f0b-0x24004
-  é em grande parte SHUTDOWN**, e slot5/slot10 do host podem ser TEARDOWN, não o loop.
-- ⇒ **O LOOP DE MSG REAL está ANTES.** Candidatos a investigar na próxima sessão:
-  (a) **0x23edd** `call [rip+0x43971c]` (é um PONTEIRO DE FUNÇÃO em [0x45D600], NÃO import;
-      rcx=GLOBAL_A `[0x433980]`, edx=0x590, r8=r15) — a 1ª call do caminho rdi!=0; pode ser o
-      "run"/loop. Descobrir o valor de [0x45D600] em runtime.
-  (b) a **threadproc 0x7A880** (thread do taskbar) — tem try/catch; roda GetMessage/Dispatch?
-  (c) dentro de **sub_0x87568** ou seus callees (antes de devolver rdi).
-  Instrumente em runtime: logue a sequência de GetMessage(#21)/DispatchMessage(#22) por thread
-  (no win32kbase.c) p/ ver QUAL thread bloqueia num loop de msg no Windows real vs no nosso.
+1. **Threadproc do taskbar (RVA 0x7A880, tid=3, param pData=RVA 0x434820 → 0x474D820).** É o loop
+   de msg do `Shell_TrayWnd`. Hoje está **STARVED** (nunca escalonada). Se rodasse: `sub_0x7a8f0`
+   (0x7A930) faz `PeekMessageW(&msg,0,0,0,PM_REMOVE)` (NÃO-bloqueante, slot 0x45D750; nosso user32
+   devolve 0) → se 0, deref **`[pData+0x320]`** (0x7A962) p/ chamar slot5 (idle, vtbl+0x28) / slot7
+   (dispatch, vtbl+0x38). **`[pData+0x320]` é sempre 0** (único write é o zero-init em 0x15DF4;
+   `sub_0xb7b58` chamado em 0x372CE é só NULL-CHECK, não criador; a criação real está numa cadeia
+   COM/DUI da callback 0x2C5BC que NÃO exercitamos e que scans estáticos NÃO localizam — precisa de
+   write-watch em runtime). Para RODAR LIMPO precisa de DOIS fixes acoplados: (a) **fairness de
+   scheduler** — a PRINCIPAL bloqueia em `NtUserGetMessage_k` com `sti;hlt` DENTRO do syscall
+   (ring0); o timer não preempta ring0 → nenhuma outra thread roda. Fix faithful: ceder ao
+   scheduler quando o GetMessage bloqueia. (b) **popular `[pData+0x320]`** com objeto cujo slot5
+   BLOQUEIE (senão busy-spin com PeekMessage não-bloqueante). SEM (b), acordar a thread só causa
+   #PF contido em 0x7A969 (null deref) — inofensivo mas suja o log. AVISO: injetar em pData+0x320
+   pelo shcore é HACK frágil (viola o "sem stub"); o caminho faithful é fazer a criação COM/DUI da
+   callback suceder.
 
-**Estratégia recomendada:** primeiro DESCUBRA onde o Windows real persiste (qual thread/loop
-NÃO retorna), com instrumentação, ANTES de implementar. O scaffolding de
-ExplorerHostCreator/DesktopExplorerHost (com slot10=loop) já existe na combase e está PRONTO —
-mas só é exercitado se `[rsp+0x58]` for preenchido, o que hoje NÃO acontece (documentado acima).
+2. **Renderização própria da UI do explorer (DirectUI/dui70).** Massivo. O explorer desenha
+   taskbar/Start via DUI em `Shell_TrayWnd`; nós desenhamos um Win10 sintético. Reproduzir isso é
+   projeto grande (theming, GDI+, DUI). Baixa prioridade vs. esforço.
 
-**Threadproc do taskbar (0x7A880) — 4º muro RESOLVIDO na s8 (commit 6ffc6ff), novo muro à frente.**
-A pilha USER da thread ring-3 faltava em 0x7A933 (write) porque `mm_map_zero_page` (recovery de PF)
-fazia no-op p/ HUGE PAGE 2 MiB. CORRIGIDO: a recovery (roda no cr3 da thread que faltou) agora abre
-a huge page faultada p/ ring-3 (PG_USER|PG_RW). Agora a threadproc AVANÇA de 0x7A933 até **0x7A969**:
-`mov rcx,[rbx+0x320]` (rbx=pData=0x474D820) → `mov rax,[rcx]` com **rcx=NULL** → #PF cr2=0. Ou seja,
-`[pData+0x320]` deve ser um OBJETO COM (a threadproc chama slot5/vtbl+0x28 nele) que a init do
-taskbar NÃO populou. **Próximo passo p/ a threadproc RODAR:** popular `[pData+0x320]` (e outros
-campos de pData) com os objetos que a init deveria criar. Se a threadproc rodar seu loop de msg,
-dá p/ VER se ELA é a persistência (ver "PRÓXIMA FRONTEIRA"). Contido por ki_ring3_fault_contain
-(mata só a thread; a principal segue).
+3. **Cobertura COM/DLL** (`OLEAUT32`, `ole32`, `PROPSYS`, `RPCRT4` — hoje "import nao resolvido").
+   O explorer PERSISTE sem elas (não estão no caminho crítico). Implementá-las habilita subsistemas
+   mais profundos — mas nada visível hoje (a thread está parada no loop). Só vale p/ destravar um
+   comportamento específico.
+
+4. **Cenário `desktop` (regressão): explorer CASEIRO sai por WM_QUIT (PRE-EXISTENTE, não é do s9).**
+   O `win32k_inject_demo_input` (crutch de teste headless) posta um WM_QUIT GLOBAL na 1ª janela
+   simples (a de logon do winlogon, HWND #1); o winlogon consome UM WM_QUIT (o seu PostQuitMessage)
+   e o do demo-inject VAZA p/ o explorer caseiro → ele sai. Fix limpo: escopar o demo-inject só p/
+   o cenário `full` (ex.: kernel checa se guiapp.exe está nos módulos). `explorerreal` NÃO é
+   afetado (não dispara demo-inject). OBS: `desktop` é LENTO p/ chegar ao shell — use `-TimeoutSec 45`.
 
 ## 🗺️ MAPA DE RE (base disassembler = 0x140000000; runtime base logada por run;
-`explorerreal` recente = **0x04319000**; RVA = runtime − base). ⚠️ **GOTCHA: aritmética de
-`lea [rip±disp]`** — recompute `rip_APÓS_a_instr ± disp`. ⚠️ **disrange/disdll fazem sweep
-LINEAR** e dessincronizam em bytes de dados/padding — comece num boundary de instrução limpo;
-p/ achar refs a um endereço/GUID use o BYTE-SCAN (varre `48/4C 8B/89/8D modrm` por rip-rel).
-- `wWinMain`=**0x23350** (prólogo: após 5 push + `sub rsp,0x400`, **rbp = rsp + 0x100**). Mode 3
-  (shell) começa em **0x23dd7** (`call sub_0x87568`; rdi=rax).
-- `sub_0x87568` (→rdi): testa GLOBAL_A `[0x433980]`, chama `sub_0x87628`, testa GLOBAL_B
-  `[0x433978]`, chama **SHELL32!ord#200** em **0x875cd** (rbx→rdi). (Só devolve rdi!=0 se
-  sub_0x87628!=0 E GLOBAL_B==0 E ord#200!=0. GLOBAL_A/B==0 no nosso boot.)
-- `sub_0x87628`: `SHCreateThread`(threadproc=RVA **0x7A880**, pData=RVA **0x434820**, flags=0x282a,
-  callback=RVA **0x2C5B0**) e testa **GLOBAL_C** `[0x434828]`(=pData+8, setado pelo callback).
-- callback **0x2C5BC** (thunk 0x2C5B0): init pesada; **0x2C802 call 0x9DEB4** entra na cadeia
-  0x1B066→0x1A500 (lista fixada). Cria Shell_TrayWnd no meio.
-- **0x1A500**: `CoCreateInstance(TaskbandPin{90AA3A4E}, IPinnedList3{0DD79AE2})` → slot3 (out=
-  enum) [THROW_IF_FAILED 0x1ab15] → `QI(IID_IPinnedList {60274FA2})` → enum->slot3 (Next) loop.
-  Handlers de throw em 0x1ab00/15/2a/3f → `call 0x2366e4` (wil throw helper).
-- Escada persistência/shutdown: **0x23d6d** CCI(AppResolver{660B90C8}→[rsp+0x58], slot4) ·
-  **0x23ec2** `test rdi; je 0x24035`(teardown) · **0x23edd** call [0x45D600](rcx=GLOBAL_A) ·
-  **0x23f31** CCI(ExplorerHostCreator{AB0B37EC}) · **0x23f56** Create(slot3)({682159D9}) ·
-  **0x23f95** SHELL32!ord#201(rdi) [CLEANUP] · **0x23fcf** SHELL32!ord#206(rdi) [CLEANUP] ·
-  **0x23fdb** rcx=[rsp+0x58]; slot5(vtbl+0x28)/slot10(vtbl+0x50) · 0x24035 ~WorkerWindow.
-- GUIDs úteis: TaskbandPin `{90AA3A4E-1CBA-4233-B8BB-535773D48449}` · IPinnedList3
-  `{0DD79AE2-D156-45D4-9EEB-3B549769E940}` · IPinnedList `{60274FA2-611F-4B8A-A293-F27BF103D148}`
-  · AppResolver `{660B90C8-73A9-4B58-8CAE-355B7F55341B}` · ExplorerHostCreator
-  `{AB0B37EC-56F6-4A0E-A8FD-7A8BF7C2DA96}` · DesktopExplorerHost `{682159D9-C321-47CA-B3F1-30E36B2EC8B9}`.
+`explorerreal` recente = **0x04319000**; RVA = runtime − base). ⚠️ **GOTCHA `lea [rip±disp]`** —
+recompute `rip_APÓS_a_instr ± disp`. ⚠️ **disrange/disdll fazem sweep LINEAR** e dessincronizam em
+dados/padding — comece num boundary de instrução limpo.
+- `wWinMain`=**0x23350** (prólogo: `rbp = rsp_entrada − 0x328`; após `sub rsp,0x400`, **rbp = rsp
+  + 0x100**; logo `[rsp+0x58]` = rsp_entrada − 0x3D0, e `[rbp+0x30]` ≠ `[rsp+0x58]`).
+- **0x23d6d**: `CoCreateInstance(AppResolver {660B90C8}, IID {BA5A92AE-BFD7-4916-854F-6B3A402B84A8},
+  CLSCTX=3, out=&[rsp+0x58])` — o objeto da PERSISTÊNCIA. slot4 (vtbl+0x20) usado cedo em 0x23d89.
+- Mode 3 começa em 0x23dd7 (`call sub_0x87568`; rdi=rax). `sub_0x87568`→rdi: testa GLOBAL_A
+  [0x433980], `sub_0x87628` (SHCreateThread), GLOBAL_B [0x433978], **SHELL32!ord#200** (0x875cd).
+- Escada `rdi!=0` (0x23ec2..0x24035): **0x23edd** `PostMessageW([0x433980],0x590,1,0)` (delay,
+  slot 0x45D600) · 0x23ee9 call 0x2e33c · 0x23f31 CCI(ExplorerHostCreator{AB0B37EC}) · 0x23f56
+  Create(slot3)({682159D9}=DesktopExplorerHost) [só rcx+rdx] · 0x23f95 SHELL32!ord#201 [CLEANUP]
+  · 0x23fcf ord#206 [CLEANUP] · **0x23fdb** `rcx=[rsp+0x58]`(=AppResolver); if !=0: **slot5
+  (vtbl+0x28) + slot10 (vtbl+0x50=LOOP)** · 0x24004+ teardown (Release/CoUninitialize/ExitProcess).
+- Threadproc taskbar **0x7A880**: SHChangeNotifyRegisterThread → `sub_0x7b2b0` (LoadAccelerators→
+  [pData+0x108], SetThreadPriority, ChangeWindowMessageFilterEx; retorna) → `sub_0x7a8f0` (loop
+  0x7A930). Loop: PeekMessageW (0x7A945, slot 0x45D750) → deref [pData+0x320] (0x7A962 slot5 /
+  0x7A9ED slot7). WM_QUIT=0x12 sai em 0x22259f.
+- GUIDs: AppResolver `{660B90C8-73A9-4B58-8CAE-355B7F55341B}` (IID `{BA5A92AE-BFD7-4916-854F-6B3A402B84A8}`)
+  · ExplorerHostCreator `{AB0B37EC-56F6-4A0E-A8FD-7A8BF7C2DA96}` (IID `{A3FD6B4C-B949-09B7-CB3C-D3F0473AEC8F}`)
+  · DesktopExplorerHost `{682159D9-C321-47CA-B3F1-30E36B2EC8B9}` · TaskbandPin `{90AA3A4E-...}`.
+- CFG: chamadas `48 FF 15 [rip→0x3A0288]` são `__guard_dispatch_icall` (rax=alvo virtual). Outros
+  `[rip]` são IAT normal. disrange rotula "VIRT slot N (vtbl+0xNN)" pelo `mov rax,[rax+0xNN]` antes.
 
-## 🔩 GATES DE DIAGNÓSTICO (deixe em 0 nos commits)
-- **`COMBASE_DBG`** em `dll/win32/combase/combase.c:41` (=1): loga CLSID/IID de cada
-  CoCreateInstance/RoGetActivationFactory + THREAD (MAIN/WORKER) + slots do obj universal +
-  RA do slot3 (usl3). Rebuild só a combase (comando acima).
-- **`cb_log`/`cb_loghex`** (combase, SEMPRE ativos, baixo ruído): usados na escada do host
-  (ExplorerHostCreator::Create / DesktopExplorerHost::slot10). Só disparam se `[rsp+0x58]` for
-  preenchido (hoje não). Bom p/ ligar quando resolver o host.
-- **`[shcore] SHCreateThread: ... GLOBAL_C(pData+8)=`** (sempre ativo): prova a conclusão da init.
-- **`[shell32] ord#200 CHAMADA`** (sempre ativo): prova rdi!=0 (entra na escada).
-- **ucrtbase `_CxxThrowException`** (sempre ativo): loga o TIPO C++ lançado + RA + **BACKTRACE**
-  dos frames do explorer na pilha (mapeou callback→0x1B066→0x1A500 nesta sessão). Só na exceção.
-- **`EH_DBG`** em `dll/ntdll/ntdll.c` (=1): loga cada frame do dispatch de EH.
+## 🔩 GATES DE DIAGNÓSTICO (deixe em 0/baixo-ruído nos commits — HOJE OK)
+- **`COMBASE_DBG`** combase.c:51 (=0). **`EH_DBG`** ntdll.c:607 (=0).
+- Sempre-ativos baixo ruído (mantenha): `[cb] AppResolver ...` (1x) + `AppResolver::slot4/5/10`
+  (provam a escada de persistência) · `[shcore] SHCreateThread ... GLOBAL_C(pData+8)=` · `[shell32]
+  ord#200 CHAMADA` · `[shell] compose(true-color)` · ucrtbase `_CxxThrowException` (só na exceção).
 
-## 🔁 O LOOP
-`.\run.ps1 -Scenario explorerreal -Headless -TimeoutSec 55` (16 módulos num token só). Ver
-`build\serial.log`. Regressão: `.\run.ps1 -Scenario desktop -Headless -TimeoutSec 25` (shell
-caseiro tem que persistir no loop de msg). pintok: `.\run.ps1 -Scenario pintok -Headless
--TimeoutSec 40` (dourado: P1/P2/P3 PASSOU, `intercept totals ... ANTIVM x0`, DriverEntry C0000365).
+## 🔁 O LOOP / VALIDAÇÃO
+`.\run.ps1 -Scenario explorerreal -Headless -TimeoutSec 55`. Ver `build\serial.log`. Prova de
+persistência: `grep AppResolver::slot10` presente E **sem** `ExitProcess da thread PRINCIPAL`/
+`processo pid=1 encerrou`. Prova visual: `-Screendump` → `build\screen.ppm` (converta com PIL:
+`python -c "from PIL import Image; Image.open('build/screen.ppm').save('/tmp/s.png')"`). pintok:
+`.\run.ps1 -Scenario pintok -Headless -TimeoutSec 40` (P1/P2/P3 PASSOU, CPUID→Intel i7-9700K, vgk
+DriverEntry fundo). Regressão shell caseiro: `.\run.ps1 -Scenario desktop -Headless -TimeoutSec 45`
+(LENTO; ver muro 4).
 
 ## 🛠️ FERRAMENTAS (raiz, versionadas)
 `disrange.py <rva> <n>` (desmonta explorer.exe por RVA, nomeia CALL[IAT]) · **`disdll.py <pe>
-<rva> [n]`** (idem p/ QUALQUER PE — shell32/ntdll/nossos build\*.dll) · **`pdata.py <pe> <rva>`**
-(EHANDLER/UHANDLER + FuncInfo RVA) · **`funcinfo.py <pe> <rva>`** (try-blocks + tipos de catch,
-só __CxxFrameHandler3 v3) · `callers.py`/`whocalls.py` (E8 diretos) · `dumpimports.py`/
-`dumpexports.py`. **`ripref.py` BUGADO.** P/ achar refs a um endereço/GUID no .text use o
-BYTE-SCAN em python (padrão `48/4C 8B/89/8D modrm` rip-rel; resolve `A+7+disp==alvo`).
+<rva> [n]`** (idem p/ QUALQUER PE) · **`pdata.py <pe> <rva>`** (EHANDLER/UHANDLER + FuncInfo) ·
+**`funcinfo.py <pe> <rva>`** (try/catch, __CxxFrameHandler3 v3) · `whocalls.py`/`callers.py` (E8
+diretos) · `dumpimports.py`/`dumpexports.py`. **`ripref.py` BUGADO** — p/ refs a endereço/GUID use
+BYTE-SCAN em python (padrão `48/4C 8B/89/8D modrm` rip-rel; p/ +0xNNN: SIB=0x24, disp32=0xNNN).
 
 ## ⛔ REGRA DE OURO — pintok.sys. NÃO QUEBRAR.
-Após CADA incremento no KERNEL: `.\run.ps1 -Scenario pintok -Headless -TimeoutSec 40`. As
-mudanças da s8 foram TODAS em userland (combase/shcore/shell32/ucrtbase) → pintok intocado
-(ring-0, `g_ring3_active=0` no cenário pintok). Syscalls novos: append no FIM do `s_ssdt[]`
-(último = **#52 sys_module_for_pc**). Se for corrigir a pilha ring-3 read-only (kernel), RODE O
-PINTOK depois.
+Após CADA incremento no KERNEL: `.\run.ps1 -Scenario pintok -Headless -TimeoutSec 40`. Syscalls
+novos: append no FIM do `s_ssdt[]` (último = **#52 sys_module_for_pc**). A mudança de kernel da s9
+(compose/refresh no idle do GetMessage) NÃO afeta pintok (sem ring-3/janelas no cenário pintok).
 
 ## 📌 NOTAS / GOTCHAS
 - **Objeto UNIVERSAL da combase** (slots 6-63 = univ_fill S_OK; 3-5 = E_NOTIMPL): SCAFFOLD. NÃO
-  estenda p/ slots 3-5 (catch-all proibido → #PF por deref de field). Implemente objetos
-  ESPECÍFICOS por CLSID em `specific_object_for()` (já tem TaskbandPin + ExplorerHostCreator).
-- **Toolchain gnu** (`-target x86_64-windows-gnu`): NÃO tem SEH/catch MSVC. NÃO dá p/ pôr `catch`
-  nas NOSSAS DLLs p/ capturar o throw do explorer. Não morrer no throw = init suceder (sem throw).
-- A fila de msg do win32k é **GLOBAL** (por-processo, não por-thread) — por isso a threadproc do
-  taskbar pôde ir p/ thread própria sem quebrar o Shell_TrayWnd.
-- `CoRegisterClassObject` NÃO é chamado pelo explorer (verificado) — o host NÃO vem de fábrica
-  registrada in-proc.
-- Threads ring-3 têm pilha/TEB na faixa do PMM (0x04Bx/0x05Cxxxxx); a PRINCIPAL em
-  [0x600000,0x700000). sys_exit/ki_ring3_fault_contain distinguem por isso.
-- Imports não resolvidos (só crasham SE chamados): `RPCRT4`, `WININET`, `OLEAUT32`, `PROPSYS`,
-  `ole32`, `CoreMessaging`, `api-ms-win-appmodel-*`.
-- `run.ps1` roda `-smp 2 -accel tcg,thread=multi`. SDK em
-  `C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um\`.
+  estenda p/ slots 3-5 (catch-all proibido). Implemente objetos ESPECÍFICOS por CLSID em
+  `specific_object_for()` (já tem TaskbandPin, ExplorerHostCreator, **AppResolver**).
+- **Toolchain gnu** (`-target x86_64-windows-gnu`): sem SEH/catch MSVC nas NOSSAS DLLs.
+- Fila de msg do win32k é **GLOBAL** (por-processo). `NtUserGetMessage_k` bloqueia com `sti;hlt`
+  enquanto `s_nwin>0` (Shell_TrayWnd mantém vivo) e faz compose/refresh/present por volta ociosa.
+- Threads ring-3: pilha/TEB na faixa do PMM (0x04Bx/0x05Cxxxxx); a PRINCIPAL em [0x600000,0x700000).
+  fault de ring-3 mata SÓ a thread (ki_ring3_fault_contain).
+- `run.ps1` roda `-smp 2 -accel tcg,thread=multi`. AP sem timer local (bug TCG) → sem preempção no AP.
+- SDK em `C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um\`.
 
-## 📜 COMMITS DA SESSÃO 8 (branch `main`; SEM Co-Authored-By)
-- `3e57d3b` feat(combase+shcore+shell32): explorer REAL conclui a init do taskbar (Shell_TrayWnd)
-  e entra na escada de persistencia. (IPinnedList3 real + SHCreateThread split + shell32 ord#200 +
-  scaffolding ExplorerHostCreator/DesktopExplorerHost + backtrace no _CxxThrowException.)
-- `6ffc6ff` fix(mm): map-zero recovery conserta perms de HUGE PAGE 2 MiB (não era no-op) — a
-  threadproc do taskbar (0x7A880) passa de 0x7A933 e avança até 0x7A969 (deref COM nulo em
-  pData+0x320). Beneficia TODA thread ring-3. pintok VERDE.
-- `3ec97a0` / `73b9aff` docs: PROMPT + diagnóstico da threadproc.
+## 📜 COMMITS DA SESSÃO 9 (branch `main`; SEM Co-Authored-By)
+- `364e96e` explorer real persiste com desktop pintado (AppResolver::slot10 = loop de msg retido
+  em [rsp+0x58]; win32kbase idle pinta o desktop + relógio).
+- combase: reduz ruído do log do AppResolver (1x, não por consumidor).
+- docs: README + PROMPT-PROXIMA-SESSAO atualizados p/ o marco.
 
-**Agora: DESCUBRA onde o explorer real PERSISTE (qual thread/loop não retorna) — instrumente
-GetMessage/Dispatch por thread e siga 0x23edd/[0x45D600] e a threadproc 0x7A880. Corrija a pilha
-ring-3 read-only (fault 0x7A933) p/ a threadproc do taskbar sobreviver. Derrube o muro da
-persistência DE VERDADE (o explorer NÃO deve chamar ExitProcess) → desktop PERSISTENTE. Vá, sem
-parar, até ~600k.**
+**Agora: o marco (persistência + pintura) está feito. As próximas fronteiras são de FIDELIDADE
+PROFUNDA (threadproc do taskbar + scheduler; DUI; COM) — deep e de baixo payoff visível. Se for na
+threadproc do taskbar, faça FAITHFUL: rastreie em runtime onde a callback cria `[pData+0x320]`
+(write-watch) e faça a cadeia COM/DUI suceder — NÃO injete no pData. Vá, sem parar, até ~600k.**

@@ -461,6 +461,15 @@ void isr_handler(struct regs* r) {
             }
             kputs("\n  (desmonte o .exe/DLL nesses enderecos p/ achar o call-site)\n");
         }
+        // Frente C: um fault IRRECUPERAVEL de RING-3 (processo de usuario) NAO deve haltar o
+        // OS. Contem: mata a thread WORKER (o shell segue) ou encerra o PROCESSO se for a
+        // PRINCIPAL — o kernel sobrevive. So RING-3 (CS RPL=3, ou rip=0 vindo de ring-3 com
+        // U=1). Um fault de RING-0 (bug do kernel; pintok e' ring-0 mas nunca faulta ate aqui)
+        // ainda cai no halt de verdade abaixo. NAO retorna.
+        if (((r->cs & 3) == 3) || (r->rip == 0 && (r->err_code & 4))) {
+            extern void ki_ring3_fault_contain(uint64_t rsp);
+            ki_ring3_fault_contain(r->rsp);
+        }
         kputs("\nSistema parado.\n");
         for (;;) __asm__ volatile ("cli; hlt");
     }

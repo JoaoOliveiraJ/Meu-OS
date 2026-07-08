@@ -205,6 +205,28 @@ static void sys_exit(struct regs* r) {
     __builtin_longjmp(g_user_exit, 1);
 }
 
+// ki_ring3_fault_contain(rsp) — chamada pelo isr_handler quando um fault de RING-3 e'
+// IRRECUPERAVEL (o recovery de page-fault falhou). Um fault num PROCESSO DE USUARIO
+// JAMAIS deve derrubar o kernel/OS — no maximo mata a thread ou o processo. e' a mesma
+// politica de contencao do sys_exit, mas para faults de HARDWARE (#PF/#GP/#UD) em vez de
+// ExitProcess. Distingue pela faixa da pilha (identico ao sys_exit):
+//   - WORKER (pilha no PMM, fora de [0x600000,0x700000)): mata SO a thread e acorda os
+//     waiters. e' o que impede que um worker do explorer que derefa lixo (o objeto COM
+//     universal e' incompleto) HALTE o OS — o WaitForSingleObject da principal retorna e
+//     o shell segue. (O longjmp(g_user_exit) e' o buffer da PRINCIPAL; pular p/ ele de
+//     outra thread seria UB — por isso o worker so mata a si mesmo.)
+//   - PRINCIPAL (pilha em [0x600000,0x700000)): encerra o PROCESSO (longjmp p/ o kernel,
+//     como o ExitProcess da principal). O processo morre; o OS sobrevive.
+// NAO retorna. Fault de RING-0 (bug do kernel) NAO passa por aqui -> ainda halta (correto).
+void ki_ring3_fault_contain(uint64_t rsp) {
+    if (rsp >= 0x600000ULL && rsp < 0x700000ULL) {
+        kputs("[fault] RING-3 principal irrecuperavel -> encerra o processo (OS sobrevive)\n");
+        __builtin_longjmp(g_user_exit, 1);
+    }
+    kputs("[fault] RING-3 worker irrecuperavel -> termina so a thread (shell segue)\n");
+    ki_ring3_thread_exit();   // marca TERMINATED, acorda waiters, cede p/ sempre — NAO retorna
+}
+
 // Reconhece um nome de Named Pipe (qualquer das formas Win32/NT).
 static char sc_lower(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
 static int  sc_starts(const char* s, const char* p) {

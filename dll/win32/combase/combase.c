@@ -515,7 +515,11 @@ static void* specific_object_for(const GUID_* clsid) {
     if (!clsid) return 0;
     if (guid_eq(clsid, &CLSID_TaskbandPin))         return pinnedlist_object();
     if (guid_eq(clsid, &CLSID_ExplorerHostCreator)) return explorerhostcreator_object();
-    if (guid_eq(clsid, &CLSID_AppResolver)) { cb_log("[cb] AppResolver {660B90C8} solicitado -> host de PERSISTENCIA (slot10=loop)\n"); return appresolver_object(); }
+    if (guid_eq(clsid, &CLSID_AppResolver)) {
+        static int logged = 0;   // varios servicos pedem o AppResolver na init; loga so 1x (baixo ruido)
+        if (!logged) { logged = 1; cb_log("[cb] AppResolver {660B90C8} -> host de PERSISTENCIA (slot10 = loop de msg do wWinMain)\n"); }
+        return appresolver_object();
+    }
     return 0;
 }
 
